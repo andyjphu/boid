@@ -6,4 +6,5 @@ API-key access.
 The goal is useful work, done quickly and with good judgment. Boid should
 improve with experience and make effective use of agents working together.
 
-[Principles](PRINCIPLES.md) describes the behavior expected of Boid.
+Boid's code and intended agent guidance belong in [src/](src/).
+[bootstrap/](bootstrap/) holds temporary context for agents developing Boid.
