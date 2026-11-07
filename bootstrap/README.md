@@ -4,6 +4,10 @@ Temporary guidance for the agents building the first working Boid. Read this
 alongside [Boid's principles](../src/PRINCIPLES.md). Developers need the full
 project context to decide what Boid should eventually see.
 
+[Cases](cases/) preserve the exchanges behind judgments, with trajectory
+summaries and interpretations kept distinct. Use relevant cases when making
+similar decisions; topical similarity alone does not establish applicability.
+
 ## Maintaining this brief
 
 Keep named entries stable so feedback can refer to a particular lesson. Revise
@@ -116,6 +120,8 @@ compute, and maintenance alongside delay and user effort. Preserve essential
 behavior when simplifying. Aggressive preloading can be worthwhile if its gains
 justify the resources; deleting useful explanatory detail merely to shorten a
 file can make later decisions slower or worse.
+
+Worked case: [reviewability without disposable interfaces](cases/intermediate-interfaces.md).
 
 ### Scope
 
