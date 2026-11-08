@@ -255,5 +255,41 @@ Reference inspected: OpenAI Codex `a90c80840869a8cfb313ef181d7721997b86c8e5`,
 this pass are stable text selection, retaining a reading position across
 resizing, and associating commands with their results. The Rust terminal
 renderer depends on Codex's protocol and application state; these behaviors
-fit Boid's DOM without importing that renderer. Reasoning and tool output stay
-visible; Codex's compact-output defaults are not automatically appropriate here.
+fit Boid's DOM without importing that renderer. That pass kept reasoning and
+tool output expanded; Andy subsequently chose compact inline expansion below.
+
+## Agree the cuts before building
+
+After that pass, Andy asked:
+
+> hm, so what exactly did you take away from "reproducing codex:
+
+> i said you can ask me, this is a grey area, i know it is
+
+The implementation had borrowed three useful behaviors while retaining the
+independently designed pane. That did not establish a recognizable Codex
+baseline. Keeping Boid's engine had resolved execution ownership, not interface
+fidelity. The three improvements were still useful; the mistake was treating
+them as a sufficient interpretation without discussing the remaining choice.
+
+Andy chose to review cuts first:
+
+> lets propose cuts before building it;
+
+The proposal retained a text-first transcript, prompt gutter, Markdown, tool
+activities and bottom composer; omitted the command catalogue, ancillary modes,
+startup banner and persistent shortcut legend; and kept Andy's keyboard choices
+and browser scrolling. The outstanding output-density choice was answered:
+
+> prefer compact tool output expandable inline, reasoning shown in chat similar to a tool output
+
+This supersedes the earlier expanded-output default. Keep a live preview in the
+conversation and expand retained content in place, including reasoning. Label
+provider-exposed summaries honestly; the UI does not reveal hidden reasoning.
+
+Andy also requested a populated preview:
+
+> when you relaunch the live server according to your changes, interact the agent so its prefiled to a point i can look at behaviors across the spectrum and make sure the surface of boid is rendering properly
+
+Use actual agent interactions and retain them for inspection. Synthetic browser
+fixtures can verify UI mechanics but do not satisfy this live-preview request.

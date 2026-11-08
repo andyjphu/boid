@@ -196,7 +196,9 @@ function addSession(view) {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
   }
-  ui.input.addEventListener("input", resizeInput);
+  let historyIndex = null;
+  let savedDraft = "";
+  ui.input.addEventListener("input", () => { historyIndex = null; resizeInput(); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -204,6 +206,21 @@ function addSession(view) {
   });
   traceResize.observe(ui.trace);
   ui.input.addEventListener("keydown", event => {
+    if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+        && ui.input.selectionStart === ui.input.selectionEnd) {
+      const prompts = [...ui.entries.values()].filter(item => item.kind === "user").map(item => item.text);
+      const up = event.key === "ArrowUp" && ui.input.selectionStart === 0;
+      const down = event.key === "ArrowDown" && ui.input.selectionEnd === ui.input.value.length;
+      if ((up && prompts.length) || (down && historyIndex !== null)) {
+        event.preventDefault();
+        if (historyIndex === null) { savedDraft = ui.input.value; historyIndex = prompts.length; }
+        historyIndex = Math.max(0, Math.min(prompts.length, historyIndex + (up ? -1 : 1)));
+        ui.input.value = historyIndex === prompts.length ? savedDraft : prompts[historyIndex];
+        ui.input.setSelectionRange(up ? 0 : ui.input.value.length, up ? 0 : ui.input.value.length);
+        resizeInput();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       ui.composer.requestSubmit();
@@ -218,7 +235,7 @@ function addSession(view) {
     try {
       ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
       await ui.submission;
-      if (ui.input.value === text) { ui.input.value = ""; resizeInput(); }
+      if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
     } catch (error) { showError(ui.error, error); }
     finally { ui.sending = false; ui.submission = null; }
   });
@@ -258,6 +275,33 @@ function toolOutcome(result) {
   return { label: "Completed", failed: false };
 }
 
+function compactOutput(ui, item, content, text, label = "Output") {
+  const details = element("details", "activity-details");
+  const openKey = `expanded${label}`;
+  details.open = Boolean(item[openKey]);
+  const summary = element("summary");
+  summary.title = `Expand or collapse ${label.toLowerCase()}`;
+  summary.append(element("span", "activity-label", label));
+  const lines = text.trimEnd().split("\n");
+  const preview = element("pre", "activity-preview", (label === "Command" ? lines.slice(0, 1) : lines.slice(-3)).join("\n") || "No output");
+  summary.append(preview);
+  content.classList.add("activity-full");
+  details.append(summary, content);
+  summary.addEventListener("click", () => {
+    item[openKey] = !details.open;
+    ui.follow = false;
+    ui.latest.hidden = false;
+    rememberPosition(ui);
+  });
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected) return;
+    if (Boolean(item[openKey]) === details.open) return;
+    item[openKey] = details.open;
+    rememberPosition(ui);
+  });
+  return details;
+}
+
 function renderToolEntry(ui, item) {
   const { node, body, kind } = item;
   const tool = toolEntry(item.text);
@@ -292,8 +336,13 @@ function renderToolEntry(ui, item) {
   header.append(element("span", "tool-name", label));
   if (kind === "tool_call" || !joined) {
     if (kind === "tool_call" || call) {
-      header.append(element("pre", "tool-text tool-command", command.value?.command
-        ?? (command.value !== undefined ? JSON.stringify(command.value, null, 2) : command.payload)));
+      const text = command.value?.command
+        ?? (command.value !== undefined ? JSON.stringify(command.value, null, 2) : command.payload);
+      const commandBody = element("pre", "tool-text", text);
+      const commandView = text.includes("\n") || text.length > 120
+        ? compactOutput(ui, item, commandBody, text, "Command") : commandBody;
+      commandView.classList.add("tool-command");
+      header.append(commandView);
     }
     const status = element("span", "tool-status", outcome.label);
     header.append(status);
@@ -320,7 +369,8 @@ function renderToolEntry(ui, item) {
   } else {
     output.append(element("pre", "tool-text", value !== undefined ? JSON.stringify(value, null, 2) : tool.payload || item.text));
   }
-  body.append(output);
+  const preview = [...output.children].map(child => child.textContent).join("\n");
+  body.append(compactOutput(ui, item, output, preview));
 }
 
 function renderEntry(ui, item) {
@@ -331,6 +381,13 @@ function renderEntry(ui, item) {
     for (const link of body.querySelectorAll("a")) {
       link.target = "_blank";
       link.rel = "noopener noreferrer";
+    }
+    if (kind === "reasoning") {
+      const content = element("div", "reasoning-output");
+      content.append(...body.childNodes);
+      const preview = [...content.children].map(child => child.textContent).join("\n");
+      body.append(compactOutput(ui, item, content, preview, "Reasoning"));
+      body.title = "Provider-exposed reasoning summary";
     }
   } else if (kind === "tool_call" || kind === "tool_result") {
     renderToolEntry(ui, item);
@@ -357,7 +414,6 @@ function putEntry(ui, entry, delta = false) {
       details.append(raw);
       node.append(details);
     } else {
-      if (kind === "reasoning") node.append(element("div", "entry-kind", "Reasoning summary"));
       if (kind === "context") node.append(element("div", "entry-kind", "Context"));
       node.append(body);
     }

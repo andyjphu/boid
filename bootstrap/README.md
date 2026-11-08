@@ -389,6 +389,13 @@ context, and load lessons when relevant.
   them. Andy authorized the first pane revision; this supersedes the earlier
   implementation pause. The updated preview is for his UX review, not evidence
   of UX acceptance.
+  Andy subsequently chose compact tool output with inline expansion and
+  reasoning displayed the same way within the conversation. Reproduce Codex's
+  transcript and composer baseline with the discussed cuts; inspecting a few
+  behaviors and keeping an independently designed pane was insufficient.
+  Populate the relaunched preview through real agent interactions so Andy can
+  inspect the different rendering cases. See the audience case for the exact
+  feedback and the distinction between fixtures and live conversations.
 - Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
   support and configuration; the current reasoning-summary stream does not
   establish Daybreak support. This is v5 scope, not part of PR #4.
