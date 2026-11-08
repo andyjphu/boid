@@ -211,7 +211,7 @@ function followLatest(ui) {
 function closeModelPicker(ui) {
   ui.modelPicker.hidden = true;
   ui.composer.hidden = false;
-  ui.activity.lastChild.textContent = " · Esc to interrupt";
+  ui.activity.lastChild.textContent = "Esc to interrupt";
   ui.input.focus({ preventScroll: true });
 }
 
@@ -266,7 +266,7 @@ function addSession(view) {
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
-  ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
+  ui.activity.append("Esc to interrupt");
   ui.modelPicker = element("div", "model-picker");
   ui.modelPicker.hidden = true;
   ui.modelPicker.tabIndex = -1;
@@ -387,8 +387,8 @@ function setStatus(ui, status) {
   if (ui.view) ui.view.status = status;
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
-  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
-  ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
+  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  ui.status.textContent = "";
 }
 
 function toolEntry(text) {
@@ -1067,12 +1067,22 @@ function addSetup(saved) {
     input.name = key;
     input.value = values[key];
     if (key === "message") input.rows = 4;
+    let untouchedDefault = input.value === agentDefaults[key];
     const update = () => {
-      input.classList.toggle("default-value", input.value === agentDefaults[key]);
+      input.classList.toggle("default-value", untouchedDefault);
       rememberPaneOrder();
     };
-    input.addEventListener("input", update);
-    input.classList.toggle("default-value", input.value === agentDefaults[key]);
+    const replaceDefault = () => {
+      if (!untouchedDefault) return;
+      untouchedDefault = false;
+      input.value = "";
+      input.setSelectionRange(0, 0);
+      update();
+    };
+    input.addEventListener("beforeinput", replaceDefault);
+    input.addEventListener("compositionstart", replaceDefault);
+    input.addEventListener("input", () => { untouchedDefault = false; update(); });
+    input.classList.toggle("default-value", untouchedDefault);
     wrapper.append(input);
     ui.form.append(wrapper);
   }
