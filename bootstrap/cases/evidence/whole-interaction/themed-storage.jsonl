@@ -1,0 +1,6 @@
+{"dir":"/evidence/bind","input_bytes":34747,"mode":"raw","records":221,"serialize_ms":1178.242448,"total_ms":1178.348366,"writes":21986}
+{"dir":"/evidence/bind","input_bytes":34747,"mode":"buffered","records":221,"serialize_ms":1.267303,"total_ms":1.348428,"writes":5}
+{"dir":"/evidence/bind","input_bytes":34747,"mode":"vec","records":221,"serialize_ms":1.085426,"total_ms":1.130176,"writes":1}
+{"dir":"/memory","input_bytes":34747,"mode":"raw","records":221,"serialize_ms":4.9915840000000005,"total_ms":4.991834,"writes":21986}
+{"dir":"/memory","input_bytes":34747,"mode":"buffered","records":221,"serialize_ms":0.925467,"total_ms":0.925675,"writes":5}
+{"dir":"/memory","input_bytes":34747,"mode":"vec","records":221,"serialize_ms":1.099134,"total_ms":1.099343,"writes":1}

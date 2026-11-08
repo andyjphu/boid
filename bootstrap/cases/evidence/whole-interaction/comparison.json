@@ -1,0 +1,74 @@
+{
+  "baseline": {
+    "rows": [
+      {
+        "prompt_ready_ms": 68,
+        "cwd_event_ms": 597,
+        "label_ms": 597,
+        "event_to_label_ms": 0
+      },
+      {
+        "prompt_ready_ms": 78,
+        "cwd_event_ms": 847,
+        "label_ms": 847,
+        "event_to_label_ms": 0
+      },
+      {
+        "prompt_ready_ms": 64,
+        "cwd_event_ms": 1066,
+        "label_ms": 1066,
+        "event_to_label_ms": 0
+      },
+      {
+        "prompt_ready_ms": 64,
+        "cwd_event_ms": 1261,
+        "label_ms": 1261,
+        "event_to_label_ms": 0
+      }
+    ],
+    "http_max_ms": 1163,
+    "sent_types": {
+      "control": 1,
+      "resize": 1,
+      "input": 8
+    },
+    "long_tasks": 0,
+    "raf_gaps_over100ms": 0
+  },
+  "fixed": {
+    "rows": [
+      {
+        "prompt_ready_ms": 98,
+        "cwd_event_ms": 101,
+        "label_ms": 101,
+        "event_to_label_ms": 0
+      },
+      {
+        "prompt_ready_ms": 79,
+        "cwd_event_ms": 115,
+        "label_ms": 116,
+        "event_to_label_ms": 1
+      },
+      {
+        "prompt_ready_ms": 64,
+        "cwd_event_ms": 100,
+        "label_ms": 100,
+        "event_to_label_ms": 0
+      },
+      {
+        "prompt_ready_ms": 62,
+        "cwd_event_ms": 101,
+        "label_ms": 102,
+        "event_to_label_ms": 1
+      }
+    ],
+    "http_max_ms": 13,
+    "sent_types": {
+      "control": 1,
+      "resize": 1,
+      "input": 8
+    },
+    "long_tasks": 0,
+    "raf_gaps_over100ms": 0
+  }
+}
