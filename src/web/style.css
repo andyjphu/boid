@@ -84,7 +84,7 @@ body.disconnected .workspace-actions,
   border-right: 1px solid #3d3d3d;
 }
 .pane-icon, .pane-icon svg { display: block; width: 14px; height: 14px; flex-shrink: 0; color: #aaa; }
-.pane-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-title { font-weight: 400; color: #eee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-title:focus-visible { outline: 1px solid #777; outline-offset: 1px; }
 .pane-name-input { min-width: 4ch; max-width: 24ch; padding: 0 2px; border: 1px solid #555; background: #181818; color: inherit; }
 .pane-status { font-size: 11px; color: #aaa; margin-left: auto; padding: 4px; white-space: nowrap; }
@@ -189,16 +189,17 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .slash-suggestion { cursor: pointer; }
 .working-status { flex-shrink: 0; padding: 0 4px 4px; color: #999; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .agent-pane[data-status="working"] .pane-title, .working-label {
-  font-weight: 600;
+  font-weight: 400;
   color: transparent;
-  background: linear-gradient(110deg, #999 35%, #eee 50%, #999 65%);
+  background: linear-gradient(110deg, #ccc 35%, #fff 50%, #ccc 65%);
   background-size: 200% 100%;
   background-clip: text;
   animation: working-shimmer 1s linear infinite;
 }
+.working-label { font-weight: 600; background-image: linear-gradient(110deg, #999 35%, #eee 50%, #999 65%); }
 @keyframes working-shimmer { from { background-position: 200% 0; } to { background-position: 0 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .agent-pane[data-status="working"] .pane-title, .working-label { animation: none; background: none; color: #aaa; }
+  .agent-pane[data-status="working"] .pane-title, .working-label { animation: none; background: none; color: #eee; }
 }
 .composer { display: flex; gap: .5ch; height: 0; min-height: 0; overflow: hidden; border: 0; padding: 0 4px; flex-shrink: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 0; pointer-events: none; }
 .pane:hover .composer,

@@ -142,8 +142,8 @@ function makePane(name, cwd, kind, id) {
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  tab.append(close, paneIcon(kind), title, directory);
-  header.append(tab, status);
+  tab.append(paneIcon(kind), title, directory);
+  header.append(tab, status, close);
   pane.append(header);
   workspace.append(pane);
   return { pane, header, tab, title, status, directory, error, close };
@@ -217,7 +217,7 @@ function followLatest(ui) {
 function closeModelPicker(ui) {
   ui.modelPicker.hidden = true;
   ui.composer.hidden = false;
-  ui.activity.lastChild.textContent = " · Esc to interrupt";
+  updateActivity(ui);
   ui.input.focus({ preventScroll: true });
 }
 
@@ -225,7 +225,7 @@ async function openModelPicker(ui) {
   ui.slashSuggestion.hidden = true;
   ui.composer.hidden = true;
   ui.modelPicker.hidden = false;
-  ui.activity.lastChild.textContent = "";
+  updateActivity(ui);
   ui.modelAvailable = false;
   ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
   ui.modelPicker.focus({ preventScroll: true });
@@ -389,11 +389,22 @@ function addSession(view) {
   return ui;
 }
 
-function setStatus(ui, status) {
-  if (ui.view) ui.view.status = status;
+function updateActivity(ui) {
+  const since = ui.view?.working_since_ms;
+  const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
+  const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hint = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
+}
+
+function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
+  if (ui.view) {
+    ui.view.status = status;
+    ui.view.working_since_ms = status === "working" ? workingSince : null;
+  }
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
-  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
+  updateActivity(ui);
   ui.status.textContent = "";
 }
 
@@ -783,7 +794,7 @@ function startEvents() {
       }
       if (message.type === "entry") putEntry(ui, message.entry);
       if (message.type === "delta") putEntry(ui, { id: message.entry_id, text: message.text }, true);
-      if (message.type === "status") setStatus(ui, message.status);
+      if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null);
     } catch (error) { showError(workspaceError, error); }
   };
 }
@@ -1282,6 +1293,9 @@ document.addEventListener("keydown", async event => {
   catch (error) { showError(ui.error, error); }
   finally { ui.interrupting = false; }
 });
+setInterval(() => {
+  for (const ui of sessions.values()) if (ui.view?.status === "working") updateActivity(ui);
+}, 1000);
 initialize();
 window.addEventListener("resize", layout, { passive: true });
 layout();
