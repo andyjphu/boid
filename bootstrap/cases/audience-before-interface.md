@@ -101,3 +101,12 @@ peripheral awareness of several agents, not approval of each session's UX.
 Andy praised the question's relevance, not a proposed design. The desired
 interaction with an individual agent remains to be elicited; do not substitute
 another familiar interface or infer it from this rejection alone.
+
+Andy then supplied a positive reference:
+
+> claude code is probably the closest so far; why?
+
+This establishes Claude Code as the closest reference so far, not blanket
+approval of its features or a decision to clone it. The reasons remain to be
+confirmed; Woo's analysis of hierarchy, direct interaction and control of
+attention is an interpretation, not an additional user requirement.
