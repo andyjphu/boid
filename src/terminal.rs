@@ -43,7 +43,8 @@ struct Hub {
 struct Terminal {
     id: String,
     name: Mutex<String>,
-    cwd: String,
+    cwd: Mutex<String>,
+    cwd_observed: AtomicBool,
     running: AtomicBool,
     output_done: AtomicBool,
     closed: AtomicBool,
@@ -138,6 +139,8 @@ struct Summary {
     #[serde(default)]
     name: String,
     cwd: String,
+    #[serde(default)]
+    cwd_observed: bool,
     running: bool,
     status: String,
     archived: bool,
@@ -367,7 +370,8 @@ impl Terminal {
         let terminal = Arc::new(Self {
             id,
             name: Mutex::new(name),
-            cwd: cwd.to_string_lossy().into_owned(),
+            cwd: Mutex::new(cwd.to_string_lossy().into_owned()),
+            cwd_observed: AtomicBool::new(false),
             running: AtomicBool::new(true),
             output_done: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -410,11 +414,41 @@ impl Terminal {
         Summary {
             id: self.id.clone(),
             name: self.name.lock().unwrap().clone(),
-            cwd: self.cwd.clone(),
+            cwd: self.cwd.lock().unwrap().clone(),
+            cwd_observed: self.cwd_observed.load(Ordering::SeqCst),
             running: self.running.load(Ordering::SeqCst),
             status: self.status.lock().unwrap().clone(),
             archived: self.archived.load(Ordering::SeqCst),
             persistence_error: self.persistence_error.lock().unwrap().clone(),
+        }
+    }
+
+    // The caller holds the unreaped child handle, so a reused PID cannot be
+    // mistaken for this shell. Never infer cwd from terminal bytes or commands.
+    fn observe_cwd(&self, pid: Option<u32>) {
+        #[cfg(target_os = "linux")]
+        let observed = pid.and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok());
+        #[cfg(not(target_os = "linux"))]
+        let observed: Option<PathBuf> = {
+            let _ = pid;
+            None
+        };
+        let available = observed.is_some();
+        let mut changed = self.cwd_observed.swap(available, Ordering::SeqCst) != available;
+        if let Some(path) = observed {
+            let path = path.to_string_lossy().into_owned();
+            let mut cwd = self.cwd.lock().unwrap();
+            if *cwd != path {
+                *cwd = path;
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(error) = self.checkpoint() {
+                *self.persistence_error.lock().unwrap() = Some(error.to_string());
+            }
+            self.catalog
+                .terminal_upsert(serde_json::to_value(self.summary()).unwrap());
         }
     }
 
@@ -507,6 +541,7 @@ impl Terminal {
         if let Some(live) = self.live() {
             let mut child = live.child.lock().unwrap();
             if child.try_wait()?.is_none() {
+                self.observe_cwd(child.process_id());
                 if let Some(pid) = child.process_id() {
                     let foreground = live.master.lock().unwrap().process_group_leader();
                     kill_session_groups(pid as i32, foreground);
@@ -622,7 +657,8 @@ impl Terminal {
                 meta.name
             }),
             id: meta.id,
-            cwd: meta.cwd,
+            cwd: Mutex::new(meta.cwd),
+            cwd_observed: AtomicBool::new(meta.cwd_observed),
             running: AtomicBool::new(false),
             output_done: AtomicBool::new(true),
             closed: AtomicBool::new(true),
@@ -754,7 +790,10 @@ async fn create(
                         Some(format!("\r\n[Shell exited: {status}]\r\n"))
                     }
                     Err(error) => Some(format!("\r\n[Shell status error: {error}]\r\n")),
-                    Ok(None) => None,
+                    Ok(None) => {
+                        monitoring.observe_cwd(child.process_id());
+                        None
+                    }
                 }
             };
             if let Some(message) = outcome {
@@ -966,6 +1005,71 @@ mod persistence_tests {
     use super::*;
     use crate::api::Client;
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shell_directory_changes_publish_and_survive_end() {
+        let repository = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let root = repository.path().canonicalize().unwrap();
+        let destination = root.join("nested directory");
+        fs::create_dir(&destination).unwrap();
+        let catalog = Catalog::new(Client::test_client()).unwrap();
+        let hub = TerminalHub::open(root.clone(), state.path().into(), catalog.clone()).unwrap();
+        let (_, mut events) = catalog.subscribe();
+        let Json(created) = create(
+            State(hub.clone()),
+            Json(Create {
+                cwd: None,
+                cols: None,
+                rows: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.cwd, root.to_string_lossy());
+        let terminal = hub.find(&created.id).unwrap();
+        {
+            let live = terminal.live().unwrap();
+            let mut writer = live.writer.lock().unwrap();
+            writer.write_all(b"cd 'nested directory'\r").unwrap();
+            writer.flush().unwrap();
+        }
+        let changed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["type"] == "terminal"
+                    && event["terminal"]["id"] == created.id
+                    && event["terminal"]["cwd"] == destination.to_string_lossy().as_ref()
+                    && event["terminal"]["cwd_observed"] == true
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(terminal.summary().cwd, destination.to_string_lossy());
+        assert_eq!(changed["terminal"]["running"], true);
+        close(State(hub.clone()), Path(created.id.clone()))
+            .await
+            .unwrap();
+        assert!(terminal.summary().archived);
+        assert_eq!(terminal.summary().cwd, destination.to_string_lossy());
+        let recovered = Terminal::restore(
+            state
+                .path()
+                .join("terminals")
+                .join(format!("{}.jsonl", created.id)),
+            catalog,
+        )
+        .unwrap();
+        assert_eq!(recovered.summary().cwd, destination.to_string_lossy());
+        assert!(recovered.summary().cwd_observed);
+        assert!(recovered.summary().archived);
+        assert!(recovered.live().is_none());
+        hub.shutdown().await.unwrap();
+    }
+
     #[test]
     fn terminal_recovery_keeps_replay_and_never_restarts_a_shell() {
         let directory = tempfile::tempdir().unwrap();
@@ -974,6 +1078,7 @@ mod persistence_tests {
             id: "term-recovery".into(),
             name: "Research shell".into(),
             cwd: directory.path().display().to_string(),
+            cwd_observed: false,
             running: true,
             status: "running".into(),
             archived: false,
