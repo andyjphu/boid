@@ -76,7 +76,7 @@ body.disconnected .workspace-actions,
   align-items: center;
   gap: 5px;
   min-width: 0;
-  padding: 4px;
+  padding: 4px 8px 4px 4px;
   background: #222;
   border: 1px solid #3d3d3d;
   border-left: 0;
