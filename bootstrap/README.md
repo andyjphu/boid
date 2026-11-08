@@ -368,10 +368,16 @@ context, and load lessons when relevant.
 
 - Rework the web UX with Andy (2026-11-08). His assessment of the preview:
   "i just really hate the web interface's ux, and makes me question your
-  judgement in underlying code implementation". Identify the interaction
-  problems before choosing a replacement design; review the code decisions
-  behind them. Functional browser checks did not establish usable UX. Specific
-  design changes remain open; this work is deferred from PR #4.
+  judgement in underlying code implementation". Current evidence and rejected
+  assumptions are preserved in the [audience case](cases/audience-before-interface.md).
+  Codex's session UX is rejected; Claude Code is a reference for simplicity,
+  not a feature specification. Prioritize readable small panes, an uncluttered
+  appearance, and responsive scrolling while retaining live observation and
+  access to the available trace. Start from what Andy needs to accomplish;
+  send/stop illustrates a small interaction model, not a universal two-feature
+  limit. Queueing and interruption semantics remain proposals. Do not import
+  menus, modes, or configuration controls solely because reference apps have
+  them. Implementation is paused while judgment and design are being calibrated.
 - Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
   support and configuration; the current reasoning-summary stream does not
   establish Daybreak support. This is v5 scope, not part of PR #4.
