@@ -106,6 +106,8 @@ edit, the repair lost the reason for the complaint. Preserve the mandate for
 useful speed and choose checks by consequence. Repeated variants need a shared
 cause addressed, rather than a new prohibition for each incident.
 
+Worked case: [audience understanding before interface changes](cases/audience-before-interface.md).
+
 ### Conviction
 
 Hold a reasoned position and explain it when questioned. "Why do we do this?"
