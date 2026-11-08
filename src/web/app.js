@@ -30,7 +30,13 @@ function loadPaneOrder(cwd) {
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
     savedHistory = new Set((saved?.history || []).filter(key => valid(key) && key.startsWith("terminal:")));
     for (const draft of saved?.drafts || []) {
-      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) addSetup(draft);
+      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) {
+        const restored = { ...draft };
+        if (saved.version !== 2) {
+          for (const [key, value] of Object.entries(agentDefaults)) if (restored[key] === value) restored[key] = "";
+        }
+        addSetup(restored);
+      }
     }
   } catch { paneOrder = []; savedHistory.clear(); }
 }
@@ -47,7 +53,7 @@ function rememberPaneOrder() {
   }
   try {
     sessionStorage.setItem(orderKey, JSON.stringify({
-      version: 1, order: paneOrder,
+      version: 2, order: paneOrder,
       history: [...terminals.values()].filter(ui => ui.history).map(ui => `terminal:${ui.id}`),
       drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
     }));
@@ -1048,7 +1054,7 @@ function discardSetup(ui, replacement) {
 function addSetup(saved) {
   const values = saved || {
     id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
-    ...agentDefaults,
+    name: "", cwd: "", message: "",
   };
   if (drafts.has(values.id)) return drafts.get(values.id);
   const ui = makePane("New agent", "", "draft", values.id);
@@ -1067,22 +1073,8 @@ function addSetup(saved) {
     input.name = key;
     input.value = values[key];
     if (key === "message") input.rows = 4;
-    let untouchedDefault = input.value === agentDefaults[key];
-    const update = () => {
-      input.classList.toggle("default-value", untouchedDefault);
-      rememberPaneOrder();
-    };
-    const replaceDefault = () => {
-      if (!untouchedDefault) return;
-      untouchedDefault = false;
-      input.value = "";
-      input.setSelectionRange(0, 0);
-      update();
-    };
-    input.addEventListener("beforeinput", replaceDefault);
-    input.addEventListener("compositionstart", replaceDefault);
-    input.addEventListener("input", () => { untouchedDefault = false; update(); });
-    input.classList.toggle("default-value", untouchedDefault);
+    input.placeholder = agentDefaults[key];
+    input.addEventListener("input", rememberPaneOrder);
     wrapper.append(input);
     ui.form.append(wrapper);
   }
@@ -1106,7 +1098,9 @@ function addSetup(saved) {
     ui.error.hidden = true;
     try {
       const startedAt = catalogRevision;
-      const view = await request("/api/sessions", "POST", Object.fromEntries(new FormData(ui.form)));
+      const fields = Object.fromEntries(new FormData(ui.form));
+      for (const [key, value] of Object.entries(agentDefaults)) fields[key] ||= value;
+      const view = await request("/api/sessions", "POST", fields);
       discardSetup(ui, acceptSessionResponse(view, startedAt));
     } catch (error) { showError(ui.error, error); }
     finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
