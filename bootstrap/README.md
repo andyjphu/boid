@@ -221,11 +221,22 @@ views. File editing and artifact inspection need not live inside an agent
 session. PR #4 uses locally vendored xterm.js connected to a Bash PTY inside
 the task container.
 
-Keep the visual design sparse. Andy has repeatedly encountered unnecessary,
-poor UI decisions when agents build web applications. Sophisticated communication
-can coexist with a small visible interface; do not invent controls or features
-to make the first version look complete. Memory use matters, but no comparison
-between the proposed web client and Andy's VS Code setup has been measured.
+Andy clarified the basis for UX judgment after using v4 (2026-11-08):
+
+> 1. a good ui/ux is intuitive; 2. a good ui/ux has every label earn its place, if it does not need to be there, it must not be there; in this time one needs to understand their audience, 3. if you put no effort in understanding your audience it shows in the ui/ux
+
+Design for Andy operating a live swarm: observing work peripherally, reading
+closely when needed, directing agents, and using a terminal. He already knows
+the surrounding task and tools. Use that context to decide what needs naming
+or explanation. A label earns its place when it helps him understand or act;
+remove labels that merely repeat what position, content, or familiar behavior
+already communicates. Make actions and state understandable without making
+him learn the server's event schema. This is an application of his principles,
+not a settled layout or a reason to hide requested information.
+
+Sophisticated communication can coexist with a small visible interface.
+Memory use matters, but no comparison between the proposed web client and
+Andy's VS Code setup has been measured.
 
 ### Possibilities, not commitments
 
