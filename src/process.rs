@@ -28,6 +28,8 @@ impl Tools {
         let mut child = Command::new(program)
             .args(args)
             .current_dir(&self.cwd)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("BOID_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

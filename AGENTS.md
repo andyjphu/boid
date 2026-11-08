@@ -5,6 +5,8 @@ Before working on Boid, read [bootstrap/README.md](bootstrap/README.md) and
 context and the behavior expected of Boid. Carry relevant instructions into
 delegated work.
 
-This entry point and `bootstrap/` are for developers. Boid's runtime should
-receive explicitly selected material from `src/`. Keep developer context out
-of runtime inputs, including automatic parent-directory instruction loading.
+This entry point and `bootstrap/` are for developers, including Boid when it
+works on its own implementation. Read the prominent caution in the bootstrap
+brief: development assumptions about failures must not become behavioral goals.
+Select runtime guidance and developer context for the actual task; do not
+automatically inject this whole brief or parent instructions into every session.

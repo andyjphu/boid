@@ -1,13 +1,22 @@
 [package]
 name = "boid"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
 
 [dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
 libc = "0.2"
+portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25.1"
+uuid = { version = "1", features = ["v4"] }
