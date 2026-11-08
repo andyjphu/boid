@@ -367,40 +367,26 @@ context, and load lessons when relevant.
 
 ## Unresolved choices
 
-### v5 backlog
+### Pinned v0.5 baseline
 
-- Rework the web UX with Andy (2026-11-08). His assessment of the preview:
-  "i just really hate the web interface's ux, and makes me question your
-  judgement in underlying code implementation". Current evidence and rejected
-  assumptions are preserved in the [audience case](cases/audience-before-interface.md).
-  Andy disliked Codex's busy session UX, then chose its actual behavior as the
-  reference for the next pass, applying the minimalism judgment above. Retain
-  Boid's execution system. Reuse code where it fits clearly; otherwise inspect
-  Codex and reproduce the useful behavior in the web client. This supersedes
-  further independent pane design, not the earlier feedback about readability.
-  Claude Code remains a reference for simplicity, not a feature specification.
-  Prioritize readable small panes, an uncluttered
-  appearance, and responsive scrolling while retaining live observation and
-  access to the available trace. Start from what Andy needs to accomplish;
-  send/stop illustrates a small interaction model, not a universal two-feature
-  limit. Andy subsequently approved Enter to send, Shift+Enter for multiline
-  input, queued delivery at the next model/tool boundary, and Escape in the
-  selected pane to interrupt and apply queued input. Mouse selection should
-  not add a blue outline; scrolling past an edge should not rubberband. Do not import
-  menus, modes, or configuration controls solely because reference apps have
-  them. Andy authorized the first pane revision; this supersedes the earlier
-  implementation pause. The updated preview is for his UX review, not evidence
-  of UX acceptance.
-  Andy subsequently chose compact tool output with inline expansion and
-  reasoning displayed the same way within the conversation. Reproduce Codex's
-  transcript and composer baseline with the discussed cuts; inspecting a few
-  behaviors and keeping an independently designed pane was insufficient.
-  Populate the relaunched preview through real agent interactions so Andy can
-  inspect the different rendering cases. See the audience case for the exact
-  feedback and the distinction between fixtures and live conversations.
-- Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
-  support and configuration; the current reasoning-summary stream does not
-  establish Daybreak support. This is v5 scope, not part of PR #4.
+Andy called the deployed version "best work so far" and requested a pin on
+2026-11-08. Tag `v0.5` points to `7b99a98`, the deployed implementation.
+Preserve this as the accepted baseline for subsequent changes. PR #5 remains
+unmerged until Andy approves it.
+
+The accepted pane uses 11px plain text, 4px side padding, one-line collapsed
+tool calls with one expansion control, and Working / Esc-to-interrupt status.
+Enter queues without cancelling work; Escape explicitly interrupts. The
+composer appears on hover, keyboard focus, or with a draft. Debug UI assets
+load from disk on refresh. See [tools](tools.md) for current behavior and the
+[audience case](cases/audience-before-interface.md) for the decisions behind it.
+
+### v0.6 backlog
+
+- Add Daybreak support, carried from the earlier v5 backlog by Andy's instruction
+  to pin this version and acknowledge the backlog for v0.6. Determine the
+  required provider/model support and configuration; the current reasoning
+  summary stream does not establish Daybreak support.
 
 ### Later decisions
 
