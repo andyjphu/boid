@@ -148,14 +148,20 @@ function makePane(name, cwd, kind, id) {
 
 function removeSession(ui) {
   ui.traceResize.disconnect();
+  ui.overlayResize.disconnect();
   if (selected === ui.pane) selected = null;
   ui.pane.remove();
   sessions.delete(ui.id);
   layout();
 }
 
-function atBottom(trace) {
-  return trace.scrollHeight - trace.scrollTop - trace.clientHeight <= 1;
+function messageBottom(ui) {
+  // Keep the usual trace padding, but never follow into the composer reserve.
+  return Math.max(0, ui.content.offsetHeight + 20 - ui.trace.clientHeight);
+}
+
+function atBottom(ui) {
+  return ui.trace.scrollTop >= messageBottom(ui) - 1;
 }
 
 function selectedWithin(node) {
@@ -174,7 +180,7 @@ function rememberPosition(ui) {
 
 function restorePosition(ui) {
   if (ui.follow && !selectedWithin(ui.trace)) {
-    ui.trace.scrollTop = ui.trace.scrollHeight;
+    ui.trace.scrollTop = messageBottom(ui) + ui.followClearance;
   } else if (ui.anchor?.node.isConnected) {
     ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
       - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
@@ -206,7 +212,7 @@ function followLatest(ui) {
   requestAnimationFrame(() => {
     ui.followScheduled = false;
     if (ui.follow && !selectedWithin(ui.trace)) {
-      ui.trace.scrollTop = ui.trace.scrollHeight;
+      ui.trace.scrollTop = messageBottom(ui) + ui.followClearance;
     }
   });
 }
@@ -264,9 +270,12 @@ function addSession(view) {
   ui.entries = new Map();
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
+  ui.followClearance = 0;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
+  ui.content = element("div", "trace-content");
+  ui.trace.append(ui.content);
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
@@ -297,14 +306,32 @@ function addSession(view) {
   ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
-    ui.follow = atBottom(ui.trace) && !selectedWithin(ui.trace);
+    ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
+    ui.followClearance = ui.follow && ui.pane.matches(":hover")
+      ? Math.max(0, ui.trace.scrollTop - messageBottom(ui)) : 0;
     rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.error, ui.activity, ui.modelPicker, ui.slashSuggestion, ui.composer);
+  const stream = element("div", "agent-stream");
+  const overlay = element("div", "composer-overlay");
+  overlay.append(ui.slashSuggestion, ui.composer);
+  stream.append(ui.trace, overlay);
+  ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker);
+  const overlayResize = new ResizeObserver(() => {
+    const height = Math.ceil(overlay.getBoundingClientRect().height);
+    if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
+  });
+  overlayResize.observe(overlay);
+  ui.overlayResize = overlayResize;
+  ui.pane.addEventListener("pointerleave", () => {
+    if (ui.follow && atBottom(ui) && !selectedWithin(ui.trace)) {
+      ui.followClearance = 0;
+      restorePosition(ui);
+    }
+  });
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
@@ -653,7 +680,7 @@ function putEntry(ui, entry, delta = false) {
         if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
       }
     }
-    ui.trace.append(node);
+    ui.content.append(node);
     item = { id, node, body, kind, text: "", groupChanged: true };
     ui.entries.set(id, item);
     if (kind === "user") ui.pending.add(id);
