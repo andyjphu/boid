@@ -388,9 +388,11 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
 - Remove the Boid title and replace the full workspace header with one divided
   pill labeled + agent / + terminal, floating at the top center. Use equal-width
   halves so the divider is centered on the viewport (Andy, 2026-11-08).
-- Use compact tab-shaped pane headers with terminal/bot icons and the close
+- Use compact square tab-shaped pane headers with terminal/bot icons and the close
   control on the left. Terminals start as #1, #2, etc. and can be renamed;
-  the working directory retains its muted appearance.
+  the working directory retains its muted appearance. Pane frames meet with
+  shared 1px borders and no gaps or outer workspace padding. Terminal scroll
+  thumbs fill their track, with a very faint full-height divider.
 - Rework reasoning presentation. Andy requested reasoning be hidden in every
   pane for PR #5; retain its events in the full record while it is hidden.
 - Add `/model` with Codex's keyboard picker pattern. Andy selected one profile

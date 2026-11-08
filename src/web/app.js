@@ -820,10 +820,14 @@ function attachTerminal(info) {
     if (host.contains(document.activeElement)) takeControl();
   }
   window.addEventListener("focus", resumeControl);
-  const observer = new ResizeObserver(() => {
-    if (host.clientWidth > 0 && host.clientHeight > 0) resize();
+  const screen = host.querySelector(".xterm-screen");
+  const viewport = host.querySelector(".xterm-viewport");
+  const observer = new ResizeObserver(entries => {
+    host.style.setProperty("--terminal-track-edge", `${viewport.getBoundingClientRect().left + viewport.clientWidth - host.getBoundingClientRect().left}px`);
+    if (entries.some(entry => entry.target === host) && host.clientWidth > 0 && host.clientHeight > 0) resize();
   });
   observer.observe(host);
+  observer.observe(screen);
   close.addEventListener("click", async () => {
     close.disabled = true;
     try {
