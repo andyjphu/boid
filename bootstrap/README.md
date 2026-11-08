@@ -386,8 +386,8 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
 ### v0.6 work
 
 - Remove the Boid title and replace the full workspace header with one divided
-  pill for New agent / New terminal, floating at the top center to maximize
-  workspace space (Andy, 2026-11-08).
+  pill labeled + agent / + terminal, floating at the top center. Use equal-width
+  halves so the divider is centered on the viewport (Andy, 2026-11-08).
 - Rework reasoning presentation. Andy requested reasoning be hidden in every
   pane for PR #5; retain its events in the full record while it is hidden.
 - Add `/model` with Codex's keyboard picker pattern. Andy selected one profile
