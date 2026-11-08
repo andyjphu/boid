@@ -862,6 +862,12 @@ function attachTerminal(info) {
   window.addEventListener("focus", resumeControl);
   const screen = host.querySelector(".xterm-screen");
   const viewport = host.querySelector(".xterm-viewport");
+  let scrollbarIdle;
+  viewport.addEventListener("scroll", () => {
+    host.classList.add("scrolling");
+    clearTimeout(scrollbarIdle);
+    scrollbarIdle = setTimeout(() => host.classList.remove("scrolling"), 800);
+  }, { passive: true });
   const observer = new ResizeObserver(entries => {
     host.style.setProperty("--terminal-track-edge", `${viewport.getBoundingClientRect().left + viewport.clientWidth - host.getBoundingClientRect().left}px`);
     if (entries.some(entry => entry.target === host) && host.clientWidth > 0 && host.clientHeight > 0) resize();
@@ -876,6 +882,7 @@ function attachTerminal(info) {
       clearTimeout(retry);
       socket?.close();
       observer.disconnect();
+      clearTimeout(scrollbarIdle);
       window.removeEventListener("focus", resumeControl);
       term.dispose();
       if (selected === ui.pane) selected = null;
