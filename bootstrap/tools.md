@@ -25,14 +25,14 @@ The web workspace shows simultaneous agent traces, per-agent input,
 and real terminal panes. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
 provider-exposed reasoning summaries, tool calls and results, and control events.
-Models may return no summary; hidden reasoning is unavailable. Responses use
-Markdown with raw HTML and images disabled. Startup context is expandable;
+Models may return no summary; hidden reasoning is unavailable. Responses are displayed as plain text. Startup context is expandable;
 its full-session link retains the original event record, including transport
 receipts omitted from the reading view. The view adds no tool-result truncation.
 
-The transcript uses one 11px text size. Tool calls show the command or target;
-multiline arguments and results align with the transcript edge. Long output and
-reasoning expand inline from a preview. Successful tool calls have no completion
+The transcript uses one 11px text size. Tool calls show one command or target
+line and use one expansion control for the operation's arguments and result.
+Results stay at their chronological position, including when a peer message
+intervenes. Reasoning expands inline from a preview. Successful tool calls have no completion
 label; running calls show an ellipsis, and failures retain their status. Streamed
 arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.
@@ -43,12 +43,15 @@ Disconnection mutes the view. Each pane has an × control; there is no separate
 Latest control or title gesture that enlarges a pane.
 
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
-the current model response or tool call to finish. Escape in the selected
+the current model response and all its tool calls to finish, then enters the
+next model request without cancelling work. Escape in the selected
 agent pane interrupts immediately and applies queued input. Without queued
 input, it leaves execution stopped. Draft text is preserved. Completed results
 stay in context; interrupted actions are marked potentially partial. The
 headless Stop route retains its separate priority path and cancels older queued
-requests. Later user input can resume work.
+requests. Later user input can resume work. While an agent is working, a bottom
+indicator shows Working and Esc to interrupt; it remains visible when the
+message box is hidden.
 
 `list_agents` exposes session identities and status. `send_message` queues an
 attributed message for the recipient's next model request. It does not interrupt
@@ -186,3 +189,7 @@ The container launch supplies the boundary; the binary does not create it.
 
 For development incident recording and Andy's personal task routing, see the
 development brief. Boid has no required Codex handoff.
+
+Debug builds read index.html, app.js and style.css from src/web on each request,
+so a browser refresh loads UI edits without a Rust rebuild or session restart.
+Release builds retain embedded assets.

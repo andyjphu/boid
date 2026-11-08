@@ -61,7 +61,11 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
-    // Returns whether another step is needed. Input is applied between steps.
+    pub fn has_pending_tools(&self) -> bool {
+        !self.pending.is_empty()
+    }
+    // Returns whether another step is needed. Queued input is applied before
+    // the next model request, after this response's tool calls have finished.
     pub async fn step(
         &mut self,
         client: &Client,

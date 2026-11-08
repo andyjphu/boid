@@ -7,8 +7,6 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
 let selected = null;
-const markdown = window.markdownit({ html: false, linkify: false, typographer: false });
-markdown.disable("image");
 let lastSequence = -1;
 let events;
 
@@ -156,6 +154,9 @@ function addSession(view) {
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
+  ui.activity = element("div", "working-status");
+  ui.activity.setAttribute("role", "status");
+  ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
   ui.input.rows = 1;
@@ -172,7 +173,7 @@ function addSession(view) {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.error, ui.composer);
+  ui.pane.append(ui.trace, ui.error, ui.activity, ui.composer);
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
@@ -239,7 +240,8 @@ function addSession(view) {
 
 function setStatus(ui, status) {
   ui.pane.dataset.status = status || "idle";
-  ui.status.textContent = status === "working" ? "Working" : status === "idle" ? "" : (status || "");
+  ui.activity.hidden = status !== "working";
+  ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
 }
 
 function toolEntry(text) {
@@ -317,70 +319,10 @@ function toolCommand(tool) {
   return JSON.stringify(value, null, 2);
 }
 
-function renderToolEntry(ui, item) {
-  const { node, body, kind } = item;
-  const tool = toolEntry(item.text);
-  const counterpartKind = kind === "tool_call" ? "tool_result" : "tool_call";
-  const counterpart = tool.callId && [...ui.entries.values()].find(entry => {
-    if (entry.kind !== counterpartKind) return false;
-    const other = toolEntry(entry.text);
-    return other.callId === tool.callId && other.heading === tool.heading;
-  });
-  const call = kind === "tool_call" ? item : counterpart;
-  const result = kind === "tool_result" ? item : counterpart;
-  const outcome = toolOutcome(result ? toolEntry(result.text) : null);
-  let previous = result?.node.previousElementSibling;
-  while (previous?.hidden) previous = previous.previousElementSibling;
-  const joined = Boolean(call && result && previous === call.node);
-  if (call) {
-    if (call !== item && selectedWithin(call.node)) {
-      call.deferred = true;
-    } else {
-      call.node.classList.toggle("tool-joined-call", joined);
-      call.node.dataset.toolFailed = String(outcome.failed);
-      if (call.toolStatus) call.toolStatus.textContent = outcome.label;
-    }
-  }
-  if (result) result.node.classList.toggle("tool-joined-result", joined);
-  node.title = tool.heading;
-  node.dataset.toolFailed = String(outcome.failed);
-  body.replaceChildren();
-  const header = element("div", "tool-header");
-  let commandContinuation;
-  const command = toolEntry(call?.text || item.text);
-  const label = command.name === "exec_command" ? "$" : command.name;
-  header.append(element("span", "tool-name", label));
-  if (kind === "tool_call" || !joined) {
-    if (kind === "tool_call" || call) {
-      const text = toolCommand(command);
-      const newline = text.indexOf("\n");
-      const firstLine = newline < 0 ? text : text.slice(0, newline);
-      if (newline >= 0) {
-        const rest = text.slice(newline + 1);
-        commandContinuation = compactOutput(ui, item, element("pre", "tool-text", rest), rest, "Input");
-      }
-      const commandBody = element("pre", "tool-text", firstLine);
-      const commandView = compactOutput(ui, item, commandBody, firstLine, "Command");
-      commandView.classList.add("tool-command");
-      header.append(commandView);
-    }
-    const status = element("span", "tool-status", outcome.label);
-    header.append(status);
-    if (kind === "tool_call") item.toolStatus = status;
-  }
-  if (kind === "tool_call") {
-    body.append(header);
-    if (commandContinuation) body.append(commandContinuation);
-    return;
-  }
-  // Keep results at their original event position when another visible event intervenes.
-  if (!joined) {
-    body.append(header);
-    if (commandContinuation) body.append(commandContinuation);
-  }
+function toolOutput(tool) {
   const output = element("div", "tool-output");
   const value = tool.value;
-  if (value?.ok === true && Object.keys(value).length === 1) return;
+  if (value?.ok === true && Object.keys(value).length === 1) return output;
   if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
     for (const channel of ["stdout", "stderr"]) {
       if (value[channel]?.text) output.append(element("pre", `tool-text ${channel}`, value[channel].text));
@@ -397,26 +339,101 @@ function renderToolEntry(ui, item) {
     output.append(element("pre", "tool-text", value.text));
     if (value.truncated) output.append(element("div", "tool-note", "Output truncated"));
   } else {
-    output.append(element("pre", "tool-text", value !== undefined ? JSON.stringify(value, null, 2) : tool.payload || item.text));
+    output.append(element("pre", "tool-text", value !== undefined ? JSON.stringify(value, null, 2) : tool.payload));
   }
-  const preview = [...output.children].map(child => child.textContent).join("\n");
-  body.append(compactOutput(ui, item, output, preview));
+  return output;
+}
+
+function renderToolEntry(ui, item) {
+  const tool = toolEntry(item.text);
+  const counterpartKind = item.kind === "tool_call" ? "tool_result" : "tool_call";
+  const counterpart = tool.callId && [...ui.entries.values()].find(entry => {
+    if (entry.kind !== counterpartKind) return false;
+    const other = toolEntry(entry.text);
+    return other.callId === tool.callId && other.heading === tool.heading;
+  });
+  const call = item.kind === "tool_call" ? item : counterpart;
+  const result = item.kind === "tool_result" ? item : counterpart;
+  const owner = call || result;
+  const command = toolEntry(owner.text);
+  const outcome = toolOutcome(result ? toolEntry(result.text) : null);
+  const text = call ? toolCommand(command) : "";
+  const newline = text.indexOf("\n");
+  const firstLine = newline < 0 ? text : text.slice(0, newline);
+  const rest = newline < 0 ? "" : text.slice(newline + 1);
+  const output = result ? toolOutput(toolEntry(result.text)) : null;
+  const outputText = output ? [...output.children].map(child => child.textContent).join("\n") : "";
+  const expandable = Boolean(call || rest || firstLine.length > 120 || outputText.length > 240 || outputText.trimEnd().split("\n").length > 3);
+  let previous = result?.node.previousElementSibling;
+  while (previous?.hidden) previous = previous.previousElementSibling;
+  const joined = Boolean(call && result && previous === call.node);
+  if (call) call.node.classList.toggle("tool-joined-call", joined);
+  if (result) result.node.classList.toggle("tool-joined-result", joined);
+  for (const entry of [call, result].filter(Boolean)) {
+    entry.node.title = tool.heading;
+    entry.node.dataset.toolFailed = String(outcome.failed);
+  }
+  if ([call, result].some(entry => entry && selectedWithin(entry.node))) {
+    owner.deferred = true;
+    return;
+  }
+  owner.body.replaceChildren();
+  if (result && result !== owner) result.body.replaceChildren();
+  const header = element(expandable ? "summary" : "div", "tool-header");
+  header.append(element("span", "tool-name", command.name === "exec_command" ? "$" : command.name));
+  if (firstLine) header.append(element("span", "tool-command", firstLine));
+  header.append(element("span", "tool-status", outcome.label));
+  let details;
+  if (expandable) {
+    details = element("details", "activity-details tool-operation");
+    details.open = Boolean(owner.expandedTool);
+    header.title = "Expand or collapse tool call and result";
+    details.append(header);
+    if (rest) details.append(element("pre", "tool-text activity-full", rest));
+    owner.body.append(details);
+  } else {
+    owner.body.append(header);
+  }
+  let preview;
+  if (result && outputText) {
+    // Intervening peer or assistant text keeps its place between call and result.
+    if (call && !joined) result.body.append(element("div", "tool-note", `${command.name} result`));
+    result.body.append(output);
+    if (expandable) {
+      preview = element("pre", "activity-preview", outputText.split("\n").slice(0, 3).join("\n"));
+      result.body.append(preview);
+    }
+  }
+  function showResult(open) {
+    if (!preview) return;
+    output.hidden = !open;
+    preview.hidden = open;
+  }
+  showResult(Boolean(owner.expandedTool));
+  if (details) {
+    header.addEventListener("click", () => {
+      owner.expandedTool = !details.open;
+      showResult(owner.expandedTool);
+      ui.follow = false;
+      rememberPosition(ui);
+    });
+    details.addEventListener("toggle", () => {
+      if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
+      owner.expandedTool = details.open;
+      showResult(details.open);
+      rememberPosition(ui);
+    });
+  }
 }
 
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "assistant" || kind === "reasoning") {
-    body.innerHTML = markdown.render(text);
-    for (const link of body.querySelectorAll("a")) {
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-    }
+    body.textContent = text;
     if (kind === "reasoning") {
-      const content = element("div", "reasoning-output");
-      content.append(...body.childNodes);
-      const preview = [...content.children].map(child => child.textContent).join("\n");
-      body.append(compactOutput(ui, item, content, preview, "Reasoning"));
+      const content = element("pre", "reasoning-output", text);
+      body.replaceChildren(compactOutput(ui, item, content, text, "Reasoning"));
       body.title = "Provider-exposed reasoning summary";
     }
   } else if (kind === "tool_call" || kind === "tool_result") {

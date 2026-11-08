@@ -290,15 +290,24 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 async fn index() -> Response {
-    bytes("text/html; charset=utf-8", include_bytes!("web/index.html"))
+    ui_asset(
+        "index.html",
+        "text/html; charset=utf-8",
+        include_bytes!("web/index.html"),
+    )
 }
 async fn asset(Path(path): Path<String>) -> Response {
     match path.as_str() {
-        "app.js" => bytes(
+        "app.js" => ui_asset(
+            "app.js",
             "text/javascript; charset=utf-8",
             include_bytes!("web/app.js"),
         ),
-        "style.css" => bytes("text/css; charset=utf-8", include_bytes!("web/style.css")),
+        "style.css" => ui_asset(
+            "style.css",
+            "text/css; charset=utf-8",
+            include_bytes!("web/style.css"),
+        ),
         "vendor/xterm.js" => bytes("text/javascript", include_bytes!("web/vendor/xterm.js")),
         "vendor/xterm.css" => bytes("text/css", include_bytes!("web/vendor/xterm.css")),
         "vendor/addon-fit.js" => {
@@ -313,4 +322,26 @@ async fn asset(Path(path): Path<String>) -> Response {
 }
 fn bytes(content_type: &'static str, content: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, content_type)], Body::from(content)).into_response()
+}
+
+fn ui_asset(_name: &'static str, content_type: &'static str, _embedded: &'static [u8]) -> Response {
+    #[cfg(debug_assertions)]
+    {
+        let path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/web")).join(_name);
+        match std::fs::read(path) {
+            Ok(content) => {
+                ([(header::CONTENT_TYPE, content_type)], Body::from(content)).into_response()
+            }
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot read development UI asset {_name}: {error}"),
+            )
+                .into_response(),
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        bytes(content_type, _embedded)
+    }
 }

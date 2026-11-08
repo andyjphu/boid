@@ -411,14 +411,16 @@ impl Hub {
                 Peer,
                 Stop(u64),
             }
-            // Drain input only between completed steps. Receiving input must not
-            // drop a running model request or tool future.
+            // Keep a response and all its tool results together. Ordinary input
+            // waits for the next model request; only explicit controls cancel work.
             let next = if cancel.has_changed().unwrap_or(false) {
                 Next::Stop(*cancel.borrow_and_update())
             } else if interrupt.has_changed().unwrap_or(false) {
                 interrupt.borrow_and_update();
                 Next::Interrupt
-            } else if let Ok(command) = commands.try_recv() {
+            } else if !session.has_pending_tools()
+                && let Ok(command) = commands.try_recv()
+            {
                 Next::Command(Some(command))
             } else if active {
                 tokio::select! { biased;
@@ -448,9 +450,6 @@ impl Hub {
                             format!("Queued input {input_id} cancelled by the later stop request."),
                         );
                         continue;
-                    }
-                    if active {
-                        session.interrupt(self, &id);
                     }
                     session.user(text);
                     self.input_delivered(&id, &input_id, "applied");
@@ -607,10 +606,16 @@ mod tests {
         );
         assert_eq!(hub.view(&target.id).unwrap().pending, vec![first, second]);
         release_first
-            .send(json!([{
-                "type":"function_call", "call_id":"old_call", "name":"write_file",
-                "arguments":json!({"path":"old-work", "content":"must not execute"}).to_string()
-            }]))
+            .send(json!([
+                {
+                    "type":"function_call", "call_id":"first_call", "name":"write_file",
+                    "arguments":json!({"path":"first-work", "content":"first completed"}).to_string()
+                },
+                {
+                    "type":"function_call", "call_id":"second_call", "name":"write_file",
+                    "arguments":json!({"path":"second-work", "content":"second completed"}).to_string()
+                }
+            ]))
             .unwrap();
         let (after_boundary, _release_second) =
             tokio::time::timeout(Duration::from_secs(2), received.recv())
@@ -620,13 +625,28 @@ mod tests {
         let input = after_boundary["input"].as_array().unwrap();
         assert_eq!(input[input.len() - 2]["content"], "First correction");
         assert_eq!(input[input.len() - 1]["content"], "Second correction");
-        assert!(input.iter().any(|item| {
-            item["call_id"] == "old_call"
-                && item["output"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("Not executed"))
-        }));
-        assert!(!dir.path().join("old-work").exists());
+        for (call_id, file, content) in [
+            ("first_call", "first-work", "first completed"),
+            ("second_call", "second-work", "second completed"),
+        ] {
+            let output = input
+                .iter()
+                .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+                .unwrap();
+            let output: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+            assert_eq!(output, json!({"ok":true}));
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(file)).unwrap(),
+                content
+            );
+        }
+        assert!(
+            !hub.view(&target.id)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| { entry.kind == "tool_result" && entry.text.contains("interrupted") })
+        );
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
 
         let third = hub.message(&target.id, "Third correction".into()).unwrap();
@@ -644,13 +664,19 @@ mod tests {
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
 
         // A tool gets to finish before queued input changes the next request.
-        release_third.send(json!([{
-            "type":"function_call", "call_id":"running_call", "name":"exec_command",
-            "arguments":json!({
-                "command":"touch started; while [ ! -e finish ]; do sleep 0.01; done; printf completed",
-                "timeout_ms":5000
-            }).to_string()
-        }])).unwrap();
+        release_third.send(json!([
+            {
+                "type":"function_call", "call_id":"running_call", "name":"exec_command",
+                "arguments":json!({
+                    "command":"touch started; while [ ! -e finish ]; do sleep 0.01; done; printf completed",
+                    "timeout_ms":5000
+                }).to_string()
+            },
+            {
+                "type":"function_call", "call_id":"following_call", "name":"write_file",
+                "arguments":json!({"path":"following-work", "content":"also completed"}).to_string()
+            }
+        ])).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while !dir.path().join("started").exists() {
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -682,6 +708,19 @@ mod tests {
             .unwrap();
         let output: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
         assert_eq!(output["stdout"]["text"], "completed");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("following-work")).unwrap(),
+            "also completed"
+        );
+        let following_output = input
+            .iter()
+            .find(|item| {
+                item["type"] == "function_call_output" && item["call_id"] == "following_call"
+            })
+            .unwrap();
+        let following_output: Value =
+            serde_json::from_str(following_output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(following_output, json!({"ok":true}));
         assert_eq!(
             input.last().unwrap()["content"],
             "Keep the completed tool result"
