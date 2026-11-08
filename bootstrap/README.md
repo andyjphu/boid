@@ -1,5 +1,15 @@
 # Bootstrap development
 
+> [!WARNING]
+> **Development assumptions must not become behavioral goals.**
+> This brief discusses expected failures, limitations, and experiments in how
+> agents learn. Every agent reading it must continue aiming for competent,
+> reliable work. Statements such as "Boid will fail often" must never become
+> permission to lower effort, introduce defects, or portray failure as desirable
+> in prompts, tool descriptions, names, comments, or product behavior. Use this
+> knowledge to improve diagnosis, recovery, and learning. Report actual failures
+> honestly; the caution does not justify hiding them.
+
 Temporary guidance for the agents building the first working Boid. Read this
 alongside [Boid's principles](../src/PRINCIPLES.md). Developers need the full
 project context to decide what Boid should eventually see.
@@ -29,8 +39,17 @@ design option.
 
 ## Audience
 
-Accepted project decision. The reset requested in this source quote is complete;
-the audience separation continues to apply. Andy's words, verbatim:
+Andy revised the disclosure policy on 2026-11-08. Builders may have extensive,
+candid development context, including assumptions about frequent failures.
+The visible caution above replaces the earlier blanket exclusion of that
+knowledge from Boid. Andy's words:
+
+> i have changed my mind about being too careful about disclosing facts of special concern like "boid is designed to fail often" instead just preface with an extremely visible caution to not let agents affect the work of the project given this knowledge
+
+The original folder decision remains useful for organizing audiences. Its
+restriction on Boid learning these development assumptions is superseded by
+the instruction above; its requested reset was already completed. Original
+words, preserved verbatim:
 
 > i highly think we need to reframe here because we're in a messy situation; lets remove all of our work so far; one folder for agents developing boid until boid can develop stuff; this is stuff that boid explicitly should not be aware of, like that we expect it to fail often; then a folder for boid itself, in such a place it would be worth outlining the stuff we expect boid to see, stuff like principles of how boid should behave, and in the overall readme you can include whatever but since it sets the tone for so many perspectives with competing responsibilities i recommend it be general
 
@@ -39,10 +58,11 @@ and intended agent guidance in `src/`. Keep the root README general. As Boid
 becomes able to maintain itself, retire completed bootstrap instructions and
 deliberately retain useful guidance for its intended reader.
 
-These notes are public, but excluded from Boid's intended runtime context.
-Keep them out of prompts, retrieval, distributions, and the workspace exposed
-to Boid. When implementing runtime access, account for parent instructions and
-Git history as well as files. A directory name alone does not enforce access.
+Agents developing Boid, including Boid itself when assigned development, may
+read this context with its caution. Select context for the task; disclosure
+permission does not make the whole brief useful in every session or justify
+automatic injection into ordinary tasks. The distinction between builder
+context and intended runtime guidance still helps readers interpret each.
 
 ## Judgment
 
@@ -64,10 +84,10 @@ the audience is unclear; brevity alone does not settle that choice.
 
 Treat what an agent encounters as part of its design. Names, comments, examples,
 and tool wording can influence behavior as well as explicit instructions.
-The development assumption about frequent failures belongs in this bootstrap
-context; Boid should encounter the behavior we want it to perform. Choose
-exposure deliberately. A public folder can express audience without enforcing
-runtime isolation.
+Development assumptions about frequent failures may be disclosed with the
+caution above. Keep their meaning separate from the behavior we ask agents to
+perform. Select context deliberately, and write product-facing material to
+encourage the intended work. A directory name alone cannot enforce this distinction.
 
 ### Supervision
 
@@ -140,15 +160,92 @@ problem recurs, so the next decision can account for both. Revert a clearly
 ineffective repair unless a separate supported benefit warrants retaining it.
 Approval of this brief establishes direction; its effect on work remains unknown.
 
+## Project direction
+
+The following requirements and preferences come from Andy's 2026-11-08 design
+discussion. They describe the intended product; the current code is described
+under [First implementation](#first-implementation).
+
+### A swarm harness
+
+Boid supports general agent work. Communication between agents is a central
+design interest, alongside communication with the operator. Research is one
+application; it does not define the product's scope. Andy wants to steer
+architectural and design decisions and receive useful results while agents
+own routine execution and collaboration.
+
+Use the plain name "Boid server". Andy prefers one server running per system
+by default, serving multiple sessions. The meaning of system across users,
+containers, and remote hosts still needs an implementation decision; do not
+infer a machine-wide privileged service from this preference. The accepted
+[execution principle](#server-owned-execution) determines ownership regardless
+of transport or interface.
+
+### Live observation and responsibility
+
+Andy values a "cctv vibe": at a glance, he can tell what agents are doing and
+whether they are working. Focusing on one session should preserve peripheral
+awareness of the others. The required view includes live streams, not merely
+activity labels or generated summaries.
+
+Show the harness-observable sequence of inputs and outputs: messages from
+Andy and peers, exposed reasoning, tool calls and results, outgoing messages,
+and context changes. Peer exchanges are already part of this requirement;
+do not treat each event category as a separate feature needing approval.
+Hidden model reasoning is unavailable. Do not invent a thought stream or imply
+that a provider's reasoning summary reveals all internal reasoning. Make any
+display truncation or unavailable content identifiable.
+
+Visibility does not transfer responsibility to Andy. He intervenes only as
+attention permits. Agents still own their work, ordinary problem solving, and
+clear requests for decisions they cannot make. Silence is not approval, and
+showing an issue in a trace does not establish that Andy saw it. Observing or
+changing focus must not alter execution.
+
+### Interface direction
+
+Andy strongly leans toward a web interface because he anticipates advanced
+swarm interaction and communication. Aim to settle on one interactive interface;
+maintaining CLI and web feature parity is not a requirement. A scriptable server
+and a shell command that starts it do not require a second interactive product.
+The pending CLI is existing work, not proof that the final product should be
+terminal-based. The current VS Code layout is evidence of taste, not a complete
+specification to reproduce.
+
+The workspace must support ordinary interactive terminal use, with at least
+one real or substantially equivalent terminal among an M-by-N arrangement of
+views. File editing and artifact inspection need not live inside an agent
+session. xterm.js is a promising terminal component discussed with Andy; the
+shell connection and its execution environment remain implementation choices.
+
+Keep the visual design sparse. Andy has repeatedly encountered unnecessary,
+poor UI decisions when agents build web applications. Sophisticated communication
+can coexist with a small visible interface; do not invent controls or features
+to make the first version look complete. Memory use matters, but no comparison
+between the proposed web client and Andy's VS Code setup has been measured.
+
+### Possibilities, not commitments
+
+Andy may want more agents than visible panes, agents influencing their own
+representation, delegated workers hiding their views when irrelevant, and
+agents editing peer context. He explicitly described these ideas as ambitious
+and asked us not to commit to them. Keep them available for future discussion
+without implementing them, inventing their protocols, or treating them as
+requirements for the first server. A visible pane and an agent session need
+not be the same concept; the accepted server ownership already permits views
+to attach and detach independently.
+
 ## First implementation
 
 Accepted direction from Andy's Boid planning discussion.
 
-Boid is a general agent swarm harness with a CLI and OpenAI API-key access.
+Boid is a general agent swarm harness using OpenAI API-key access.
 Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
-The current change is v4 / PR #4: the first working CLI and agent loop.
-Version numbers follow PR numbers.
+The current implementation is v4 / PR #4: a working CLI and agent loop, pending
+review. Version numbers follow PR numbers. The web/server direction above is
+not yet implemented. The design discussion and documentation changes do not
+authorize replacing this code before the implementation scope is settled.
 
 Use the reusable glob, search, read, write, edit, and command tools from v3.
 Avoid temporary tool-runner subcommands.
@@ -164,9 +261,12 @@ is safe. Do not introduce Codex App Server or a full permission framework for
 this scope. Earlier capability-handle and Codex-executor proposals are superseded.
 
 Develop locally. Build and run in Colima Docker on mm-west-2. Give the container
-only the task's files and services. Keep host credentials, the Docker socket,
-bootstrap material, and Git history outside Boid's runtime workspace. The
-emergency transfer is a recovery snapshot, not a second active checkout.
+only the task's files and services. Keep host credentials and the Docker socket
+outside Boid's runtime workspace; provide only credentials needed for the task.
+Bootstrap material may be supplied for development under the caution above.
+Keep Git history outside the runtime workspace unless needed and explicitly
+scoped for the task. The emergency transfer is a recovery snapshot, not a
+second active checkout.
 
 Andy assigns dangerous host or system work to Codex. Boids handle fast
 implementation, research, writing, and communication. Developers and Boid

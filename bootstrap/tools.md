@@ -60,8 +60,9 @@ interactive approvals, policy-rule store, or Codex App Server dependency.
 
 Develop on the local checkout. Run builds and execution on `mm-west-2` under
 Colima Docker. Stage `Cargo.toml`, `Cargo.lock`, and `src/` in a disposable build
-directory. Keep the recovery snapshot separate. Do not expose the host home,
-Docker socket, Git history, or bootstrap guidance to the task process.
+directory. Keep the recovery snapshot separate. Do not expose the host home or
+Docker socket to the task process. Supply bootstrap guidance when relevant to
+a development assignment, with the caution in [the brief](README.md).
 
 Build the toolchain image using the Dockerfile on stdin, so the image receives
 no repository context:
@@ -92,10 +93,12 @@ docker run --rm -it --init \
 ```
 
 For Boid to work on itself, expose a copy of `Cargo.toml`, `Cargo.lock`, and
-`src/`. Keep the canonical checkout outside that mount, then review the diff
-and bring back the intended changes through a PR. Supply only credentials and
-services needed for the task. This launch recipe is the execution boundary;
-the binary itself does not create or require a container.
+`src/`, plus the relevant development guidance. Keep Git history outside the
+runtime workspace unless needed and explicitly scoped for the task. Keep the
+canonical checkout outside that mount, then review the diff and bring back the
+intended changes through a PR. Supply only credentials and services needed for
+the task. This launch recipe is the execution boundary; the binary itself does
+not create or require a container.
 
 Record any unintended destructive action, even when Docker prevents damage.
 Preserve the command, target, and observed result. Hand dangerous host or
