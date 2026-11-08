@@ -21,17 +21,47 @@ for remote access; the default listener is local.
 
 ## Sessions and live views
 
-The web workspace shows simultaneous agent traces, per-agent input and Stop,
-and real terminal panes. Focus enlarges a view while retaining other panes.
+The web workspace shows simultaneous agent traces, per-agent input,
+and real terminal panes. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
-provider-exposed reasoning summaries, tool calls and results, and control events.
-Models may return no summary; hidden reasoning is unavailable. Text is displayed
-without interpreting it as HTML. The view adds no extra tool-result truncation.
+tool calls and results, and control events. Provider-exposed reasoning summaries
+are hidden in every pane pending the v0.6 presentation work; events remain in
+the full session record.
+Models may return no summary; hidden reasoning is unavailable. Responses are displayed as plain text. Startup context is expandable;
+its full-session link retains the original event record, including transport
+receipts omitted from the reading view. The view adds no tool-result truncation.
 
-New user input interrupts an active attempt and steers the next request.
-Completed results stay in context; interrupted actions are marked potentially
-partial. Stop has a priority path independent of the input queue and cancels
-older queued requests. Later user input can resume work.
+The transcript uses one 11px text size. Tool calls show one command or target
+line and use one expansion control for the operation's arguments and result.
+Results stay at their chronological position, including when a peer message
+intervenes. Successful tool calls have no completion
+label; running calls show an ellipsis, and failures retain their status. Streamed
+arguments are replaced by their formatted call using entry identity, including
+when a peer message arrives between them. The full record retains both events.
+
+An empty message box appears on pane hover or keyboard focus; a draft keeps it
+visible. The hidden box retains its space so hovering does not shift the trace.
+Disconnection mutes the view. Each pane has an × control; there is no separate
+Latest control or title gesture that enlarges a pane.
+
+Streaming keeps a view at the bottom when it is already there. Reading earlier
+messages preserves the visible message and its offset as content changes.
+Scrolling back to the bottom resumes following; each pane tracks this separately.
+
+Typing while transcript text is selected focuses that pane's prompt and inserts
+the typed character at its saved caret. Copy shortcuts and navigation keep their
+normal behavior.
+
+Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
+the current model response and all its tool calls to finish, then enters the
+next model request without cancelling work. Escape in the selected
+agent pane interrupts immediately and applies queued input. Without queued
+input, it leaves execution stopped. Draft text is preserved. Completed results
+stay in context; interrupted actions are marked potentially partial. The
+headless Stop route retains its separate priority path and cancels older queued
+requests. Later user input can resume work. While an agent is working, a bottom
+indicator shows Working and Esc to interrupt; it remains visible when the
+message box is hidden.
 
 `list_agents` exposes session identities and status. `send_message` queues an
 attributed message for the recipient's next model request. It does not interrupt
@@ -60,9 +90,11 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
+| `DELETE /api/sessions/{id}` | End the worker and remove its in-memory session |
 | `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
+| `POST /api/sessions/{id}/interrupt` | Interrupt current work and apply queued input; stop if none |
 | `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
-| `GET /api/events` | SSE snapshot, entries, deltas, status |
+| `GET /api/events` | SSE snapshot, entries, deltas, input delivery, status |
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
@@ -73,13 +105,25 @@ behavior. Tool unit tests alone do not establish disconnect or coordination beha
 
 ## Interactive terminals
 
-Bash PTYs and locally vendored xterm.js provide interactive programs, keyboard
-input, resize, and reconnect. Disconnecting leaves a shell running; its Close
-button ends it. Replay retains the latest 512 KiB and marks omitted older output.
+Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
+input, resize, and reconnect. Disconnecting leaves a shell running; its ×
+control ends it. Agent panes use the same control to end and remove the session.
+Replay retains a bounded 512 KiB history with resize events and marks omitted
+older output. Replaying bytes never sends terminal responses back to the shell.
+Views share the PTY dimensions; focusing or clicking a terminal transfers input
+and resize control to that view. Other views follow its dimensions.
 Terminal input is an explicit operator shell action and bypasses the model's
 command heuristic. Both terminal and model command children omit API/server
 credentials from their environments. Deliberately detached processes still
 require container cleanup.
+
+Terminals use `SHELL` when executable, otherwise the account's configured login
+shell, and load its startup files. The development image includes zsh and Git.
+Install personal themes/plugins and portable shell settings in the container's
+home; host-specific paths and credential loaders do not belong in that copy.
+The browser terminal prefers locally installed MesloLGS NF, with monospace
+fallbacks. Andy's preview uses his Powerlevel10k settings, Oh My Zsh, Git,
+autosuggestions, and syntax highlighting.
 
 ## File and command behavior
 
@@ -126,7 +170,7 @@ Build `boid-dev` from `bootstrap/Dockerfile` on stdin. Run `cargo fetch --locked
 with registry access, then `cargo fmt --check`, `cargo test --locked --offline`,
 and `cargo build --locked --offline` without network. Share dependency downloads;
 keep build artifacts separate for each source workspace. The frontend has no
-build step. Pinned terminal assets and licenses are under `src/web/vendor/`.
+build step. Pinned terminal/Markdown assets and licenses are under `src/web/vendor/`.
 
 On the Docker host, set `BOID_WORKSPACE` to the task directory. This uses the
 existing compiled binary volume and publishes only on host loopback:
@@ -155,3 +199,7 @@ The container launch supplies the boundary; the binary does not create it.
 
 For development incident recording and Andy's personal task routing, see the
 development brief. Boid has no required Codex handoff.
+
+Debug builds read index.html, app.js and style.css from src/web on each request,
+so a browser refresh loads UI edits without a Rust rebuild or session restart.
+Release builds retain embedded assets.

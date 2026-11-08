@@ -2,12 +2,11 @@
 
 const workspace = document.querySelector("#workspace");
 const empty = document.querySelector("#empty");
-const connection = document.querySelector("#connection");
 const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
-let focused = null;
+let selected = null;
 let lastSequence = -1;
 let events;
 
@@ -41,29 +40,18 @@ async function request(path, method = "GET", body, headers = {}) {
   return result;
 }
 
-function layout() {
-  const following = [...sessions.values()].filter(ui => ui.follow);
+function layout(event) {
+  if (event?.type !== "resize") {
+    for (const ui of sessions.values()) rememberPosition(ui);
+  }
   for (const ui of sessions.values()) ui.reflow = true;
   const panes = [...workspace.querySelectorAll(".pane")];
   empty.hidden = panes.length > 0;
   const columns = Math.max(1, Math.min(panes.length, Math.floor(workspace.clientWidth / 420)));
-  const expanded = focused && panes.length > 1 && columns > 1;
-  const spanRows = expanded && columns > 2 ? 2 : 1;
-  const cells = panes.length + (expanded ? 2 * spanRows - 1 : 0);
   workspace.style.setProperty("--columns", columns);
-  workspace.style.setProperty("--rows", Math.max(1, Math.ceil(cells / columns)));
-  for (const pane of panes) {
-    const active = pane === focused;
-    pane.classList.toggle("focused", active);
-    pane.style.gridColumn = active && expanded ? "span 2" : "";
-    pane.style.gridRow = active && expanded ? `span ${spanRows}` : "";
-    pane.querySelector(".focus-button").textContent = active ? "Unfocus" : "Focus";
-    pane.querySelector(".focus-button").setAttribute("aria-pressed", String(active));
-  }
+  workspace.style.setProperty("--rows", Math.max(1, Math.ceil(panes.length / columns)));
   requestAnimationFrame(() => {
-    for (const ui of following) {
-      if (ui.follow) ui.trace.scrollTop = ui.trace.scrollHeight;
-    }
+    for (const ui of sessions.values()) restorePosition(ui);
     for (const ui of sessions.values()) ui.reflow = false;
   });
 }
@@ -74,32 +62,83 @@ function makePane(name, cwd, kind) {
   const header = element("header", "pane-header");
   const title = element("span", "pane-title", name);
   const status = element("span", "pane-status", "idle");
-  const focus = element("button", "focus-button", "Focus");
-  focus.type = "button";
-  focus.addEventListener("click", () => { focused = focused === pane ? null : pane; layout(); });
-  header.append(title, status, focus);
+  header.append(title, status);
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
   directory.title = cwd || "Server working directory";
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  pane.append(header, directory);
+  header.append(directory);
+  const close = element("button", "pane-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", `Close ${name}`);
+  close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
+  header.append(close);
+  pane.append(header);
   workspace.append(pane);
-  return { pane, header, title, status, directory, error };
+  return { pane, header, title, status, directory, error, close };
+}
+
+function removeSession(ui) {
+  ui.traceResize.disconnect();
+  if (selected === ui.pane) selected = null;
+  ui.pane.remove();
+  sessions.delete(ui.id);
+  layout();
 }
 
 function atBottom(trace) {
-  return trace.scrollHeight - trace.scrollTop - trace.clientHeight < 32;
+  return trace.scrollHeight - trace.scrollTop - trace.clientHeight <= 1;
 }
+
+function selectedWithin(node) {
+  const selection = window.getSelection();
+  return selection && !selection.isCollapsed && selection.rangeCount > 0
+    && selection.getRangeAt(0).intersectsNode(node);
+}
+
+function rememberPosition(ui) {
+  if (ui.follow) { ui.anchor = null; return; }
+  const top = ui.trace.getBoundingClientRect().top;
+  const node = [...ui.trace.querySelectorAll(".entry")].find(node =>
+    !node.hidden && node.getBoundingClientRect().bottom > top);
+  ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
+}
+
+function restorePosition(ui) {
+  if (ui.follow && !selectedWithin(ui.trace)) {
+    ui.trace.scrollTop = ui.trace.scrollHeight;
+  } else if (ui.anchor?.node.isConnected) {
+    ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
+      - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
+  }
+}
+
+document.addEventListener("selectionchange", () => {
+  for (const ui of sessions.values()) {
+    if (selectedWithin(ui.trace)) {
+      ui.follow = false;
+      rememberPosition(ui);
+    }
+    for (const item of ui.entries.values()) {
+      if (item.superseded && !selectedWithin(item.node)) item.node.hidden = true;
+      if (item.deferred && !selectedWithin(item.node)) {
+        item.deferred = false;
+        renderEntry(ui, item);
+        item.rendered = true;
+      }
+    }
+    restorePosition(ui);
+  }
+});
 
 function followLatest(ui) {
   if (ui.followScheduled) return;
   ui.followScheduled = true;
   requestAnimationFrame(() => {
     ui.followScheduled = false;
-    if (ui.follow) {
+    if (ui.follow && !selectedWithin(ui.trace)) {
       ui.trace.scrollTop = ui.trace.scrollHeight;
-      ui.latest.hidden = true;
     }
   });
 }
@@ -110,72 +149,90 @@ function addSession(view) {
   const ui = makePane(view.name || id, view.cwd, "agent");
   ui.id = id;
   ui.entries = new Map();
+  ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
+  ui.activity = element("div", "working-status");
+  ui.activity.setAttribute("role", "status");
+  ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
-  ui.input.rows = 2;
-  ui.input.placeholder = "Message this agent…";
+  ui.input.rows = 1;
+  ui.input.placeholder = "Message…";
+  ui.input.title = "Enter to send · Shift+Enter for a new line · Esc to interrupt";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
-  const actions = element("div", "composer-actions");
-  ui.send = element("button", null, "Send");
-  ui.send.type = "submit";
-  ui.send.title = "Send input; an active turn will be interrupted and steered.";
-  ui.stop = element("button", null, "Stop");
-  ui.stop.type = "button";
-  ui.latest = element("button", "latest", "Latest ↓");
-  ui.latest.type = "button";
-  ui.latest.hidden = true;
-  ui.latest.addEventListener("click", () => { ui.follow = true; followLatest(ui); });
+  ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
-    ui.follow = atBottom(ui.trace);
-    ui.latest.hidden = ui.follow;
+    ui.follow = atBottom(ui.trace) && !selectedWithin(ui.trace);
+    rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
-    if (event.deltaY < 0) { ui.follow = false; ui.latest.hidden = false; }
+    if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
-  const hint = element("span", "composer-hint", "⌘ / Ctrl + Enter to send");
-  actions.append(ui.send, ui.stop, ui.latest, hint);
-  ui.composer.append(ui.input, actions);
-  ui.pane.append(ui.trace, ui.error, ui.composer);
+  ui.composer.append(ui.input);
+  ui.pane.append(ui.trace, ui.error, ui.activity, ui.composer);
+  function resizeInput() {
+    ui.input.style.height = "auto";
+    ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
+  }
+  let historyIndex = null;
+  let savedDraft = "";
+  ui.input.addEventListener("input", () => { historyIndex = null; resizeInput(); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
-    if (ui.follow) followLatest(ui);
+    restorePosition(ui);
   });
   traceResize.observe(ui.trace);
+  ui.traceResize = traceResize;
+  ui.close.addEventListener("click", async () => {
+    ui.close.disabled = true;
+    try {
+      await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      if (sessions.has(id)) removeSession(ui);
+    } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
+  });
   ui.input.addEventListener("keydown", event => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+    if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+        && ui.input.selectionStart === ui.input.selectionEnd) {
+      const prompts = [...ui.entries.values()].filter(item => item.kind === "user").map(item => item.text);
+      const up = event.key === "ArrowUp" && ui.input.selectionStart === 0;
+      const down = event.key === "ArrowDown" && ui.input.selectionEnd === ui.input.value.length;
+      if ((up && prompts.length) || (down && historyIndex !== null)) {
+        event.preventDefault();
+        if (historyIndex === null) { savedDraft = ui.input.value; historyIndex = prompts.length; }
+        historyIndex = Math.max(0, Math.min(prompts.length, historyIndex + (up ? -1 : 1)));
+        ui.input.value = historyIndex === prompts.length ? savedDraft : prompts[historyIndex];
+        ui.input.setSelectionRange(up ? 0 : ui.input.value.length, up ? 0 : ui.input.value.length);
+        resizeInput();
+        return;
+      }
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       ui.composer.requestSubmit();
     }
   });
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
-    if (ui.send.disabled || !ui.input.value.trim()) return;
+    if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
-    ui.send.disabled = true;
+    ui.sending = true;
     ui.error.hidden = true;
     try {
-      await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
-      if (ui.input.value === text) ui.input.value = "";
+      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
+      await ui.submission;
+      if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
     } catch (error) { showError(ui.error, error); }
-    finally { ui.send.disabled = false; }
-  });
-  ui.stop.addEventListener("click", async () => {
-    ui.stop.disabled = true;
-    ui.error.hidden = true;
-    try {
-      await request(`/api/sessions/${encodeURIComponent(id)}/stop`, "POST");
-    } catch (error) { showError(ui.error, error); }
-    finally { ui.stop.disabled = ui.pane.dataset.status !== "working"; }
+    finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
   setStatus(ui, view.status);
   for (const entry of view.entries || []) putEntry(ui, entry);
+  setPending(ui, view.pending || []);
   followLatest(ui);
   layout();
   return ui;
@@ -183,44 +240,282 @@ function addSession(view) {
 
 function setStatus(ui, status) {
   ui.pane.dataset.status = status || "idle";
-  ui.status.textContent = status || "idle";
-  ui.stop.disabled = status !== "working";
+  ui.activity.hidden = status !== "working";
+  ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
+}
+
+function toolEntry(text) {
+  const split = text.indexOf("\n");
+  const heading = split < 0 ? text : text.slice(0, split);
+  const payload = split < 0 ? "" : text.slice(split + 1);
+  const identity = /^(.+) \(([^()\r\n]+)\)$/.exec(heading);
+  let value;
+  try { value = JSON.parse(payload); } catch { /* Partial output stays visible. */ }
+  return { heading, payload, value, name: identity?.[1] || heading, callId: identity?.[2] };
+}
+
+function toolOutcome(result) {
+  if (!result) return { label: "…", failed: false };
+  const value = result.value;
+  if (value?.timed_out) return { label: "Timed out", failed: true };
+  if (value?.signal) return { label: `Signal ${value.signal}`, failed: true };
+  if (value?.error) return { label: "Failed", failed: true };
+  if (typeof value?.exit_code === "number" && value.exit_code !== 0) {
+    return { label: `Exit ${value.exit_code}`, failed: true };
+  }
+  return { label: "", failed: false };
+}
+
+function compactOutput(ui, item, content, text, label = "Output") {
+  const lines = text.trimEnd().split("\n");
+  if (label !== "Arguments" && lines.length <= 3 && text.length <= 240) {
+    if (label === "Reasoning") {
+      const wrapper = element("div");
+      wrapper.append(element("div", "activity-label", label), content);
+      return wrapper;
+    }
+    return content;
+  }
+  const details = element("details", "activity-details");
+  const openKey = `expanded${label}`;
+  details.open = Boolean(item[openKey]);
+  const summary = element("summary");
+  summary.title = `Expand or collapse ${label.toLowerCase()}`;
+  summary.append(element("span", "activity-label", label === "Arguments" ? "Tool arguments"
+    : label === "Command" ? lines[0] : `${label} · ${lines.length} ${lines.length === 1 ? "line" : "lines"}`));
+  const preview = element("pre", "activity-preview", lines.slice(0, 3).join("\n"));
+  content.classList.add("activity-full");
+  details.append(summary, content);
+  const block = element("div", "activity-block");
+  block.append(details);
+  if (label !== "Command" && label !== "Arguments") block.append(preview);
+  summary.addEventListener("click", event => {
+    event.preventDefault();
+    rememberPosition(ui);
+    details.open = !details.open;
+    item[openKey] = details.open;
+    restorePosition(ui);
+  });
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected) return;
+    if (Boolean(item[openKey]) === details.open) return;
+    item[openKey] = details.open;
+    restorePosition(ui);
+  });
+  return block;
+}
+
+function toolCommand(tool) {
+  const value = tool.value;
+  if (!value || typeof value !== "object") return tool.payload;
+  if (typeof value.command === "string") return value.command;
+  if (typeof value.path === "string") {
+    if (typeof value.content === "string") return `${value.path}\n${value.content}`;
+    if (typeof value.old === "string" && typeof value.new === "string") {
+      return `${value.path}\n- ${value.old}\n+ ${value.new}`;
+    }
+    return value.path + (value.pattern ? `\n${value.pattern}` : "");
+  }
+  if (typeof value.to === "string" && typeof value.text === "string") return `${value.to}\n${value.text}`;
+  if (typeof value.pattern === "string") return value.pattern + (value.glob ? `\n${value.glob}` : "");
+  return JSON.stringify(value, null, 2);
+}
+
+function toolOutput(tool) {
+  const output = element("div", "tool-output");
+  const value = tool.value;
+  if (value?.ok === true && Object.keys(value).length === 1) return output;
+  if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
+    for (const channel of ["stdout", "stderr"]) {
+      if (value[channel]?.text) output.append(element("pre", `tool-text ${channel}`, value[channel].text));
+      if (value[channel]?.truncated) output.append(element("div", "tool-note", `${channel} truncated`));
+    }
+    if (value.error) output.append(element("pre", "tool-text stderr", String(value.error)));
+    if (!output.childNodes.length) output.append(element("div", "tool-note", "No output"));
+  } else if (value && typeof value.error === "string") {
+    output.append(element("pre", "tool-text stderr", value.error));
+  } else if (value?.queued === true && typeof value.to === "string") {
+    output.append(element("pre", "tool-text", value.accepted_by_agent === false
+      ? "Queued; recipient has not accepted the message yet." : "Queued for recipient."));
+  } else if (value && typeof value.text === "string") {
+    output.append(element("pre", "tool-text", value.text));
+    if (value.truncated) output.append(element("div", "tool-note", "Output truncated"));
+  } else {
+    output.append(element("pre", "tool-text", value !== undefined ? JSON.stringify(value, null, 2) : tool.payload));
+  }
+  return output;
+}
+
+function renderToolEntry(ui, item) {
+  const tool = toolEntry(item.text);
+  const counterpartKind = item.kind === "tool_call" ? "tool_result" : "tool_call";
+  const counterpart = tool.callId && [...ui.entries.values()].find(entry => {
+    if (entry.kind !== counterpartKind) return false;
+    const other = toolEntry(entry.text);
+    return other.callId === tool.callId && other.heading === tool.heading;
+  });
+  const call = item.kind === "tool_call" ? item : counterpart;
+  const result = item.kind === "tool_result" ? item : counterpart;
+  const owner = call || result;
+  const command = toolEntry(owner.text);
+  const outcome = toolOutcome(result ? toolEntry(result.text) : null);
+  const text = call ? toolCommand(command) : "";
+  const newline = text.indexOf("\n");
+  const firstLine = newline < 0 ? text : text.slice(0, newline);
+  const rest = newline < 0 ? "" : text.slice(newline + 1);
+  const output = result ? toolOutput(toolEntry(result.text)) : null;
+  const outputText = output ? [...output.children].map(child => child.textContent).join("\n") : "";
+  const expandable = Boolean(call || rest || firstLine.length > 120 || outputText.length > 240 || outputText.trimEnd().split("\n").length > 3);
+  let previous = result?.node.previousElementSibling;
+  while (previous?.hidden) previous = previous.previousElementSibling;
+  const joined = Boolean(call && result && previous === call.node);
+  if (call) call.node.classList.toggle("tool-joined-call", joined);
+  if (result) result.node.classList.toggle("tool-joined-result", joined);
+  for (const entry of [call, result].filter(Boolean)) {
+    entry.node.title = tool.heading;
+    entry.node.dataset.toolFailed = String(outcome.failed);
+  }
+  if ([call, result].some(entry => entry && selectedWithin(entry.node))) {
+    owner.deferred = true;
+    return;
+  }
+  owner.body.replaceChildren();
+  if (result && result !== owner) result.body.replaceChildren();
+  const header = element(expandable ? "summary" : "div", "tool-header");
+  header.append(element("span", "tool-name", command.name === "exec_command" ? "$" : command.name));
+  if (firstLine) header.append(element("span", "tool-command", firstLine));
+  header.append(element("span", "tool-status", outcome.label));
+  let details;
+  if (expandable) {
+    details = element("details", "activity-details tool-operation");
+    details.open = Boolean(owner.expandedTool);
+    header.title = "Expand or collapse tool call and result";
+    details.append(header);
+    if (rest) details.append(element("pre", "tool-text activity-full", rest));
+    owner.body.append(details);
+  } else {
+    owner.body.append(header);
+  }
+  let preview;
+  if (result && outputText) {
+    // Intervening peer or assistant text keeps its place between call and result.
+    if (call && !joined) result.body.append(element("div", "tool-note", `${command.name} result`));
+    result.body.append(output);
+    if (expandable) {
+      preview = element("pre", "activity-preview", outputText.split("\n").slice(0, 3).join("\n"));
+      result.body.append(preview);
+    }
+  }
+  function showResult(open) {
+    if (!preview) return;
+    output.hidden = !open;
+    preview.hidden = open;
+  }
+  showResult(Boolean(owner.expandedTool));
+  if (details) {
+    header.addEventListener("click", event => {
+      event.preventDefault();
+      rememberPosition(ui);
+      details.open = !details.open;
+      owner.expandedTool = details.open;
+      showResult(owner.expandedTool);
+      restorePosition(ui);
+    });
+    details.addEventListener("toggle", () => {
+      if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
+      owner.expandedTool = details.open;
+      showResult(details.open);
+      restorePosition(ui);
+    });
+  }
+}
+
+function renderEntry(ui, item) {
+  const { node, body, kind, text } = item;
+  node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
+  if (kind === "reasoning") return;
+  if (kind === "assistant") {
+    body.textContent = text;
+  } else if (kind === "tool_call" || kind === "tool_result") {
+    renderToolEntry(ui, item);
+  } else if (kind === "tool_arguments") {
+    body.replaceChildren(compactOutput(ui, item, element("pre", "tool-text", text), text, "Arguments"));
+  } else {
+    body.textContent = text;
+  }
 }
 
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
-  let existing = ui.entries.get(id);
-  if (!existing) {
+  let item = ui.entries.get(id);
+  if (!item) {
+    const kind = entry.kind || "notice";
     const node = element("article", "entry");
-    node.dataset.kind = entry.kind || "notice";
-    const label = element("div", "entry-kind", (entry.kind || "notice").replaceAll("_", " "));
-    const body = element("pre", "entry-body");
-    const text = document.createTextNode("");
-    body.append(text);
-    node.append(label, body);
+    node.dataset.kind = kind;
+    const body = element("div", "entry-body");
+    if (kind === "context" && ui.entries.size === 0) {
+      const details = element("details", "session-context");
+      details.append(element("summary", null, "Context"), body);
+      const raw = element("a", "raw-transcript", "Full session record");
+      raw.href = `/api/sessions/${encodeURIComponent(ui.id)}`;
+      raw.target = "_blank";
+      raw.rel = "noopener";
+      details.append(raw);
+      node.append(details);
+    } else {
+      if (kind === "context") node.append(element("div", "entry-kind", "Context"));
+      node.append(body);
+    }
+    // Transport receipts remain in the full record; they are not model output.
+    node.hidden = kind === "reasoning" || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
+    if (entry.replaces) {
+      const replaced = ui.entries.get(String(entry.replaces));
+      if (replaced) {
+        replaced.superseded = true;
+        if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
+      }
+    }
     ui.trace.append(node);
-    existing = { node, text };
-    ui.entries.set(id, existing);
+    item = { id, node, body, kind, text: "" };
+    ui.entries.set(id, item);
+    if (kind === "user") ui.pending.add(id);
   }
-  if (delta) existing.text.appendData(entry.text || "");
-  else if (existing.text.data !== (entry.text || "")) existing.text.data = entry.text || "";
-  if (ui.follow) followLatest(ui);
-  else ui.latest.hidden = false;
+  const text = delta ? item.text + (entry.text || "") : (entry.text || "");
+  if (text !== item.text || !item.rendered) {
+    item.text = text;
+    if (!item.renderScheduled) {
+      item.renderScheduled = true;
+      requestAnimationFrame(() => {
+        item.renderScheduled = false;
+        if (selectedWithin(item.node)) { item.deferred = true; return; }
+        rememberPosition(ui);
+        renderEntry(ui, item);
+        item.rendered = true;
+        restorePosition(ui);
+      });
+    }
+  }
+}
+
+function setPending(ui, pending) {
+  ui.pending = new Set(pending);
+  for (const item of ui.entries.values()) {
+    if (item.kind === "user") item.node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
+  }
 }
 
 function snapshot(views) {
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
-      setStatus(ui, "error");
-      showError(ui.error, "This session is no longer available on the server.");
+      removeSession(ui);
     }
   }
   for (const view of views) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
     const follow = ui.follow;
-    const position = ui.trace.scrollTop;
+    rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
     ui.directory.textContent = view.cwd;
     ui.directory.title = view.cwd;
@@ -232,18 +527,19 @@ function snapshot(views) {
     for (const [id, entry] of ui.entries) {
       if (!present.has(id)) { entry.node.remove(); ui.entries.delete(id); }
     }
+    setPending(ui, view.pending || []);
     setStatus(ui, view.status);
     if (follow) followLatest(ui);
-    else ui.trace.scrollTop = position;
+    else restorePosition(ui);
   }
 }
 
 function startEvents() {
   events?.close();
   events = new EventSource("/api/events");
-  events.onopen = () => { connection.textContent = "Connected"; };
+  events.onopen = () => { document.body.classList.remove("disconnected"); };
   events.onerror = () => {
-    connection.textContent = "Disconnected · reconnecting…";
+    document.body.classList.add("disconnected");
     request("/api/config").catch(error => {
       if (error.status === 401) { events.close(); requireLogin(); }
     });
@@ -261,6 +557,11 @@ function startEvents() {
       if (message.type === "session") { addSession(message.session); return; }
       const ui = sessions.get(String(message.session_id));
       if (!ui) return;
+      if (message.type === "closed") { removeSession(ui); return; }
+      if (message.type === "input") {
+        ui.pending.delete(String(message.id));
+        setPending(ui, ui.pending);
+      }
       if (message.type === "entry") putEntry(ui, message.entry);
       if (message.type === "delta") putEntry(ui, { id: message.entry_id, text: message.text }, true);
       if (message.type === "status") setStatus(ui, message.status);
@@ -273,17 +574,14 @@ function attachTerminal(info) {
   if (terminals.has(id)) return terminals.get(id);
   const ui = makePane(`Terminal ${id.replace(/^term-/, "").slice(0, 8)}`, info.cwd, "terminal");
   ui.title.title = id;
-  const close = element("button", null, "Close");
-  close.type = "button";
-  close.title = "End this terminal's shell session.";
-  ui.header.append(close);
+  const close = ui.close;
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
   const term = new Terminal({
     cursorBlink: true,
     disableStdin: true,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    fontSize: 12,
+    fontFamily: '"MesloLGS NF", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 11,
     scrollback: 5000,
     theme: { background: "#1e1e1e", foreground: "#d7d7d7", cursor: "#d7d7d7" },
   });
@@ -293,50 +591,87 @@ function attachTerminal(info) {
   let socket;
   let closed = false;
   let retry;
+  let clientId;
+  let controller = false;
+  let replaying = true;
+  let wantsControl = false;
+  let rendering = Promise.resolve();
   function send(message) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
   function resize() {
+    if (!controller || replaying) return;
     const size = fit.proposeDimensions();
-    if (size) term.resize(Math.max(1, Math.min(500, size.cols)), Math.max(1, Math.min(500, size.rows)));
+    if (size) send({ type: "resize", cols: Math.max(1, Math.min(500, size.cols)), rows: Math.max(1, Math.min(500, size.rows)) });
   }
   function connect() {
     if (closed) return;
     clearTimeout(retry);
     if (socket) { socket.onclose = null; socket.close(); }
-    ui.status.textContent = "connecting";
+    ui.status.textContent = "";
+    ui.pane.classList.add("disconnected");
     term.options.disableStdin = true;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(`${scheme}//${location.host}/api/terminals/${encodeURIComponent(id)}/ws`);
     socket.binaryType = "arraybuffer";
+    const connectedSocket = socket;
+    controller = false;
+    replaying = true;
     socket.onopen = () => {
-      term.reset();
-      term.options.disableStdin = false;
-      ui.status.textContent = "connected";
+      ui.pane.classList.remove("disconnected");
       ui.error.hidden = true;
-      resize();
-      send({ type: "resize", cols: term.cols, rows: term.rows });
     };
     socket.onmessage = event => {
-      if (event.data instanceof ArrayBuffer) term.write(new Uint8Array(event.data));
-      else term.write(event.data);
+      rendering = rendering.then(async () => {
+        if (socket !== connectedSocket || closed) return;
+        if (event.data instanceof ArrayBuffer) {
+          await new Promise(resolve => term.write(new Uint8Array(event.data), resolve));
+          return;
+        }
+        const message = JSON.parse(event.data);
+        if (message.type === "hello") clientId = message.id;
+        if (message.type === "replay_start") {
+          replaying = true;
+          term.options.disableStdin = true;
+          term.reset();
+        }
+        if (message.type === "resize") term.resize(message.cols, message.rows);
+        if (message.type === "replay_end") {
+          replaying = false;
+          if (wantsControl) { wantsControl = false; send({ type: "control" }); }
+        }
+        if (message.type === "control") {
+          controller = message.id === clientId;
+          term.options.disableStdin = replaying || !controller;
+          resize();
+        }
+      }).catch(error => showError(ui.error, error));
     };
     socket.onclose = async () => {
       if (closed) return;
+      ui.pane.classList.add("disconnected");
       term.options.disableStdin = true;
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
         if (!current || !current.running) { ui.status.textContent = "exited"; return; }
       } catch (error) {
-        if (error.status === 401) { ui.status.textContent = "disconnected"; requireLogin(); return; }
+        if (error.status === 401) { requireLogin(); return; }
       }
-      ui.status.textContent = "reconnecting";
       retry = setTimeout(connect, 2000);
     };
   }
-  term.onData(data => send({ type: "input", data }));
-  term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
+  term.onData(data => { if (controller && !replaying) send({ type: "input", data }); });
+  function takeControl() {
+    if (replaying) wantsControl = true;
+    else if (!controller) send({ type: "control" });
+  }
+  host.addEventListener("focusin", takeControl);
+  host.addEventListener("pointerdown", takeControl);
+  function resumeControl() {
+    if (host.contains(document.activeElement)) takeControl();
+  }
+  window.addEventListener("focus", resumeControl);
   const observer = new ResizeObserver(() => {
     if (host.clientWidth > 0 && host.clientHeight > 0) resize();
   });
@@ -349,8 +684,9 @@ function attachTerminal(info) {
       clearTimeout(retry);
       socket?.close();
       observer.disconnect();
+      window.removeEventListener("focus", resumeControl);
       term.dispose();
-      if (focused === ui.pane) focused = null;
+      if (selected === ui.pane) selected = null;
       ui.pane.remove();
       terminals.delete(id);
       layout();
@@ -405,7 +741,7 @@ createForm.addEventListener("submit", async event => {
 
 function requireLogin() {
   login.hidden = false;
-  connection.textContent = "Authentication required";
+  document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
 }
@@ -445,6 +781,41 @@ async function initialize() {
     if (error.status !== 401) showError(workspaceError, error);
   }
 }
+document.addEventListener("pointerdown", event => {
+  selected = event.target.closest(".pane");
+});
+document.addEventListener("focusin", event => {
+  selected = event.target.closest(".pane");
+});
+document.addEventListener("keydown", async event => {
+  if (!event.defaultPrevented && !event.isComposing && !dialog.open
+      && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
+      && !event.target.closest("input, textarea, [contenteditable]")) {
+    const selection = window.getSelection();
+    const reader = selection && !selection.isCollapsed && [...sessions.values()].find(ui =>
+      ui.trace.contains(selection.anchorNode) && ui.trace.contains(selection.focusNode));
+    if (reader) {
+      event.preventDefault();
+      reader.input.focus({ preventScroll: true });
+      reader.input.setRangeText(event.key, reader.input.selectionStart, reader.input.selectionEnd, "end");
+      selection.removeAllRanges();
+      reader.input.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+  }
+  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open) return;
+  const ui = [...sessions.values()].find(ui => ui.pane === selected);
+  if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
+  event.preventDefault();
+  ui.interrupting = true;
+  ui.error.hidden = true;
+  try {
+    await ui.submission?.catch(() => {});
+    await request(`/api/sessions/${encodeURIComponent(ui.id)}/interrupt`, "POST");
+  }
+  catch (error) { showError(ui.error, error); }
+  finally { ui.interrupting = false; }
+});
 initialize();
 window.addEventListener("resize", layout, { passive: true });
 layout();

@@ -100,9 +100,10 @@ pub async fn serve() -> Result<()> {
         .route("/api/login", post(login))
         .route("/api/config", get(config))
         .route("/api/sessions", get(sessions).post(create))
-        .route("/api/sessions/{id}", get(session))
+        .route("/api/sessions/{id}", get(session).delete(close_session))
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/stop", post(stop))
+        .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
         .with_state(app.clone())
         .merge(terminals.router())
@@ -227,6 +228,10 @@ async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<
         .map(|view| Json(json!(view)))
         .map_err(invalid)
 }
+async fn close_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub.close(&id).await.map_err(invalid)?;
+    Ok(Json(json!({"status":"closed"})))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -248,6 +253,13 @@ async fn stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl 
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status":"stop_requested"})),
+    ))
+}
+async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    app.hub.interrupt(&id).map_err(invalid)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status":"interrupt_requested"})),
     ))
 }
 async fn events(
@@ -278,23 +290,58 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 async fn index() -> Response {
-    bytes("text/html; charset=utf-8", include_bytes!("web/index.html"))
+    ui_asset(
+        "index.html",
+        "text/html; charset=utf-8",
+        include_bytes!("web/index.html"),
+    )
 }
 async fn asset(Path(path): Path<String>) -> Response {
     match path.as_str() {
-        "app.js" => bytes(
+        "app.js" => ui_asset(
+            "app.js",
             "text/javascript; charset=utf-8",
             include_bytes!("web/app.js"),
         ),
-        "style.css" => bytes("text/css; charset=utf-8", include_bytes!("web/style.css")),
+        "style.css" => ui_asset(
+            "style.css",
+            "text/css; charset=utf-8",
+            include_bytes!("web/style.css"),
+        ),
         "vendor/xterm.js" => bytes("text/javascript", include_bytes!("web/vendor/xterm.js")),
         "vendor/xterm.css" => bytes("text/css", include_bytes!("web/vendor/xterm.css")),
         "vendor/addon-fit.js" => {
             bytes("text/javascript", include_bytes!("web/vendor/addon-fit.js"))
         }
+        "vendor/markdown-it.min.js" => bytes(
+            "text/javascript",
+            include_bytes!("web/vendor/markdown-it.min.js"),
+        ),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 fn bytes(content_type: &'static str, content: &'static [u8]) -> Response {
     ([(header::CONTENT_TYPE, content_type)], Body::from(content)).into_response()
+}
+
+fn ui_asset(_name: &'static str, content_type: &'static str, _embedded: &'static [u8]) -> Response {
+    #[cfg(debug_assertions)]
+    {
+        let path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/web")).join(_name);
+        match std::fs::read(path) {
+            Ok(content) => {
+                ([(header::CONTENT_TYPE, content_type)], Body::from(content)).into_response()
+            }
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot read development UI asset {_name}: {error}"),
+            )
+                .into_response(),
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        bytes(content_type, _embedded)
+    }
 }

@@ -22,6 +22,7 @@ mod tests {
             id: id.into(),
             name: "exec_command".into(),
             arguments: "{}".into(),
+            argument_entry: None,
         };
         let mut session = Session::default();
         session
@@ -54,13 +55,25 @@ struct Call {
     id: String,
     name: String,
     arguments: String,
+    argument_entry: Option<String>,
 }
 impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
-    pub async fn run(&mut self, client: &Client, tools: &Tools, hub: &Hub, id: &str) -> Result<()> {
-        loop {
+    pub fn has_pending_tools(&self) -> bool {
+        !self.pending.is_empty()
+    }
+    // Returns whether another step is needed. Queued input is applied before
+    // the next model request, after this response's tool calls have finished.
+    pub async fn step(
+        &mut self,
+        client: &Client,
+        tools: &Tools,
+        hub: &Hub,
+        id: &str,
+    ) -> Result<bool> {
+        let Some(call) = self.pending.pop_front() else {
             for (sender, text) in hub.take_inbox(id) {
                 self.user(format!("Peer message from {sender}:\n{text}"));
                 hub.entry(
@@ -70,6 +83,7 @@ impl Session {
                 );
             }
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
+            let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
             let output = client
                 .respond(&self.history, tool_calls::definitions(), |event| {
@@ -89,6 +103,11 @@ impl Session {
                         .entry(key)
                         .or_insert_with(|| hub.entry(id, kind, ""));
                     hub.delta(id, entry, text);
+                    if kind == "tool_arguments" {
+                        if let Some(item_id) = event["item_id"].as_str() {
+                            argument_entries.insert(item_id.to_owned(), entry.clone());
+                        }
+                    }
                     if kind == "assistant" {
                         partial.push_str(text);
                     }
@@ -109,44 +128,45 @@ impl Session {
                         id: field("call_id")?,
                         name: field("name")?,
                         arguments: field("arguments")?,
+                        argument_entry: item["id"]
+                            .as_str()
+                            .and_then(|item_id| argument_entries.remove(item_id)),
                     })
                 })
                 .collect();
             self.pending = calls?;
             self.history.extend(output);
-            if self.pending.is_empty() {
-                return Ok(());
+            return Ok(!self.pending.is_empty());
+        };
+        hub.entry_replacing(
+            id,
+            "tool_call",
+            format!("{} ({})\n{}", call.name, call.id, call.arguments),
+            call.argument_entry.clone(),
+        );
+        self.running = Some(call);
+        let call = self.running.as_ref().expect("running call");
+        let result = match call.name.as_str() {
+            "list_agents" => hub.peers(),
+            "send_message" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Message {
+                    to: String,
+                    text: String,
+                }
+                match serde_json::from_str::<Message>(&call.arguments) {
+                    Ok(message) => hub
+                        .send_peer(id, &message.to, &message.text)
+                        .unwrap_or_else(|e| json!({"error":e.to_string()})),
+                    Err(error) => json!({"error":error.to_string()}),
+                }
             }
-            while let Some(call) = self.pending.pop_front() {
-                hub.entry(
-                    id,
-                    "tool_call",
-                    format!("{} ({})\n{}", call.name, call.id, call.arguments),
-                );
-                self.running = Some(call);
-                let call = self.running.as_ref().expect("running call");
-                let result = match call.name.as_str() {
-                    "list_agents" => hub.peers(),
-                    "send_message" => {
-                        #[derive(serde::Deserialize)]
-                        #[serde(deny_unknown_fields)]
-                        struct Message {
-                            to: String,
-                            text: String,
-                        }
-                        match serde_json::from_str::<Message>(&call.arguments) {
-                            Ok(message) => hub
-                                .send_peer(id, &message.to, &message.text)
-                                .unwrap_or_else(|e| json!({"error":e.to_string()})),
-                            Err(error) => json!({"error":error.to_string()}),
-                        }
-                    }
-                    _ => tool_calls::execute(tools, &call.name, &call.arguments).await,
-                };
-                let call = self.running.take().expect("running call");
-                self.finish(call, result, hub, id);
-            }
-        }
+            _ => tool_calls::execute(tools, &call.name, &call.arguments).await,
+        };
+        let call = self.running.take().expect("running call");
+        self.finish(call, result, hub, id);
+        Ok(true)
     }
     pub fn interrupt(&mut self, hub: &Hub, id: &str) {
         if !self.partial_text.is_empty() {

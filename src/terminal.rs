@@ -47,9 +47,67 @@ struct Terminal {
 }
 
 struct Output {
-    bytes: VecDeque<u8>,
+    history: VecDeque<TerminalEvent>,
+    bytes: usize,
     dropped: usize,
-    tx: broadcast::Sender<Vec<u8>>,
+    initial_size: PtySize,
+    controller: Option<String>,
+    tx: broadcast::Sender<TerminalEvent>,
+}
+
+#[derive(Clone)]
+enum TerminalEvent {
+    Data(Vec<u8>),
+    Resize(PtySize),
+    Control(String),
+}
+
+impl TerminalEvent {
+    fn cost(&self) -> usize {
+        match self {
+            Self::Data(bytes) => bytes.len(),
+            _ => 32,
+        }
+    }
+
+    fn message(self) -> Message {
+        match self {
+            Self::Data(bytes) => Message::Binary(bytes.into()),
+            Self::Resize(size) => Message::Text(
+                serde_json::json!({"type":"resize", "cols":size.cols, "rows":size.rows})
+                    .to_string()
+                    .into(),
+            ),
+            Self::Control(id) => Message::Text(
+                serde_json::json!({"type":"control", "id":id})
+                    .to_string()
+                    .into(),
+            ),
+        }
+    }
+}
+
+fn marker(kind: &str) -> Message {
+    Message::Text(serde_json::json!({"type":kind}).to_string().into())
+}
+
+impl Output {
+    fn publish(&mut self, event: TerminalEvent) {
+        self.bytes += event.cost();
+        self.history.push_back(event.clone());
+        while self.bytes > REPLAY_BYTES {
+            let Some(old) = self.history.pop_front() else {
+                break;
+            };
+            self.bytes -= old.cost();
+            match old {
+                TerminalEvent::Resize(size) => self.initial_size = size,
+                TerminalEvent::Data(bytes) => self.dropped += bytes.len(),
+                TerminalEvent::Control(_) => {}
+            }
+        }
+        let _ = self.tx.send(event);
+    }
 }
 
 #[derive(Serialize)]
@@ -72,6 +130,7 @@ struct Create {
 enum Input {
     Input { data: String },
     Resize { cols: u16, rows: u16 },
+    Control,
 }
 
 impl TerminalHub {
@@ -123,8 +182,7 @@ impl TerminalHub {
 impl Terminal {
     fn open(id: String, cwd: PathBuf, size: PtySize) -> anyhow::Result<Arc<Self>> {
         let pair = native_pty_system().openpty(size)?;
-        let mut command = CommandBuilder::new("/bin/bash");
-        command.args(["--noprofile", "--norc", "-i"]);
+        let mut command = CommandBuilder::new_default_prog();
         command.cwd(&cwd);
         command.env("TERM", "xterm-256color");
         command.env_remove("OPENAI_API_KEY");
@@ -143,8 +201,11 @@ impl Terminal {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             output: Mutex::new(Output {
-                bytes: VecDeque::new(),
+                history: VecDeque::new(),
+                bytes: 0,
                 dropped: 0,
+                initial_size: size,
+                controller: None,
                 tx: broadcast::channel(64).0,
             }),
         });
@@ -169,12 +230,10 @@ impl Terminal {
     }
 
     fn publish(&self, bytes: Vec<u8>) {
-        let mut output = self.output.lock().unwrap();
-        output.bytes.extend(&bytes);
-        let extra = output.bytes.len().saturating_sub(REPLAY_BYTES);
-        output.bytes.drain(..extra);
-        output.dropped += extra;
-        let _ = output.tx.send(bytes);
+        self.output
+            .lock()
+            .unwrap()
+            .publish(TerminalEvent::Data(bytes));
     }
 
     fn read(&self, mut reader: Box<dyn Read + Send>) {
@@ -213,17 +272,41 @@ impl Terminal {
         self.output_done.store(true, Ordering::SeqCst);
     }
 
-    fn attach(&self) -> (Vec<u8>, broadcast::Receiver<Vec<u8>>) {
+    fn attach(
+        &self,
+    ) -> (
+        Vec<TerminalEvent>,
+        broadcast::Receiver<TerminalEvent>,
+        String,
+    ) {
         let output = self.output.lock().unwrap();
-        let mut replay = Vec::new();
+        let mut replay = vec![TerminalEvent::Resize(output.initial_size)];
         if output.dropped > 0 {
-            replay.extend_from_slice(format!(
-                "\r\n[Earlier terminal output omitted: {} bytes. Replaying the retained tail.]\r\n",
-                output.dropped
-            ).as_bytes());
+            replay.push(TerminalEvent::Data(format!(
+                "\r\n[Earlier terminal output omitted: {} bytes. Replaying the retained tail.]\r\n", output.dropped
+            ).into_bytes()));
         }
-        replay.extend(output.bytes.iter());
-        (replay, output.tx.subscribe())
+        for event in &output.history {
+            match (replay.last_mut(), event) {
+                (Some(TerminalEvent::Data(buffer)), TerminalEvent::Data(bytes)) => {
+                    buffer.extend(bytes)
+                }
+                _ => replay.push(event.clone()),
+            }
+        }
+        (
+            replay,
+            output.tx.subscribe(),
+            output.controller.clone().unwrap_or_default(),
+        )
+    }
+
+    fn release_control(&self, client_id: &str) {
+        let mut output = self.output.lock().unwrap();
+        if output.controller.as_deref() == Some(client_id) {
+            output.controller = None;
+            let _ = output.tx.send(TerminalEvent::Control(String::new()));
+        }
     }
 
     fn close(&self) -> anyhow::Result<()> {
@@ -385,21 +468,36 @@ async fn connect(
 }
 
 async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
-    let (replay, mut output) = terminal.attach();
-    if socket.send(Message::Binary(replay.into())).await.is_err() {
+    let client_id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut output = terminal.output.lock().unwrap();
+        if output.controller.is_none() {
+            output.controller = Some(client_id.clone());
+        }
+    }
+    let hello = Message::Text(
+        serde_json::json!({"type":"hello", "id":client_id})
+            .to_string()
+            .into(),
+    );
+    if socket.send(hello).await.is_err() {
+        terminal.release_control(&client_id);
+        return;
+    }
+    let (replay, mut output, controller) = terminal.attach();
+    if replay_to(&mut socket, replay, controller).await.is_err() {
+        terminal.release_control(&client_id);
         return;
     }
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
             result = output.recv() => match result {
-                Ok(bytes) => if socket.send(Message::Binary(bytes.into())).await.is_err() { break },
+                Ok(event) => if socket.send(event.message()).await.is_err() { break },
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let (replay, receiver) = terminal.attach();
+                    let (replay, receiver, controller) = terminal.attach();
                     output = receiver;
-                    let mut reset = b"\x1bc\r\n[Display fell behind; replaying retained terminal output.]\r\n".to_vec();
-                    reset.extend(replay);
-                    if socket.send(Message::Binary(reset.into())).await.is_err() { break }
+                    if replay_to(&mut socket, replay, controller).await.is_err() { break }
                 }
                 Err(_) => break,
             },
@@ -411,6 +509,7 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
                 };
                 let result = match serde_json::from_str::<Input>(&text) {
                     Ok(Input::Input { data }) => {
+                        if terminal.output.lock().unwrap().controller.as_ref() != Some(&client_id) { continue; }
                         let writing = terminal.clone();
                         tokio::task::spawn_blocking(move || {
                             let mut writer = writing.writer.lock().unwrap();
@@ -419,9 +518,28 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
                             .and_then(|result| result.map_err(|error| error.to_string()))
                     }
                     Ok(Input::Resize { cols, rows }) => match size(cols, rows) {
-                        Ok(size) => terminal.master.lock().unwrap().resize(size).map_err(|error| error.to_string()),
+                        Ok(size) => {
+                            let mut output = terminal.output.lock().unwrap();
+                            if output.controller.as_ref() != Some(&client_id) { continue; }
+                            let master = terminal.master.lock().unwrap();
+                            match master.get_size().and_then(|current| {
+                                if current.cols == size.cols && current.rows == size.rows { return Ok(false); }
+                                master.resize(size)?;
+                                Ok(true)
+                            }) {
+                                Ok(true) => { output.publish(TerminalEvent::Resize(size)); Ok(()) },
+                                Ok(false) => Ok(()),
+                                Err(error) => Err(error.to_string()),
+                            }
+                        },
                         Err((_, message)) => Err(message),
                     },
+                    Ok(Input::Control) => {
+                        let mut output = terminal.output.lock().unwrap();
+                        output.controller = Some(client_id.clone());
+                        let _ = output.tx.send(TerminalEvent::Control(client_id.clone()));
+                        Ok(())
+                    }
                     Err(error) => Err(format!("Invalid terminal input: {error}")),
                 };
                 if let Err(error) = result {
@@ -440,6 +558,22 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
             }
         }
     }
+    terminal.release_control(&client_id);
+}
+
+async fn replay_to(
+    socket: &mut WebSocket,
+    replay: Vec<TerminalEvent>,
+    controller: String,
+) -> Result<(), axum::Error> {
+    socket.send(marker("replay_start")).await?;
+    for event in replay {
+        socket.send(event.message()).await?;
+    }
+    socket.send(marker("replay_end")).await?;
+    socket
+        .send(TerminalEvent::Control(controller).message())
+        .await
 }
 
 fn internal(error: impl std::fmt::Display) -> Error {

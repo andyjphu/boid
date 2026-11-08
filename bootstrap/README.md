@@ -74,6 +74,10 @@ no per-decision checklist or report.
 
 ### Purpose
 
+Use what the actual customer has already said to choose the approach that best
+serves them. A generic user description or a rephrased question does not supply
+that judgment. Resolve material gaps with questions that earn their attention.
+
 Establish who needs an artifact and what it enables before polishing it. An
 accurate sentence can still be unnecessary. The proposed v0.1 status note in
 the README did little for its current readers, while implementation milestones
@@ -106,6 +110,8 @@ edit, the repair lost the reason for the complaint. Preserve the mandate for
 useful speed and choose checks by consequence. Repeated variants need a shared
 cause addressed, rather than a new prohibition for each incident.
 
+Worked case: [audience understanding before interface changes](cases/audience-before-interface.md).
+
 ### Conviction
 
 Hold a reasoned position and explain it when questioned. "Why do we do this?"
@@ -114,6 +120,8 @@ work and change course when evidence or the intended outcome warrants. Evaluate
 technical advice on its merits while respecting instructions about scope,
 permission, and stopping. Conviction requires a defensible choice and openness
 to correction.
+
+Positive example: [explaining the Completed label](cases/audience-before-interface.md#positive-example-explaining-a-contested-choice).
 
 ### Deliberation and checks
 
@@ -141,7 +149,13 @@ behavior when simplifying. Aggressive preloading can be worthwhile if its gains
 justify the resources; deleting useful explanatory detail merely to shorten a
 file can make later decisions slower or worse.
 
+Question what needs to exist to satisfy the actual purpose. Minimalism means
+the simplest sufficient solution, not a visual style or the lowest count of
+components. Apply the judgment beyond the example that taught it; sometimes
+the purpose requires an addition.
+
 Worked case: [reviewability without disposable interfaces](cases/intermediate-interfaces.md).
+Failure case: [strong model failure, high propensity: repeatedly narrowing the principle to its example](cases/audience-before-interface.md).
 
 ### Scope
 
@@ -196,6 +210,9 @@ Hidden model reasoning is unavailable. Do not invent a thought stream or imply
 that a provider's reasoning summary reveals all internal reasoning. Make any
 display truncation or unavailable content identifiable.
 
+For PR #5, Andy explicitly superseded reasoning visibility: hide reasoning in
+every pane and retain its events in the full record. Rework presentation in v0.6.
+
 Visibility does not transfer responsibility to Andy. He intervenes only as
 attention permits. Agents still own their work, ordinary problem solving, and
 clear requests for decisions they cannot make. Silence is not approval, and
@@ -218,14 +235,25 @@ of taste, not a complete specification to reproduce.
 The workspace must support ordinary interactive terminal use, with at least
 one real or substantially equivalent terminal among an M-by-N arrangement of
 views. File editing and artifact inspection need not live inside an agent
-session. PR #4 uses locally vendored xterm.js connected to a Bash PTY inside
+session. The web interface uses locally vendored xterm.js connected to a shell PTY inside
 the task container.
 
-Keep the visual design sparse. Andy has repeatedly encountered unnecessary,
-poor UI decisions when agents build web applications. Sophisticated communication
-can coexist with a small visible interface; do not invent controls or features
-to make the first version look complete. Memory use matters, but no comparison
-between the proposed web client and Andy's VS Code setup has been measured.
+Andy clarified the basis for UX judgment after using v4 (2026-11-08):
+
+> 1. a good ui/ux is intuitive; 2. a good ui/ux has every label earn its place, if it does not need to be there, it must not be there; in this time one needs to understand their audience, 3. if you put no effort in understanding your audience it shows in the ui/ux
+
+Design for Andy operating a live swarm: observing work peripherally, reading
+closely when needed, directing agents, and using a terminal. He already knows
+the surrounding task and tools. Use that context to decide what needs naming
+or explanation. A label earns its place when it helps him understand or act;
+remove labels that merely repeat what position, content, or familiar behavior
+already communicates. Make actions and state understandable without making
+him learn the server's event schema. This is an application of his principles,
+not a settled layout or a reason to hide requested information.
+
+Sophisticated communication can coexist with a small visible interface.
+Memory use matters, but no comparison between the proposed web client and
+Andy's VS Code setup has been measured.
 
 ### Possibilities, not commitments
 
@@ -245,8 +273,9 @@ Accepted direction from Andy's Boid planning discussion.
 Boid is a general agent swarm harness using OpenAI API-key access.
 Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
-The current implementation is v4 / PR #4: a shared server, minimal web workspace,
-real terminal panes, and command-line task submission. Version numbers follow
+The merged v4 / PR #4 provides a shared server, web workspace,
+real terminal panes, and command-line task submission. V5 revises individual
+agent panes and queued input. Version numbers follow
 PR numbers. Andy's 2026-11-08 correction explicitly required implementation to
 follow the agreed direction; the earlier pause on premature interface selection
 no longer blocks this scope. Advanced view/context manipulation remains open.
@@ -341,17 +370,31 @@ context, and load lessons when relevant.
 
 ## Unresolved choices
 
-### v5 backlog
+### Pinned v0.5 baseline
 
-- Rework the web UX with Andy (2026-11-08). His assessment of the preview:
-  "i just really hate the web interface's ux, and makes me question your
-  judgement in underlying code implementation". Identify the interaction
-  problems before choosing a replacement design; review the code decisions
-  behind them. Functional browser checks did not establish usable UX. Specific
-  design changes remain open; this work is deferred from PR #4.
-- Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
-  support and configuration; the current reasoning-summary stream does not
-  establish Daybreak support. This is v5 scope, not part of PR #4.
+Andy called the deployed version "best work so far" and requested a pin on
+2026-11-08. Tag `v0.5` points to `7b99a98`, the deployed implementation.
+Preserve this as the accepted baseline for subsequent changes. PR #5 remains
+unmerged until Andy approves it.
+
+The accepted pane uses 11px plain text, 4px side padding, one-line collapsed
+tool calls with one expansion control, and Working / Esc-to-interrupt status.
+Enter queues without cancelling work; Escape explicitly interrupts. The
+composer appears on hover, keyboard focus, or with a draft. Debug UI assets
+load from disk on refresh. See [tools](tools.md) for current behavior and the
+[audience case](cases/audience-before-interface.md) for the decisions behind it.
+
+### v0.6 backlog
+
+- Remove the Boid title and replace the full workspace header with one divided
+  pill for New agent / New terminal, floating at the top center to maximize
+  workspace space (Andy, 2026-11-08).
+- Rework reasoning presentation. Andy requested reasoning be hidden in every
+  pane for PR #5; retain its events in the full record while it is hidden.
+- Add Daybreak support, carried from the earlier v5 backlog by Andy's instruction
+  to pin this version and acknowledge the backlog for v0.6. Determine the
+  required provider/model support and configuration; the current reasoning
+  summary stream does not establish Daybreak support.
 
 ### Later decisions
 

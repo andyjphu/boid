@@ -9,6 +9,8 @@ pub struct Client {
     http: reqwest::Client,
     key: String,
     pub model: String,
+    #[cfg(test)]
+    endpoint: Option<String>,
 }
 
 impl Client {
@@ -30,7 +32,13 @@ impl Client {
             .connect_timeout(Duration::from_secs(15))
             .build()
             .context("Cannot create the API client.")?;
-        Ok(Self { http, key, model })
+        Ok(Self {
+            http,
+            key,
+            model,
+            #[cfg(test)]
+            endpoint: None,
+        })
     }
 
     /// Stream text and return complete API items for the next request's input.
@@ -41,9 +49,12 @@ impl Client {
         tools: Value,
         mut on_event: impl FnMut(&Value) + Send,
     ) -> Result<Vec<Value>> {
+        let endpoint = "https://api.openai.com/v1/responses";
+        #[cfg(test)]
+        let endpoint = self.endpoint.as_deref().unwrap_or(endpoint);
         let response = self
             .http
-            .post("https://api.openai.com/v1/responses")
+            .post(endpoint)
             .bearer_auth(&self.key)
             .json(&json!({
                 "model": self.model,
@@ -113,7 +124,15 @@ impl Client {
             http: reqwest::Client::new(),
             key: "unused-test-key".into(),
             model: "test".into(),
+            endpoint: Some("http://127.0.0.1:1".into()),
         }
+    }
+
+    #[cfg(test)]
+    pub fn test_client_at(endpoint: String) -> Self {
+        let mut client = Self::test_client();
+        client.endpoint = Some(endpoint);
+        client
     }
 }
 
