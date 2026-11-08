@@ -281,10 +281,12 @@ to give Boid work that does not require that access. He clarified this on
 operator workflow for developers to understand, not a Boid delegation rule
 or integration. Do not put that routing policy into runtime guidance.
 
-Developers and Boid agents must still notice actions that could cause
-unintended damage without Docker. If containment prevents such an action,
-preserve its command, target, and result as an incident. Stop the affected
-action and report it; continue unaffected work. Use the trace or task record;
+During development, record actions that could cause unintended damage without
+Docker, including their command, target, and result. A command-form rejection
+does not establish an attempted boundary violation or prohibit the underlying
+task. Andy requested fewer runtime restrictions on 2026-11-08 after this
+distinction was lost in the deletion trial. Existing scope instructions remain;
+do not add a blanket stop-on-tool-rejection rule. Use the trace or task record;
 no automatic collector is needed.
 
 See [the server, tools, and container workflow](tools.md) for current behavior.
@@ -341,6 +343,12 @@ context, and load lessons when relevant.
 
 ### v5 backlog
 
+- Rework the web UX with Andy (2026-11-08). His assessment of the preview:
+  "i just really hate the web interface's ux, and makes me question your
+  judgement in underlying code implementation". Identify the interaction
+  problems before choosing a replacement design; review the code decisions
+  behind them. Functional browser checks did not establish usable UX. Specific
+  design changes remain open; this work is deferred from PR #4.
 - Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
   support and configuration; the current reasoning-summary stream does not
   establish Daybreak support. This is v5 scope, not part of PR #4.
