@@ -90,8 +90,12 @@ pub async fn serve() -> Result<()> {
     let address = std::env::var("BOID_LISTEN").unwrap_or_else(|_| "127.0.0.1:7734".into());
     let listener = tokio::net::TcpListener::bind(&address).await.context("Cannot bind Boid server. The default port permits one server; connect to the running server instead of starting another.")?;
     let token = ensure_token()?;
-    let hub = Hub::new(Client::new()?)?;
-    let terminals = TerminalHub::new(std::env::current_dir()?);
+    let state_dir = token_file()?
+        .parent()
+        .context("State directory has no parent.")?
+        .to_path_buf();
+    let hub = Hub::open(Client::new()?, state_dir.clone())?;
+    let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
     let app = App {
         hub: hub.clone(),
         token: Arc::new(token.clone()),
@@ -100,6 +104,8 @@ pub async fn serve() -> Result<()> {
         .route("/api/login", post(login))
         .route("/api/config", get(config))
         .route("/api/sessions", get(sessions).post(create))
+        .route("/api/sessions/archived", get(archived_sessions))
+        .route("/api/sessions/{id}/reopen", post(reopen_session))
         .route("/api/sessions/{id}", get(session).delete(close_session))
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/stop", post(stop))
@@ -210,6 +216,15 @@ async fn config(State(app): State<App>) -> Json<Value> {
 }
 async fn sessions(State(app): State<App>) -> Json<Value> {
     Json(json!(app.hub.views()))
+}
+async fn archived_sessions(State(app): State<App>) -> Json<Value> {
+    Json(json!(app.hub.archived_views()))
+}
+async fn reopen_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub
+        .reopen(&id)
+        .map(|view| Json(json!(view)))
+        .map_err(invalid)
 }
 async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     app.hub

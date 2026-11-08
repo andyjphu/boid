@@ -266,3 +266,6 @@ dialog input, dialog textarea {
 dialog textarea { resize: vertical; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 [hidden] { display: none !important; }
+#history-list { max-height: 60vh; overflow: auto; }
+.history-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+.history-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }

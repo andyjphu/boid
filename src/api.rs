@@ -65,27 +65,33 @@ impl Client {
 
     /// Stream text and return complete API items for the next request's input.
     /// Dropping the future closes the active request.
-    pub async fn respond(
+    pub async fn respond_with(
         &self,
         input: &[Value],
         tools: Value,
+        model: &str,
+        instructions: &str,
+        profile: &Value,
         mut on_event: impl FnMut(&Value) + Send,
     ) -> Result<Vec<Value>> {
         let endpoint = "https://api.openai.com/v1/responses";
         #[cfg(test)]
         let endpoint = self.endpoint.as_deref().unwrap_or(endpoint);
         let mut request = json!({
-            "model": self.model,
-            "instructions": include_str!("PRINCIPLES.md"),
+            "model": model,
+            "instructions": instructions,
             "input": input,
             "tools": tools,
             "parallel_tool_calls": false,
             "stream": true,
             "store": false,
             "include": ["reasoning.encrypted_content"],
-            "reasoning": {"effort": REASONING_EFFORT, "summary": "auto"}
+            "reasoning": {"summary": "auto"}
         });
-        if let Some(program) = &self.cyber_access_program {
+        if let Some(effort) = profile["reasoning_effort"].as_str() {
+            request["reasoning"]["effort"] = json!(effort);
+        }
+        if let Some(program) = profile["cyber_access_program"].as_str() {
             request["access_programs"] = json!({"cyber": program});
         }
         let response = self
@@ -138,6 +144,24 @@ impl Client {
             }
         }
         bail!("API stream ended before the response completed.")
+    }
+
+    #[cfg(test)]
+    pub async fn respond(
+        &self,
+        input: &[Value],
+        tools: Value,
+        on_event: impl FnMut(&Value) + Send,
+    ) -> Result<Vec<Value>> {
+        self.respond_with(
+            input,
+            tools,
+            &self.model,
+            include_str!("PRINCIPLES.md"),
+            &self.config(),
+            on_event,
+        )
+        .await
     }
 
     fn redact(&self, message: &str) -> String {
@@ -239,6 +263,27 @@ mod tests {
                 Some(program) => assert_eq!(request["access_programs"], json!({"cyber":program})),
                 None => assert!(request.get("access_programs").is_none()),
             }
+            let captured = client.config();
+            client.cyber_access_program = Some("changed-server-default".into());
+            client
+                .respond_with(
+                    &[],
+                    json!([]),
+                    "captured-model",
+                    "captured-instructions",
+                    &captured,
+                    |_| {},
+                )
+                .await
+                .unwrap();
+            let replay = requests.recv().await.unwrap();
+            assert_eq!(replay["model"], "captured-model");
+            assert_eq!(replay["instructions"], "captured-instructions");
+            assert_eq!(replay["reasoning"], request["reasoning"]);
+            assert_eq!(
+                replay.get("access_programs"),
+                request.get("access_programs")
+            );
         }
         server.abort();
     }

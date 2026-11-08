@@ -6,6 +6,7 @@ const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
+const terminalCatalog = new Map();
 let selected = null;
 let lastSequence = -1;
 let events;
@@ -628,7 +629,8 @@ function setPending(ui, pending) {
   restorePosition(ui);
 }
 
-function snapshot(views) {
+function snapshot(views, terminalViews = []) {
+  reconcileTerminals(terminalViews);
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
@@ -673,12 +675,17 @@ function startEvents() {
       const message = JSON.parse(event.data);
       if (message.type === "snapshot") {
         lastSequence = message.seq;
-        snapshot(message.sessions);
+        snapshot(message.sessions, message.terminals || []);
         return;
       }
       if (message.seq <= lastSequence) return;
       lastSequence = message.seq;
       if (message.type === "session") { addSession(message.session); return; }
+      if (message.type === "terminal") {
+        terminalCatalog.set(String(message.terminal.id), message.terminal);
+        reconcileTerminals([...terminalCatalog.values()]);
+        return;
+      }
       const ui = sessions.get(String(message.session_id));
       if (!ui) return;
       if (message.type === "closed") { removeSession(ui); return; }
@@ -695,7 +702,20 @@ function startEvents() {
   };
 }
 
-function attachTerminal(info) {
+function reconcileTerminals(infos) {
+  terminalCatalog.clear();
+  for (const info of infos) terminalCatalog.set(String(info.id), info);
+  for (const [id, ui] of terminals) {
+    const info = terminalCatalog.get(id);
+    if (!info || (info.archived && !ui.history)) ui.dispose();
+    else ui.update(info);
+  }
+  for (const info of infos) {
+    if (!info.archived && !terminals.has(String(info.id))) attachTerminal(info);
+  }
+}
+
+function attachTerminal(info, history = false) {
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
   const ui = makePane(info.name || "#?", info.cwd, "terminal");
@@ -760,7 +780,9 @@ function attachTerminal(info) {
   ui.title.addEventListener("keydown", event => {
     if (event.key === "F2") { event.preventDefault(); rename(); }
   });
+  ui.history = history;
   const close = ui.close;
+  if (history) close.title = "Close retained terminal record";
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
   const term = new Terminal({
@@ -794,7 +816,7 @@ function attachTerminal(info) {
     if (closed) return;
     clearTimeout(retry);
     if (socket) { socket.onclose = null; socket.close(); }
-    ui.status.textContent = "";
+    ui.status.textContent = info.running ? "" : (info.status || "ended");
     ui.pane.classList.add("disconnected");
     term.options.disableStdin = true;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -841,8 +863,12 @@ function attachTerminal(info) {
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
-        if (current) setName(current.name);
-        if (!current || !current.running) { ui.status.textContent = "exited"; return; }
+        if (!current) { ui.dispose(); return; }
+        if (!current.running) {
+          ui.update(current);
+          ui.pane.classList.remove("disconnected");
+          return;
+        }
       } catch (error) {
         if (error.status === 401) { requireLogin(); return; }
       }
@@ -851,6 +877,7 @@ function attachTerminal(info) {
   }
   term.onData(data => { if (controller && !replaying) send({ type: "input", data }); });
   function takeControl() {
+    if (!info.running) return;
     if (replaying) wantsControl = true;
     else if (!controller) send({ type: "control" });
   }
@@ -874,29 +901,84 @@ function attachTerminal(info) {
   });
   observer.observe(host);
   observer.observe(screen);
+  ui.dispose = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(retry);
+    socket?.close();
+    observer.disconnect();
+    clearTimeout(scrollbarIdle);
+    window.removeEventListener("focus", resumeControl);
+    term.dispose();
+    if (selected === ui.pane) selected = null;
+    ui.pane.remove();
+    terminals.delete(id);
+    layout();
+  };
+  ui.update = latest => {
+    info = latest;
+    setName(info.name);
+    ui.status.textContent = info.running ? "" : (info.status || "ended");
+    if (info.persistence_error) showError(ui.error, `History could not be saved: ${info.persistence_error}`);
+    if (!info.running) term.options.disableStdin = true;
+  };
   close.addEventListener("click", async () => {
+    if (ui.history) { ui.dispose(); return; }
     close.disabled = true;
     try {
       await request(`/api/terminals/${encodeURIComponent(id)}`, "DELETE");
-      closed = true;
-      clearTimeout(retry);
-      socket?.close();
-      observer.disconnect();
-      clearTimeout(scrollbarIdle);
-      window.removeEventListener("focus", resumeControl);
-      term.dispose();
-      if (selected === ui.pane) selected = null;
-      ui.pane.remove();
-      terminals.delete(id);
-      layout();
+      ui.dispose();
     } catch (error) { showError(ui.error, error); close.disabled = false; }
   });
   ui.reconnect = connect;
   terminals.set(id, ui);
+  ui.update(info);
   layout();
   connect();
   return ui;
 }
+
+const historyDialog = document.querySelector("#history-dialog");
+const historyList = document.querySelector("#history-list");
+const historyError = document.querySelector("#history-error");
+document.querySelector("#close-history").addEventListener("click", () => historyDialog.close());
+document.querySelector("#session-history").addEventListener("click", async () => {
+  historyError.hidden = true;
+  historyList.replaceChildren();
+  historyDialog.showModal();
+  try {
+    const [agents, terminalRecords] = await Promise.all([
+      request("/api/sessions/archived"), request("/api/terminals"),
+    ]);
+    const records = [
+      ...agents.map(record => ({ ...record, kind: "agent" })),
+      ...terminalRecords.filter(record => record.archived).map(record => ({ ...record, kind: "terminal" })),
+    ];
+    if (!records.length) historyList.append(element("p", "", "No ended sessions yet."));
+    for (const record of records) {
+      const row = element("div", "history-row");
+      const name = record.name || `Terminal ${String(record.id).replace(/^term-/, "").slice(0, 8)}`;
+      const label = element("span", "", name);
+      label.title = `${record.cwd} · ${record.status}`;
+      const open = element("button", "", record.kind === "agent" ? "Reopen" : "View record");
+      open.type = "button";
+      open.addEventListener("click", async () => {
+        open.disabled = true;
+        try {
+          if (record.kind === "agent") {
+            const view = await request(`/api/sessions/${encodeURIComponent(record.id)}/reopen`, "POST");
+            if (view?.id) addSession(view);
+          } else {
+            attachTerminal(record, true);
+          }
+          historyDialog.close();
+        } catch (error) { showError(historyError, error); open.disabled = false; }
+      });
+      row.append(label, open);
+      historyList.append(row);
+    }
+  } catch (error) { showError(historyError, error); }
+});
 
 const dialog = document.querySelector("#create-dialog");
 const createForm = document.querySelector("#create-form");
@@ -943,6 +1025,7 @@ function requireLogin() {
   document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
+  document.querySelector("#session-history").disabled = true;
 }
 
 async function connect(token) {
@@ -953,13 +1036,9 @@ async function connect(token) {
   createForm.elements.cwd.value ||= config.cwd || "";
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
+  document.querySelector("#session-history").disabled = false;
   startEvents();
-  const list = await request("/api/terminals");
-  for (const info of list) {
-    const existing = terminals.get(String(info.id));
-    if (existing) { existing.setName(info.name); existing.reconnect(); }
-    else attachTerminal(info);
-  }
+  for (const ui of terminals.values()) ui.reconnect();
 }
 
 login.addEventListener("submit", async event => {
@@ -1008,7 +1087,7 @@ document.addEventListener("keydown", async event => {
       return;
     }
   }
-  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open) return;
+  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open || historyDialog.open) return;
   const ui = [...sessions.values()].find(ui => ui.pane === selected);
   if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
   event.preventDefault();

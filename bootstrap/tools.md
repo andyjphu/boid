@@ -43,7 +43,7 @@ when a peer message arrives between them. The full record retains both events.
 An empty message box appears on pane hover or keyboard focus; a draft keeps it
 visible. The hidden empty box collapses completely; Working retains its own slot below
 the stream. Browser text assistance is disabled on text inputs.
-Disconnection mutes the view. Each pane has an × control; there is no separate
+Disconnection mutes the view. Each pane has an × control that ends execution and archives its record; there is no separate
 Latest control or title gesture that enlarges a pane.
 
 Adjacent queued messages form a compact block with a lighter background and
@@ -77,9 +77,12 @@ operator's permissions.
 
 The server owns execution. Closing a browser, event subscription, or submitting
 command leaves work running. Reconnection receives a snapshot followed by live
-events; slow event consumers receive a fresh snapshot. Session history currently
-lives in server memory and grows with conversation length. Server shutdown or
-failure ends sessions; disk persistence and restart recovery are not implemented.
+events; slow event consumers receive a fresh snapshot. Private session records live under BOID_STATE_DIR. They retain model history,
+accepted input, and tool execution state. Restart restores conversations stopped,
+without issuing model requests or replaying uncertain actions. Terminal records
+retain bounded output and return without a running shell. Keep the state directory
+on persistent storage when replacing the container. Context compaction and
+long-running-job continuity remain follow-up work; see [sessions](sessions.md).
 
 The Responses client streams with `store: false`, explicit conversation input,
 and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
@@ -108,16 +111,18 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
-| `DELETE /api/sessions/{id}` | End the worker and remove its in-memory session |
+| `DELETE /api/sessions/{id}` | End the worker and archive its retained record |
+| `GET /api/sessions/archived` | Discover ended agent records |
+| `POST /api/sessions/{id}/reopen` | Reopen a retained agent, stopped until new input |
 | `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
 | `POST /api/sessions/{id}/interrupt` | Interrupt current work and apply queued input; stop if none |
 | `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
-| `GET /api/events` | SSE snapshot, entries, deltas, input delivery, status |
+| `GET /api/events` | Shared agent/terminal catalog snapshot and sequenced events |
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
 | `PATCH /api/terminals/{id}` | Rename with `{ "name": "..." }` |
-| `DELETE /api/terminals/{id}` | End and wait for the shell |
+| `DELETE /api/terminals/{id}` | End and wait for the shell, retaining its archive |
 
 Agent behavior can be checked headlessly. Browser checks establish interface
 behavior. Tool unit tests alone do not establish disconnect or coordination behavior.
@@ -126,11 +131,12 @@ behavior. Tool unit tests alone do not establish disconnect or coordination beha
 
 Terminals start as #1, #2, etc. Double-click a terminal name to edit it; Enter
 saves and Escape cancels. Renaming updates other views without replacing the
-shell. Names remain for the server process lifetime, like terminal sessions.
+shell. Names remain with the durable terminal record across server restarts.
 
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×
-control ends it. Agent panes use the same control to end and remove the session.
+control ends it. Agent panes use the same control to end and archive the session. History reopens
+an agent stopped or displays a terminal archive without creating a new shell.
 Replay retains a bounded 512 KiB history with resize events and marks omitted
 older output. Replaying bytes never sends terminal responses back to the shell.
 Views share the PTY dimensions; focusing or clicking a terminal transfers input
