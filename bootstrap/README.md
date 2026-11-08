@@ -339,6 +339,14 @@ context, and load lessons when relevant.
 
 ## Unresolved choices
 
+### v5 backlog
+
+- Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
+  support and configuration; the current reasoning-summary stream does not
+  establish Daybreak support. This is v5 scope, not part of PR #4.
+
+### Later decisions
+
 Runtime storage, collection, retrieval, swarm topology, and review frequency
 remain open. Choose libraries when the next useful capability requires them.
 The current agreement on Markdown and Git concerns developer knowledge; it does
