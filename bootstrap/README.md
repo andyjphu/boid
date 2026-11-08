@@ -143,7 +143,13 @@ behavior when simplifying. Aggressive preloading can be worthwhile if its gains
 justify the resources; deleting useful explanatory detail merely to shorten a
 file can make later decisions slower or worse.
 
+Question what needs to exist to satisfy the actual purpose. Minimalism means
+the simplest sufficient solution, not a visual style or the lowest count of
+components. Apply the judgment beyond the example that taught it; sometimes
+the purpose requires an addition.
+
 Worked case: [reviewability without disposable interfaces](cases/intermediate-interfaces.md).
+Failure case: [strong model failure, high propensity: repeatedly narrowing the principle to its example](cases/audience-before-interface.md).
 
 ### Scope
 

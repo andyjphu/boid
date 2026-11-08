@@ -1,5 +1,13 @@
 # Audience understanding before interface changes
 
+> [!WARNING]
+> **STRONG MODEL FAILURE CASE — HIGH PROPENSITY**
+> Andy explicitly assigned this classification to the trace on 2026-11-08.
+> The repeated failure: turning a demonstrated judgment into a narrow rule
+> about the current example, then proposing implementation before understanding
+> the principle. This recurred despite explicit feedback and relevant guidance.
+> Preserve the correction sequence, not only the final successful paraphrase.
+
 2026-11-08, v4 preview to v5 planning. This case preserves feedback and its
 sequence. It is developer context, not a runtime instruction or a settled UI
 design. The interpretations below are Woo's; the quoted user words are Andy's.
@@ -121,3 +129,67 @@ confirmation of Woo's earlier hypotheses. Do not treat message queueing,
 interruption, keyboard conventions, or collapsed detail as accepted preferences
 from this exchange. Interaction dynamics remain a separate discussion. Judge
 the visual result at the intended small pane size, not only in a large view.
+
+## Recurrence: interpreting minimalism as a rule about interactions
+
+Andy asked for Codex's interaction count and state machine, then asked how much
+Boid actually needed. Woo proposed two agent-specific actions, send and stop,
+three execution states, and independent following/browsing behavior. Asked for
+a pure count, Woo answered:
+
+> Codex: **~60**
+> Boid, proposed: **2**
+
+Evidence qualification: the underlying source count was 65 slash-command
+variants in Codex reference checkout a90c808; Boid's two counted only the
+proposed agent-specific controls. Ordinary editing and browsing were excluded
+from Boid's count. This comparison illustrates a design discussion, not a
+normalized measurement of total product complexity.
+
+Andy:
+
+> great! lets make sure we explicitly plan from this perspective; minimalism doesnt just mean we use a dark background or we use less font adding subtitles. it means we do what we just did
+
+Woo responded:
+
+> I’ll make the two-action model the starting point for v5: send and stop. Every additional interaction or mode will need a concrete reason to exist.
+
+Andy interrupted before any edit:
+
+> no you dont deserve to reach implementation yet, we're still correcting your behavior; and hoping you archive my taste so its ready for boid
+
+Woo then said:
+
+> Implementation stays paused. I’ll archive this exchange as a correction to my judgment: reducing the interactions and modes a user must manage comes before styling, and your agreement with that principle was not permission to start building.
+
+Andy:
+
+> is it about the interactions? is it about the modes?
+
+Woo's answer:
+
+> Interactions and modes were the example. **The principle is questioning what needs to exist at all to satisfy your actual purpose.**
+>
+> I took a judgment you demonstrated and immediately narrowed it into another rule about UI components. The same judgment applies to features, code, documents, labels, and even the questions I ask you.
+>
+> The goal isn’t the lowest count. It’s the simplest sufficient solution, with every addition earning its cost. Sometimes that requires adding something.
+
+Andy accepted that interpretation and requested this classification:
+
+> yes, good, thats it; make sure this is also marked visibly as a trace thats an example of a strong model failure case (high propensity)
+
+## Failure mechanism and present outcome
+
+The observations show a recurring failure in this trajectory: audience feedback
+became a cosmetic implementation plan; discovery advice became a restatement
+of the question; minimalism became a rule about interaction counts. The agent
+could repeat the words while continuing to select the next step from the same
+unexamined assumptions. Relevant guidance had been read, so this case must not
+be reduced to a missing-instruction incident.
+
+Andy's high-propensity classification is explicit. A population frequency or
+immutable model trait has not been measured. His acceptance establishes that
+the final explanation captured the intended principle; it does not establish
+that the agent will apply it reliably. Implementation remains paused. Retain
+this full case for Boid's later learning and developer calibration without
+automatically adding the whole failure trace to ordinary runtime prompts.
