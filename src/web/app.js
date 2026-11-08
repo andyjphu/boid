@@ -2,12 +2,10 @@
 
 const workspace = document.querySelector("#workspace");
 const empty = document.querySelector("#empty");
-const connection = document.querySelector("#connection");
 const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
-let focused = null;
 let selected = null;
 const markdown = window.markdownit({ html: false, linkify: false, typographer: false });
 markdown.disable("image");
@@ -52,18 +50,8 @@ function layout(event) {
   const panes = [...workspace.querySelectorAll(".pane")];
   empty.hidden = panes.length > 0;
   const columns = Math.max(1, Math.min(panes.length, Math.floor(workspace.clientWidth / 420)));
-  const expanded = focused && panes.length > 1 && columns > 1;
-  const spanRows = expanded && columns > 2 ? 2 : 1;
-  const cells = panes.length + (expanded ? 2 * spanRows - 1 : 0);
   workspace.style.setProperty("--columns", columns);
-  workspace.style.setProperty("--rows", Math.max(1, Math.ceil(cells / columns)));
-  for (const pane of panes) {
-    const active = pane === focused;
-    pane.classList.toggle("focused", active);
-    pane.style.gridColumn = active && expanded ? "span 2" : "";
-    pane.style.gridRow = active && expanded ? `span ${spanRows}` : "";
-    pane.querySelector(".pane-title").setAttribute("aria-expanded", String(active));
-  }
+  workspace.style.setProperty("--rows", Math.max(1, Math.ceil(panes.length / columns)));
   requestAnimationFrame(() => {
     for (const ui of sessions.values()) restorePosition(ui);
     for (const ui of sessions.values()) ui.reflow = false;
@@ -75,15 +63,7 @@ function makePane(name, cwd, kind) {
   pane.setAttribute("aria-label", name);
   const header = element("header", "pane-header");
   const title = element("span", "pane-title", name);
-  title.tabIndex = 0;
-  title.setAttribute("role", "button");
-  title.title = "Double-click to enlarge; Enter when focused";
   const status = element("span", "pane-status", "idle");
-  function toggleSize() { focused = focused === pane ? null : pane; layout(); }
-  title.addEventListener("dblclick", toggleSize);
-  title.addEventListener("keydown", event => {
-    if (event.key === "Enter") { event.preventDefault(); toggleSize(); }
-  });
   header.append(title, status);
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
   directory.title = cwd || "Server working directory";
@@ -91,9 +71,22 @@ function makePane(name, cwd, kind) {
   error.setAttribute("role", "alert");
   error.hidden = true;
   header.append(directory);
+  const close = element("button", "pane-close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", `Close ${name}`);
+  close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
+  header.append(close);
   pane.append(header);
   workspace.append(pane);
-  return { pane, header, title, status, directory, error };
+  return { pane, header, title, status, directory, error, close };
+}
+
+function removeSession(ui) {
+  ui.traceResize.disconnect();
+  if (selected === ui.pane) selected = null;
+  ui.pane.remove();
+  sessions.delete(ui.id);
+  layout();
 }
 
 function atBottom(trace) {
@@ -127,10 +120,10 @@ document.addEventListener("selectionchange", () => {
   for (const ui of sessions.values()) {
     if (selectedWithin(ui.trace)) {
       ui.follow = false;
-      ui.latest.hidden = false;
       rememberPosition(ui);
     }
     for (const item of ui.entries.values()) {
+      if (item.superseded && !selectedWithin(item.node)) item.node.hidden = true;
       if (item.deferred && !selectedWithin(item.node)) {
         item.deferred = false;
         renderEntry(ui, item);
@@ -148,7 +141,6 @@ function followLatest(ui) {
     ui.followScheduled = false;
     if (ui.follow && !selectedWithin(ui.trace)) {
       ui.trace.scrollTop = ui.trace.scrollHeight;
-      ui.latest.hidden = true;
     }
   });
 }
@@ -171,27 +163,16 @@ function addSession(view) {
   ui.input.title = "Enter to send · Shift+Enter for a new line · Esc to interrupt";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
   ui.sending = false;
-  ui.latest = element("a", "latest", "↓ Latest");
-  ui.latest.href = "#";
-  ui.latest.hidden = true;
-  ui.latest.addEventListener("click", event => {
-    event.preventDefault();
-    if (selectedWithin(ui.trace)) window.getSelection().removeAllRanges();
-    ui.follow = true;
-    ui.anchor = null;
-    followLatest(ui);
-  });
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     ui.follow = atBottom(ui.trace) && !selectedWithin(ui.trace);
-    ui.latest.hidden = ui.follow;
     rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
-    if (event.deltaY < 0) { ui.follow = false; ui.latest.hidden = false; rememberPosition(ui); }
+    if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.latest, ui.error, ui.composer);
+  ui.pane.append(ui.trace, ui.error, ui.composer);
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
@@ -205,6 +186,14 @@ function addSession(view) {
     restorePosition(ui);
   });
   traceResize.observe(ui.trace);
+  ui.traceResize = traceResize;
+  ui.close.addEventListener("click", async () => {
+    ui.close.disabled = true;
+    try {
+      await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      if (sessions.has(id)) removeSession(ui);
+    } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
+  });
   ui.input.addEventListener("keydown", event => {
     if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
         && ui.input.selectionStart === ui.input.selectionEnd) {
@@ -264,7 +253,7 @@ function toolEntry(text) {
 }
 
 function toolOutcome(result) {
-  if (!result) return { label: "Running", failed: false };
+  if (!result) return { label: "…", failed: false };
   const value = result.value;
   if (value?.timed_out) return { label: "Timed out", failed: true };
   if (value?.signal) return { label: `Signal ${value.signal}`, failed: true };
@@ -272,25 +261,35 @@ function toolOutcome(result) {
   if (typeof value?.exit_code === "number" && value.exit_code !== 0) {
     return { label: `Exit ${value.exit_code}`, failed: true };
   }
-  return { label: "Completed", failed: false };
+  return { label: "", failed: false };
 }
 
 function compactOutput(ui, item, content, text, label = "Output") {
+  const lines = text.trimEnd().split("\n");
+  if (label !== "Arguments" && lines.length <= 3 && text.length <= 240) {
+    if (label === "Reasoning") {
+      const wrapper = element("div");
+      wrapper.append(element("div", "activity-label", label), content);
+      return wrapper;
+    }
+    return content;
+  }
   const details = element("details", "activity-details");
   const openKey = `expanded${label}`;
   details.open = Boolean(item[openKey]);
   const summary = element("summary");
   summary.title = `Expand or collapse ${label.toLowerCase()}`;
-  summary.append(element("span", "activity-label", label));
-  const lines = text.trimEnd().split("\n");
-  const preview = element("pre", "activity-preview", (label === "Command" ? lines.slice(0, 1) : lines.slice(-3)).join("\n") || "No output");
-  summary.append(preview);
+  summary.append(element("span", "activity-label", label === "Arguments" ? "Tool arguments"
+    : label === "Command" ? lines[0] : `${label} · ${lines.length} ${lines.length === 1 ? "line" : "lines"}`));
+  const preview = element("pre", "activity-preview", lines.slice(0, 3).join("\n"));
   content.classList.add("activity-full");
   details.append(summary, content);
+  const block = element("div", "activity-block");
+  block.append(details);
+  if (label !== "Command" && label !== "Arguments") block.append(preview);
   summary.addEventListener("click", () => {
     item[openKey] = !details.open;
     ui.follow = false;
-    ui.latest.hidden = false;
     rememberPosition(ui);
   });
   details.addEventListener("toggle", () => {
@@ -299,7 +298,23 @@ function compactOutput(ui, item, content, text, label = "Output") {
     item[openKey] = details.open;
     rememberPosition(ui);
   });
-  return details;
+  return block;
+}
+
+function toolCommand(tool) {
+  const value = tool.value;
+  if (!value || typeof value !== "object") return tool.payload;
+  if (typeof value.command === "string") return value.command;
+  if (typeof value.path === "string") {
+    if (typeof value.content === "string") return `${value.path}\n${value.content}`;
+    if (typeof value.old === "string" && typeof value.new === "string") {
+      return `${value.path}\n- ${value.old}\n+ ${value.new}`;
+    }
+    return value.path + (value.pattern ? `\n${value.pattern}` : "");
+  }
+  if (typeof value.to === "string" && typeof value.text === "string") return `${value.to}\n${value.text}`;
+  if (typeof value.pattern === "string") return value.pattern + (value.glob ? `\n${value.glob}` : "");
+  return JSON.stringify(value, null, 2);
 }
 
 function renderToolEntry(ui, item) {
@@ -331,16 +346,21 @@ function renderToolEntry(ui, item) {
   node.dataset.toolFailed = String(outcome.failed);
   body.replaceChildren();
   const header = element("div", "tool-header");
+  let commandContinuation;
   const command = toolEntry(call?.text || item.text);
   const label = command.name === "exec_command" ? "$" : command.name;
   header.append(element("span", "tool-name", label));
   if (kind === "tool_call" || !joined) {
     if (kind === "tool_call" || call) {
-      const text = command.value?.command
-        ?? (command.value !== undefined ? JSON.stringify(command.value, null, 2) : command.payload);
-      const commandBody = element("pre", "tool-text", text);
-      const commandView = text.includes("\n") || text.length > 120
-        ? compactOutput(ui, item, commandBody, text, "Command") : commandBody;
+      const text = toolCommand(command);
+      const newline = text.indexOf("\n");
+      const firstLine = newline < 0 ? text : text.slice(0, newline);
+      if (newline >= 0) {
+        const rest = text.slice(newline + 1);
+        commandContinuation = compactOutput(ui, item, element("pre", "tool-text", rest), rest, "Input");
+      }
+      const commandBody = element("pre", "tool-text", firstLine);
+      const commandView = compactOutput(ui, item, commandBody, firstLine, "Command");
       commandView.classList.add("tool-command");
       header.append(commandView);
     }
@@ -350,12 +370,17 @@ function renderToolEntry(ui, item) {
   }
   if (kind === "tool_call") {
     body.append(header);
+    if (commandContinuation) body.append(commandContinuation);
     return;
   }
   // Keep results at their original event position when another visible event intervenes.
-  if (!joined) body.append(header);
+  if (!joined) {
+    body.append(header);
+    if (commandContinuation) body.append(commandContinuation);
+  }
   const output = element("div", "tool-output");
   const value = tool.value;
+  if (value?.ok === true && Object.keys(value).length === 1) return;
   if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
     for (const channel of ["stdout", "stderr"]) {
       if (value[channel]?.text) output.append(element("pre", `tool-text ${channel}`, value[channel].text));
@@ -363,6 +388,11 @@ function renderToolEntry(ui, item) {
     }
     if (value.error) output.append(element("pre", "tool-text stderr", String(value.error)));
     if (!output.childNodes.length) output.append(element("div", "tool-note", "No output"));
+  } else if (value && typeof value.error === "string") {
+    output.append(element("pre", "tool-text stderr", value.error));
+  } else if (value?.queued === true && typeof value.to === "string") {
+    output.append(element("pre", "tool-text", value.accepted_by_agent === false
+      ? "Queued; recipient has not accepted the message yet." : "Queued for recipient."));
   } else if (value && typeof value.text === "string") {
     output.append(element("pre", "tool-text", value.text));
     if (value.truncated) output.append(element("div", "tool-note", "Output truncated"));
@@ -391,6 +421,8 @@ function renderEntry(ui, item) {
     }
   } else if (kind === "tool_call" || kind === "tool_result") {
     renderToolEntry(ui, item);
+  } else if (kind === "tool_arguments") {
+    body.replaceChildren(compactOutput(ui, item, element("pre", "tool-text", text), text, "Arguments"));
   } else {
     body.textContent = text;
   }
@@ -419,10 +451,12 @@ function putEntry(ui, entry, delta = false) {
     }
     // Transport receipts remain in the full record; they are not model output.
     node.hidden = kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || "");
-    const previous = [...ui.entries.values()].at(-1);
-    if (kind === "tool_call" && previous?.kind === "tool_arguments"
-        && previous.text.trim() === (entry.text || "").split("\n").slice(1).join("\n").trim()) {
-      previous.node.hidden = true;
+    if (entry.replaces) {
+      const replaced = ui.entries.get(String(entry.replaces));
+      if (replaced) {
+        replaced.superseded = true;
+        if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
+      }
     }
     ui.trace.append(node);
     item = { id, node, body, kind, text: "" };
@@ -444,7 +478,6 @@ function putEntry(ui, entry, delta = false) {
       });
     }
   }
-  if (!ui.follow) ui.latest.hidden = false;
 }
 
 function setPending(ui, pending) {
@@ -458,8 +491,7 @@ function snapshot(views) {
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
-      setStatus(ui, "error");
-      showError(ui.error, "This session is no longer available on the server.");
+      removeSession(ui);
     }
   }
   for (const view of views) {
@@ -488,9 +520,9 @@ function snapshot(views) {
 function startEvents() {
   events?.close();
   events = new EventSource("/api/events");
-  events.onopen = () => { connection.textContent = "Connected"; };
+  events.onopen = () => { document.body.classList.remove("disconnected"); };
   events.onerror = () => {
-    connection.textContent = "Disconnected · reconnecting…";
+    document.body.classList.add("disconnected");
     request("/api/config").catch(error => {
       if (error.status === 401) { events.close(); requireLogin(); }
     });
@@ -508,6 +540,7 @@ function startEvents() {
       if (message.type === "session") { addSession(message.session); return; }
       const ui = sessions.get(String(message.session_id));
       if (!ui) return;
+      if (message.type === "closed") { removeSession(ui); return; }
       if (message.type === "input") {
         ui.pending.delete(String(message.id));
         setPending(ui, ui.pending);
@@ -524,17 +557,14 @@ function attachTerminal(info) {
   if (terminals.has(id)) return terminals.get(id);
   const ui = makePane(`Terminal ${id.replace(/^term-/, "").slice(0, 8)}`, info.cwd, "terminal");
   ui.title.title = id;
-  const close = element("button", null, "Close");
-  close.type = "button";
-  close.title = "End this terminal's shell session.";
-  ui.header.append(close);
+  const close = ui.close;
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
   const term = new Terminal({
     cursorBlink: true,
     disableStdin: true,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    fontSize: 12,
+    fontFamily: '"MesloLGS NF", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 11,
     scrollback: 5000,
     theme: { background: "#1e1e1e", foreground: "#d7d7d7", cursor: "#d7d7d7" },
   });
@@ -544,50 +574,87 @@ function attachTerminal(info) {
   let socket;
   let closed = false;
   let retry;
+  let clientId;
+  let controller = false;
+  let replaying = true;
+  let wantsControl = false;
+  let rendering = Promise.resolve();
   function send(message) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
   function resize() {
+    if (!controller || replaying) return;
     const size = fit.proposeDimensions();
-    if (size) term.resize(Math.max(1, Math.min(500, size.cols)), Math.max(1, Math.min(500, size.rows)));
+    if (size) send({ type: "resize", cols: Math.max(1, Math.min(500, size.cols)), rows: Math.max(1, Math.min(500, size.rows)) });
   }
   function connect() {
     if (closed) return;
     clearTimeout(retry);
     if (socket) { socket.onclose = null; socket.close(); }
-    ui.status.textContent = "connecting";
+    ui.status.textContent = "";
+    ui.pane.classList.add("disconnected");
     term.options.disableStdin = true;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     socket = new WebSocket(`${scheme}//${location.host}/api/terminals/${encodeURIComponent(id)}/ws`);
     socket.binaryType = "arraybuffer";
+    const connectedSocket = socket;
+    controller = false;
+    replaying = true;
     socket.onopen = () => {
-      term.reset();
-      term.options.disableStdin = false;
-      ui.status.textContent = "connected";
+      ui.pane.classList.remove("disconnected");
       ui.error.hidden = true;
-      resize();
-      send({ type: "resize", cols: term.cols, rows: term.rows });
     };
     socket.onmessage = event => {
-      if (event.data instanceof ArrayBuffer) term.write(new Uint8Array(event.data));
-      else term.write(event.data);
+      rendering = rendering.then(async () => {
+        if (socket !== connectedSocket || closed) return;
+        if (event.data instanceof ArrayBuffer) {
+          await new Promise(resolve => term.write(new Uint8Array(event.data), resolve));
+          return;
+        }
+        const message = JSON.parse(event.data);
+        if (message.type === "hello") clientId = message.id;
+        if (message.type === "replay_start") {
+          replaying = true;
+          term.options.disableStdin = true;
+          term.reset();
+        }
+        if (message.type === "resize") term.resize(message.cols, message.rows);
+        if (message.type === "replay_end") {
+          replaying = false;
+          if (wantsControl) { wantsControl = false; send({ type: "control" }); }
+        }
+        if (message.type === "control") {
+          controller = message.id === clientId;
+          term.options.disableStdin = replaying || !controller;
+          resize();
+        }
+      }).catch(error => showError(ui.error, error));
     };
     socket.onclose = async () => {
       if (closed) return;
+      ui.pane.classList.add("disconnected");
       term.options.disableStdin = true;
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
         if (!current || !current.running) { ui.status.textContent = "exited"; return; }
       } catch (error) {
-        if (error.status === 401) { ui.status.textContent = "disconnected"; requireLogin(); return; }
+        if (error.status === 401) { requireLogin(); return; }
       }
-      ui.status.textContent = "reconnecting";
       retry = setTimeout(connect, 2000);
     };
   }
-  term.onData(data => send({ type: "input", data }));
-  term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
+  term.onData(data => { if (controller && !replaying) send({ type: "input", data }); });
+  function takeControl() {
+    if (replaying) wantsControl = true;
+    else if (!controller) send({ type: "control" });
+  }
+  host.addEventListener("focusin", takeControl);
+  host.addEventListener("pointerdown", takeControl);
+  function resumeControl() {
+    if (host.contains(document.activeElement)) takeControl();
+  }
+  window.addEventListener("focus", resumeControl);
   const observer = new ResizeObserver(() => {
     if (host.clientWidth > 0 && host.clientHeight > 0) resize();
   });
@@ -600,8 +667,8 @@ function attachTerminal(info) {
       clearTimeout(retry);
       socket?.close();
       observer.disconnect();
+      window.removeEventListener("focus", resumeControl);
       term.dispose();
-      if (focused === ui.pane) focused = null;
       if (selected === ui.pane) selected = null;
       ui.pane.remove();
       terminals.delete(id);
@@ -657,7 +724,7 @@ createForm.addEventListener("submit", async event => {
 
 function requireLogin() {
   login.hidden = false;
-  connection.textContent = "Authentication required";
+  document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
 }

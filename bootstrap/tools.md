@@ -22,14 +22,25 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Double-click an agent name to enlarge its view while
-retaining the other panes; a keyboard-focused name also responds to Enter.
+and real terminal panes. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
 provider-exposed reasoning summaries, tool calls and results, and control events.
 Models may return no summary; hidden reasoning is unavailable. Responses use
 Markdown with raw HTML and images disabled. Startup context is expandable;
 its full-session link retains the original event record, including transport
 receipts omitted from the reading view. The view adds no tool-result truncation.
+
+The transcript uses one 11px text size. Tool calls show the command or target;
+multiline arguments and results align with the transcript edge. Long output and
+reasoning expand inline from a preview. Successful tool calls have no completion
+label; running calls show an ellipsis, and failures retain their status. Streamed
+arguments are replaced by their formatted call using entry identity, including
+when a peer message arrives between them. The full record retains both events.
+
+An empty message box appears on pane hover or keyboard focus; a draft keeps it
+visible. The hidden box retains its space so hovering does not shift the trace.
+Disconnection mutes the view. Each pane has an × control; there is no separate
+Latest control or title gesture that enlarges a pane.
 
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
 the current model response or tool call to finish. Escape in the selected
@@ -66,6 +77,7 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
+| `DELETE /api/sessions/{id}` | End the worker and remove its in-memory session |
 | `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
 | `POST /api/sessions/{id}/interrupt` | Interrupt current work and apply queued input; stop if none |
 | `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
@@ -80,13 +92,25 @@ behavior. Tool unit tests alone do not establish disconnect or coordination beha
 
 ## Interactive terminals
 
-Bash PTYs and locally vendored xterm.js provide interactive programs, keyboard
-input, resize, and reconnect. Disconnecting leaves a shell running; its Close
-button ends it. Replay retains the latest 512 KiB and marks omitted older output.
+Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
+input, resize, and reconnect. Disconnecting leaves a shell running; its ×
+control ends it. Agent panes use the same control to end and remove the session.
+Replay retains a bounded 512 KiB history with resize events and marks omitted
+older output. Replaying bytes never sends terminal responses back to the shell.
+Views share the PTY dimensions; focusing or clicking a terminal transfers input
+and resize control to that view. Other views follow its dimensions.
 Terminal input is an explicit operator shell action and bypasses the model's
 command heuristic. Both terminal and model command children omit API/server
 credentials from their environments. Deliberately detached processes still
 require container cleanup.
+
+Terminals use `SHELL` when executable, otherwise the account's configured login
+shell, and load its startup files. The development image includes zsh and Git.
+Install personal themes/plugins and portable shell settings in the container's
+home; host-specific paths and credential loaders do not belong in that copy.
+The browser terminal prefers locally installed MesloLGS NF, with monospace
+fallbacks. Andy's preview uses his Powerlevel10k settings, Oh My Zsh, Git,
+autosuggestions, and syntax highlighting.
 
 ## File and command behavior
 

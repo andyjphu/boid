@@ -335,3 +335,14 @@ The praise establishes approval of this reasoning and conversational behavior.
 It does not settle the label's design, approve the entire UI, or prove that the
 earlier failure pattern has been resolved. Apply the judgment behind the example;
 do not turn it into a rule to defend every label or always concede part of a choice.
+
+
+### Subsequent decision on the label
+
+Andy later explicitly changed the UI requirement:
+
+> remove completed text, user can assume completed unless failed 9 2 or ... shows up
+
+This supersedes retaining the Completed label. It does not revoke the praise for
+explaining the earlier choice. Keep the distinction between approval of an
+agent's reasoning and approval of the resulting interface.

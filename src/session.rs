@@ -22,6 +22,7 @@ mod tests {
             id: id.into(),
             name: "exec_command".into(),
             arguments: "{}".into(),
+            argument_entry: None,
         };
         let mut session = Session::default();
         session
@@ -54,6 +55,7 @@ struct Call {
     id: String,
     name: String,
     arguments: String,
+    argument_entry: Option<String>,
 }
 impl Session {
     pub fn user(&mut self, text: String) {
@@ -77,6 +79,7 @@ impl Session {
                 );
             }
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
+            let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
             let output = client
                 .respond(&self.history, tool_calls::definitions(), |event| {
@@ -96,6 +99,11 @@ impl Session {
                         .entry(key)
                         .or_insert_with(|| hub.entry(id, kind, ""));
                     hub.delta(id, entry, text);
+                    if kind == "tool_arguments" {
+                        if let Some(item_id) = event["item_id"].as_str() {
+                            argument_entries.insert(item_id.to_owned(), entry.clone());
+                        }
+                    }
                     if kind == "assistant" {
                         partial.push_str(text);
                     }
@@ -116,6 +124,9 @@ impl Session {
                         id: field("call_id")?,
                         name: field("name")?,
                         arguments: field("arguments")?,
+                        argument_entry: item["id"]
+                            .as_str()
+                            .and_then(|item_id| argument_entries.remove(item_id)),
                     })
                 })
                 .collect();
@@ -123,10 +134,11 @@ impl Session {
             self.history.extend(output);
             return Ok(!self.pending.is_empty());
         };
-        hub.entry(
+        hub.entry_replacing(
             id,
             "tool_call",
             format!("{} ({})\n{}", call.name, call.id, call.arguments),
+            call.argument_entry.clone(),
         );
         self.running = Some(call);
         let call = self.running.as_ref().expect("running call");

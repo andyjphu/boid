@@ -16,6 +16,8 @@ pub struct Entry {
     pub id: String,
     pub kind: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
 }
 #[derive(Clone, Serialize)]
 pub struct View {
@@ -118,10 +120,20 @@ impl Hub {
         let _ = self.0.events.send(event);
     }
     pub fn entry(&self, session: &str, kind: &str, text: impl Into<String>) -> String {
+        self.entry_replacing(session, kind, text, None)
+    }
+    pub fn entry_replacing(
+        &self,
+        session: &str,
+        kind: &str,
+        text: impl Into<String>,
+        replaces: Option<String>,
+    ) -> String {
         let entry = Entry {
             id: Uuid::new_v4().to_string(),
             kind: kind.into(),
             text: text.into(),
+            replaces,
         };
         let mut data = self.0.data.lock().unwrap();
         if let Some(handle) = data.sessions.get_mut(session) {
@@ -194,6 +206,7 @@ impl Hub {
         view.entries.push(Entry {
             id: Uuid::new_v4().to_string(),
             kind: "context".into(),
+            replaces: None,
             text: format!(
                 "{identity}\nModel: {}\n\n{}\n\nTool definitions:\n{}",
                 self.0.client.model,
@@ -201,7 +214,7 @@ impl Hub {
                 tool_calls::definitions()
             ),
         });
-        view.entries.push(Entry { id: Uuid::new_v4().to_string(), kind: "notice".into(), text: "Reasoning shown here is the provider's exposed summary. Hidden model reasoning is unavailable. Sessions live in this server process; browser disconnection does not stop them.".into() });
+        view.entries.push(Entry { id: Uuid::new_v4().to_string(), kind: "notice".into(), replaces: None, text: "Reasoning shown here is the provider's exposed summary. Hidden model reasoning is unavailable. Sessions live in this server process; browser disconnection does not stop them.".into() });
         {
             let mut data = self.0.data.lock().unwrap();
             if data.closing {
@@ -265,6 +278,7 @@ impl Hub {
             id: message_id.clone(),
             kind: "user".into(),
             text,
+            replaces: None,
         };
         handle.view.entries.push(entry.clone());
         handle.view.pending.push(message_id.clone());
@@ -278,6 +292,23 @@ impl Hub {
         let data = self.0.data.lock().unwrap();
         let handle = data.sessions.get(id).context("Unknown session.")?;
         handle.interrupt.send_replace(());
+        Ok(())
+    }
+    pub async fn close(&self, id: &str) -> Result<()> {
+        let task = {
+            let mut data = self.0.data.lock().unwrap();
+            data.sessions
+                .get_mut(id)
+                .context("Unknown session.")?
+                .task
+                .take()
+                .context("Session is already closing.")?
+        };
+        task.abort();
+        let _ = task.await;
+        let mut data = self.0.data.lock().unwrap();
+        data.sessions.remove(id);
+        self.emit(&mut data, json!({"type":"closed","session_id":id}));
         Ok(())
     }
     fn input_delivered(&self, session: &str, id: &str, state: &str) {
@@ -332,6 +363,7 @@ impl Hub {
         let entry = Entry {
             id: Uuid::new_v4().to_string(),
             kind: "peer".into(),
+            replaces: None,
             text: format!(
                 "Received from {sender} ({from}); queued for the next model request:\n{text}"
             ),
@@ -659,7 +691,7 @@ mod tests {
         release_fourth.send(json!([])).unwrap();
         hub.message(&target.id, "Continue after completion".into())
             .unwrap();
-        let (after_completion, _release_fifth) =
+        let (after_completion, release_fifth) =
             tokio::time::timeout(Duration::from_secs(2), received.recv())
                 .await
                 .unwrap()
@@ -672,6 +704,11 @@ mod tests {
                 .unwrap()["content"],
             "Continue after completion"
         );
+        // Closing during work cancels the worker and prevents later input.
+        hub.close(&target.id).await.unwrap();
+        assert!(hub.view(&target.id).is_none());
+        assert!(hub.message(&target.id, "Must not restart".into()).is_err());
+        let _ = release_fifth.send(json!([]));
         hub.shutdown().await;
         server.abort();
         let _ = server.await;

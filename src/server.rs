@@ -100,7 +100,7 @@ pub async fn serve() -> Result<()> {
         .route("/api/login", post(login))
         .route("/api/config", get(config))
         .route("/api/sessions", get(sessions).post(create))
-        .route("/api/sessions/{id}", get(session))
+        .route("/api/sessions/{id}", get(session).delete(close_session))
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
@@ -227,6 +227,10 @@ async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<
         .create(input)
         .map(|view| Json(json!(view)))
         .map_err(invalid)
+}
+async fn close_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub.close(&id).await.map_err(invalid)?;
+    Ok(Json(json!({"status":"closed"})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

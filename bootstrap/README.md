@@ -232,7 +232,7 @@ of taste, not a complete specification to reproduce.
 The workspace must support ordinary interactive terminal use, with at least
 one real or substantially equivalent terminal among an M-by-N arrangement of
 views. File editing and artifact inspection need not live inside an agent
-session. PR #4 uses locally vendored xterm.js connected to a Bash PTY inside
+session. The web interface uses locally vendored xterm.js connected to a shell PTY inside
 the task container.
 
 Andy clarified the basis for UX judgment after using v4 (2026-11-08):
