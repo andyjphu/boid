@@ -84,3 +84,20 @@ or make Andy supply a component specification.
 
 V5 UX discovery remains active. No redesign or claim of improved judgment has
 been validated. Daybreak is separately backlogged; identity work is deferred.
+
+## Discovery: the screenshot did not endorse Codex's session UX
+
+Woo asked:
+
+> Is interacting with a Codex terminal session already close to what you want there, or does that interaction itself need a fundamental change?
+
+Andy answered:
+
+> good, you're closest to the problem so far, this is the most pointed question you've asked so far; i dont like codex session ux, i hate it a lot actually; you've overindexed on the screenshot ive sent and never asked me what i really want
+
+This answers the earlier baseline question: Codex's session interaction is
+not the desired baseline. The screenshot and surrounding statements support
+peripheral awareness of several agents, not approval of each session's UX.
+Andy praised the question's relevance, not a proposed design. The desired
+interaction with an individual agent remains to be elicited; do not substitute
+another familiar interface or infer it from this rejection alone.
