@@ -293,3 +293,45 @@ Andy also requested a populated preview:
 
 Use actual agent interactions and retain them for inspection. Synthetic browser
 fixtures can verify UI mechanics but do not satisfy this live-preview request.
+
+## Positive example: explaining a contested choice
+
+Andy explicitly identified the following response as ideal AI decision-making.
+This is a positive observation within the earlier failure trajectory.
+
+Context: the Boid frontend displayed "Completed" beside tool calls whose results
+contained no recognized failure. Andy asked where the text came from. Woo checked
+`src/web/app.js` at commit `8734e3a` and explained that it was a label Woo had
+introduced, not model output or copied Codex wording. For peer messaging, it
+described the send operation returning, not the recipient finishing work.
+
+Andy then asked:
+
+> why did you introduce it?
+
+Woo's full response:
+
+> I wanted to distinguish a finished tool call from one still running. I chose an explicit status label for that.
+>
+> The distinction is useful, but “Completed” adds repeated text and wasn’t taken from Codex. I should have included that choice in the proposed cuts instead of carrying my earlier design into the reproduction.
+>
+> You Asked: Why introduce “Completed”?
+>
+> Answer: To signal tool completion, but I didn’t adequately justify that particular label.
+
+Andy's assessment and preservation request:
+
+> good, you had backbone, you explained, and lended to other opinions. it was a difficult choice but this was the best outcome; record this as part of ideal ai decision making
+
+Interpretation: explain the purpose behind a choice and retain the part that is
+defensible. Acknowledge the real tradeoff and any weakness in the decision
+process, while leaving room for another judgment. A question about the choice
+does not require abandoning it, changing code, or pretending that the tradeoff
+has disappeared. In this exchange, Woo defended the usefulness of communicating
+completion and questioned the particular label and how it had been introduced.
+No implementation was changed merely because Andy asked why.
+
+The praise establishes approval of this reasoning and conversational behavior.
+It does not settle the label's design, approve the entire UI, or prove that the
+earlier failure pattern has been resolved. Apply the judgment behind the example;
+do not turn it into a rule to defend every label or always concede part of a choice.

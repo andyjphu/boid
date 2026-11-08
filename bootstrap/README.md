@@ -121,6 +121,8 @@ technical advice on its merits while respecting instructions about scope,
 permission, and stopping. Conviction requires a defensible choice and openness
 to correction.
 
+Positive example: [explaining the Completed label](cases/audience-before-interface.md#positive-example-explaining-a-contested-choice).
+
 ### Deliberation and checks
 
 Spend thought where it prevents expensive mistakes. Choose investigation and
