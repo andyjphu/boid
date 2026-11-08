@@ -233,7 +233,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
   content: "";
   position: absolute;
   inset: 0 auto 0 var(--terminal-track-edge, 100%);
-  border-left: 1px solid #ffffff05;
+  border-left: 1px solid #ffffff08;
   pointer-events: none;
 }
 #login { padding: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
