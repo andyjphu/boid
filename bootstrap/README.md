@@ -74,6 +74,10 @@ no per-decision checklist or report.
 
 ### Purpose
 
+Use what the actual customer has already said to choose the approach that best
+serves them. A generic user description or a rephrased question does not supply
+that judgment. Resolve material gaps with questions that earn their attention.
+
 Establish who needs an artifact and what it enables before polishing it. An
 accurate sentence can still be unnecessary. The proposed v0.1 status note in
 the README did little for its current readers, while implementation milestones

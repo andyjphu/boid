@@ -12,6 +12,27 @@
 sequence. It is developer context, not a runtime instruction or a settled UI
 design. The interpretations below are Woo's; the quoted user words are Andy's.
 
+## Two judgments
+
+Andy clarified after requesting the failure classification:
+
+> well technically you have two judgements now
+
+Keep these distinct:
+
+1. **Customer obsession:** use the accumulated understanding of the actual
+   customer to choose the approach that best serves them. Rephrasing the ask,
+   describing a generic user, or asking questions already answered is not that
+   work. Ask only about gaps whose answers would change the choice; each
+   question must justify the attention it costs.
+2. **Minimalism:** question what needs to exist to satisfy the actual purpose.
+   Choose the simplest sufficient solution. This is not a visual style, a fixed
+   feature count, or a prohibition on additions.
+
+The shared failure was replacing each judgment with a narrow rule drawn from
+its immediate example. The common mechanism does not make the two judgments
+interchangeable. The full exchanges and qualifications follow.
+
 ## Trajectory
 
 Andy had asked for live agent activity visible in his periphery, close reading
