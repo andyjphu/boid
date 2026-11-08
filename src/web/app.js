@@ -142,8 +142,8 @@ function makePane(name, cwd, kind, id) {
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  tab.append(paneIcon(kind), title, directory);
-  header.append(tab, status, close);
+  tab.append(paneIcon(kind), title, directory, close);
+  header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
   return { pane, header, tab, title, status, directory, error, close };

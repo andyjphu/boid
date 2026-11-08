@@ -90,7 +90,7 @@ body.disconnected .workspace-actions,
 .pane-status { font-size: 11px; color: #aaa; margin-left: auto; padding: 4px; white-space: nowrap; }
 .pane[data-status="error"] .pane-status { color: #f0a29c; }
 .pane-header button { padding: 1px 5px; font-size: 11px; }
-.pane-header .pane-close { flex-shrink: 0; border: 0; background: transparent; color: #999; padding: 0 2px; font-size: 17px; line-height: 1; }
+.pane-header .pane-close { margin-left: auto; flex-shrink: 0; border: 0; background: transparent; color: #999; padding: 0 2px; font-size: 17px; line-height: 1; }
 .pane-header .pane-close:hover { color: #ddd; }
 .pane-cwd {
   margin: 0;
@@ -99,7 +99,6 @@ body.disconnected .workspace-actions,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 40%;
 }
 .trace {
   flex: 1;
