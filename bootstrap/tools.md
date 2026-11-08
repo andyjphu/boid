@@ -1,35 +1,89 @@
-# CLI and tools
+# Server, web interface, and tools
 
-This page describes the standalone CLI currently implemented in PR #4. The
-[project direction](README.md#project-direction) calls for server-owned execution
-and favors a web interface, with command-line task submission retained. The
-shared server, web client, and submission protocol are not implemented here.
+Run `boid serve` (or `boid` with no arguments) inside the task container. The
+shared server listens on `127.0.0.1:7734` by default and prints a browser URL.
+A second server cannot bind the same address. `BOID_LISTEN` changes the listener;
+no system service is installed. Set `OPENAI_API_KEY`; `BOID_MODEL` defaults to
+`gpt-6.1-sol`.
 
-Run `boid` for an interactive conversation, or `boid 'task'` to start with a
-request. Piped input runs to completion and exits. Set `OPENAI_API_KEY` in the
-container environment. `BOID_MODEL` defaults to `gpt-6.1-sol`.
+`boid "task"` submits to the running server, prints its session ID, and exits.
+`BOID_URL` selects a server. `BOID_CWD` optionally selects a directory as seen
+by that server; otherwise the server's working directory is used. `BOID_TOKEN`
+supplies its access token, or the client reads the private token file under
+`BOID_STATE_DIR` (default `~/.local/share/boid`). The server generates a token
+file when needed.
 
-Text streams as it arrives. Tool calls and results appear between responses;
-the terminal shortens long tool displays to 2,000 characters. The conversation
-retains the tool's full bounded result. Terminal control characters are removed
-from displayed text.
+The printed browser URL exchanges a fragment token for an HttpOnly, SameSite
+cookie and removes the fragment. API access requires that token or cookie;
+cross-origin browser requests are rejected. The browser never receives the
+OpenAI credential. Use SSH forwarding or an authenticated HTTPS deployment
+for remote access; the default listener is local.
 
-Type a new message to interrupt and steer ongoing work. `/stop` or Ctrl-C stops
-the current turn; `/quit` exits. Ctrl-C while idle also exits. An interrupted
-command may already have changed files. Its next tool result records that
-uncertainty, and earlier completed results remain in the conversation. EOF
-lets ongoing work finish. Conversation state lasts for this process; restart
-begins a new conversation.
+## Sessions and live views
 
-The client uses the [Responses API](https://developers.openai.com/api/docs/guides/function-calling)
-with streaming, `store: false`, and explicit conversation input. Completed
-reasoning items are carried back with their encrypted content. API failures
-are reported without automatic retries. The compiled runtime guidance is
-`src/PRINCIPLES.md`; the CLI does not discover parent instruction files.
+The web workspace shows simultaneous agent traces, per-agent input and Stop,
+and real terminal panes. Focus enlarges a view while retaining other panes.
+Traces show selected instructions and tools, user and peer messages, text,
+provider-exposed reasoning summaries, tool calls and results, and control events.
+Models may return no summary; hidden reasoning is unavailable. Text is displayed
+without interpreting it as HTML. The view adds no extra tool-result truncation.
+
+New user input interrupts an active attempt and steers the next request.
+Completed results stay in context; interrupted actions are marked potentially
+partial. Stop has a priority path independent of the input queue and cancels
+older queued requests. Later user input can resume work.
+
+`list_agents` exposes session identities and status. `send_message` queues an
+attributed message for the recipient's next model request. It does not interrupt
+an active request. Idle recipients wake; stopped or errored recipients wait for
+new user input. Queueing is not acceptance, and peer input does not expand the
+operator's permissions.
+
+The server owns execution. Closing a browser, event subscription, or submitting
+command leaves work running. Reconnection receives a snapshot followed by live
+events; slow event consumers receive a fresh snapshot. Session history currently
+lives in server memory and grows with conversation length. Server shutdown or
+failure ends sessions; disk persistence and restart recovery are not implemented.
+
+The Responses client streams with `store: false`, explicit conversation input,
+and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
+context. API failures are reported without automatic retries. Runtime guidance
+is compiled from `src/PRINCIPLES.md`; parent/bootstrap discovery is not automatic.
+
+## Headless routes
+
+The browser and scripts use the same authenticated API:
+
+| Route | Behavior |
+| --- | --- |
+| `GET /api/config` | Default working directory and model |
+| `GET /api/sessions` | Session snapshots |
+| `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
+| `GET /api/sessions/{id}` | Inspect one session |
+| `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
+| `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
+| `GET /api/events` | SSE snapshot, entries, deltas, status |
+| `GET /api/terminals` | Terminal identities and status |
+| `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
+| `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
+| `DELETE /api/terminals/{id}` | End and wait for the shell |
+
+Agent behavior can be checked headlessly. Browser checks establish interface
+behavior. Tool unit tests alone do not establish disconnect or coordination behavior.
+
+## Interactive terminals
+
+Bash PTYs and locally vendored xterm.js provide interactive programs, keyboard
+input, resize, and reconnect. Disconnecting leaves a shell running; its Close
+button ends it. Replay retains the latest 512 KiB and marks omitted older output.
+Terminal input is an explicit operator shell action and bypasses the model's
+command heuristic. Both terminal and model command children omit API/server
+credentials from their environments. Deliberately detached processes still
+require container cleanup.
 
 ## File and command behavior
 
-The CLI calls the v3 library through six function tools: `read_file`,
+The server calls the v3 library through six function tools: `read_file`,
 `write_file`, `edit_file`, `glob`, `search`, and `exec_command`.
 
 `Tools::new` sets the working directory. Absolute paths and parent paths use
@@ -49,9 +103,9 @@ files use private temporary-file permissions. Ownership, ACLs, and extended
 attributes are not preserved. Coordinate concurrent writers at the caller.
 
 Commands run through Bash without startup profiles, with closed stdin. The
-CLI tool defaults to a 30-second timeout and accepts 1 to 300,000 milliseconds.
-Child commands do not inherit `OPENAI_API_KEY`; the Boid process still holds
-that credential. A command owns its process group. Its background
+model tool defaults to a 30-second timeout and accepts 1 to 300,000 milliseconds.
+Child commands do not inherit `OPENAI_API_KEY` or `BOID_TOKEN`; the server
+process still holds its credentials. A command owns its process group. Its background
 children end when it finishes, times out, or the caller drops the future.
 Processes that deliberately leave the group require container-level cleanup.
 
@@ -63,48 +117,42 @@ interactive approvals, policy-rule store, or Codex App Server dependency.
 
 ## Build and run
 
-Develop on the local checkout. Run builds and execution on `mm-west-2` under
-Colima Docker. Stage `Cargo.toml`, `Cargo.lock`, and `src/` in a disposable build
-directory. Keep the recovery snapshot separate. Do not expose the host home or
-Docker socket to the task process. Supply bootstrap guidance when relevant to
-a development assignment, with the caution in [the brief](README.md).
+Develop locally. Build and execute on `mm-west-2` under Colima Docker. Stage
+`Cargo.toml`, `Cargo.lock`, and `src/` in a disposable build directory; keep
+the recovery snapshot separate. If the unqualified hostname fails, use
+`-o HostName=mm-west-2.local -o HostKeyAlias=mm-west-2` and retain host-key checking.
 
-Build the toolchain image using the Dockerfile on stdin, so the image receives
-no repository context:
+Build `boid-dev` from `bootstrap/Dockerfile` on stdin. Run `cargo fetch --locked`
+with registry access, then `cargo fmt --check`, `cargo test --locked --offline`,
+and `cargo build --locked --offline` without network. Share dependency downloads;
+keep build artifacts separate for each source workspace. The frontend has no
+build step. Pinned terminal assets and licenses are under `src/web/vendor/`.
 
-```sh
-docker build -t boid-dev - < bootstrap/Dockerfile
-```
-
-With the staged directory mounted at `/work`, run `cargo fetch --locked` once
-with registry network access. Then run `cargo test --locked --offline` and
-`cargo build --locked --offline` with network disabled. Share the dependency
-download cache, and keep build artifacts separate for each source workspace.
-
-For a model run, allow access to the OpenAI API and supply the API key to the
-container. On the Docker host, set `BOID_WORKSPACE` to the staged task directory
-and `BOID_TARGET_VOLUME` to a target volume dedicated to that directory. This
-command uses the existing compiled binary through a read-only mount:
+On the Docker host, set `BOID_WORKSPACE` to the task directory. This uses the
+existing compiled binary volume and publishes only on host loopback:
 
 ```sh
-docker run --rm -it --init \
+docker run --rm --init \
   --cap-drop=ALL --security-opt no-new-privileges \
   --pids-limit=256 --memory=4g --cpus=4 \
-  -e OPENAI_API_KEY -e BOID_MODEL -e CARGO_NET_OFFLINE=true -e CARGO_BUILD_JOBS=4 \
-  -v "$BOID_WORKSPACE:/work" \
-  -v boid-v3-cargo:/usr/local/cargo \
-  -v boid-v3-target:/opt/boid:ro -v "$BOID_TARGET_VOLUME:/work/target" \
-  boid-dev /opt/boid/debug/boid
+  -p 127.0.0.1:7734:7734 \
+  -e OPENAI_API_KEY -e BOID_MODEL -e BOID_LISTEN=0.0.0.0:7734 \
+  -v "$BOID_WORKSPACE:/work" -v boid-v3-target:/opt/boid:ro \
+  boid-dev /opt/boid/debug/boid serve
 ```
 
-For Boid to work on itself, expose a copy of `Cargo.toml`, `Cargo.lock`, and
-`src/`, plus the relevant development guidance. Keep Git history outside the
-runtime workspace unless needed and explicitly scoped for the task. Keep the
-canonical checkout outside that mount, then review the diff and bring back the
-intended changes through a PR. Supply only credentials and services needed for
-the task. This launch recipe is the execution boundary; the binary itself does
-not create or require a container.
+Use SSH forwarding to reach the remote host. Run the server under a supervisor
+or persistent terminal to survive an SSH logout; browser independence does not
+make it survive host shutdown. Bind-mounted fixtures must use Colima's shared
+home paths, not Mac `/tmp`. Docker `--env-file` is read by the host client and
+does not require a bind mount. Keep credentials out of evidence artifacts.
 
-Record any unintended destructive action, even when Docker prevents damage.
-Preserve the command, target, and observed result. Hand dangerous host or
-system work to Codex; do not retry it outside the task container.
+For self-development, expose a source copy and relevant guidance with the
+[bootstrap caution](README.md). Keep the canonical checkout, host home, Docker
+socket, and unrelated credentials outside the task mount. Keep Git history out
+unless needed and explicitly scoped. Review the resulting diff through a PR.
+The container launch supplies the boundary; the binary does not create it.
+
+Record unintended destructive actions even when containment prevents damage.
+Preserve the command, target, and result; hand dangerous host/system work to
+Codex and continue unaffected work.

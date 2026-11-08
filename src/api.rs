@@ -8,7 +8,7 @@ use std::time::Duration;
 pub struct Client {
     http: reqwest::Client,
     key: String,
-    model: String,
+    pub model: String,
 }
 
 impl Client {
@@ -39,7 +39,7 @@ impl Client {
         &self,
         input: &[Value],
         tools: Value,
-        mut on_text: impl FnMut(&str),
+        mut on_event: impl FnMut(&Value) + Send,
     ) -> Result<Vec<Value>> {
         let response = self
             .http
@@ -53,7 +53,8 @@ impl Client {
                 "parallel_tool_calls": false,
                 "stream": true,
                 "store": false,
-                "include": ["reasoning.encrypted_content"]
+                "include": ["reasoning.encrypted_content"],
+                "reasoning": {"summary": "auto"}
             }))
             .send()
             .await
@@ -78,10 +79,8 @@ impl Client {
             })?;
             let event: Value =
                 serde_json::from_str(&event.data).context("Invalid JSON in the API stream.")?;
+            on_event(&event);
             match event["type"].as_str() {
-                Some("response.output_text.delta" | "response.refusal.delta") => {
-                    on_text(event["delta"].as_str().context("Missing text delta.")?);
-                }
                 Some("response.output_item.done") => {
                     let index = event["output_index"]
                         .as_u64()
@@ -106,6 +105,15 @@ impl Client {
 
     fn redact(&self, message: &str) -> String {
         message.replace(&self.key, "[redacted]")
+    }
+
+    #[cfg(test)]
+    pub fn test_client() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            key: "unused-test-key".into(),
+            model: "test".into(),
+        }
     }
 }
 

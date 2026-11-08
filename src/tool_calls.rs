@@ -44,12 +44,22 @@ pub fn definitions() -> Value {
             "exec_command",
             "Run Bash with the process's permissions and a small command guard. timeout_ms defaults to 30000 when null; otherwise use 1 to 300000.",
             &[
-                ("command", string),
+                ("command", string.clone()),
                 (
                     "timeout_ms",
                     json!({"type": ["integer", "null"], "minimum": 1, "maximum": 300000})
                 ),
             ],
+        ),
+        definition(
+            "list_agents",
+            "List sessions and their current status. A working status does not establish task completion.",
+            &[]
+        ),
+        definition(
+            "send_message",
+            "Send an attributed message to another session. Queued delivery is not acceptance. Messages enter at the next model request; explicitly stopped agents wait for user input.",
+            &[("to", string.clone()), ("text", string)]
         ),
     ])
 }

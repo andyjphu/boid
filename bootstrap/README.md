@@ -209,18 +209,17 @@ swarm interaction and communication. Aim to settle on one interactive interface;
 maintaining CLI and web feature parity is not a requirement. A scriptable server
 and a shell command that starts it do not require a second interactive product.
 Retain command-line task submission such as `boid "message for task"`. In the
-server design, this submits work to the shared server so the same session can
-be observed and controlled from the web interface. The current CLI executes
-locally in its own process; it does not yet perform this submission.
-The pending CLI is existing work, not proof that the final product should be
-terminal-based. The current VS Code layout is evidence of taste, not a complete
-specification to reproduce.
+current implementation, it submits to the server and exits. The same session
+can be observed and controlled from the web interface.
+The earlier terminal loop established the first working agent. Its interface
+does not constrain the shared server. The current VS Code layout is evidence
+of taste, not a complete specification to reproduce.
 
 The workspace must support ordinary interactive terminal use, with at least
 one real or substantially equivalent terminal among an M-by-N arrangement of
 views. File editing and artifact inspection need not live inside an agent
-session. xterm.js is a promising terminal component discussed with Andy; the
-shell connection and its execution environment remain implementation choices.
+session. PR #4 uses locally vendored xterm.js connected to a Bash PTY inside
+the task container.
 
 Keep the visual design sparse. Andy has repeatedly encountered unnecessary,
 poor UI decisions when agents build web applications. Sophisticated communication
@@ -246,13 +245,14 @@ Accepted direction from Andy's Boid planning discussion.
 Boid is a general agent swarm harness using OpenAI API-key access.
 Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
-The current implementation is v4 / PR #4: a working CLI and agent loop, pending
-review. Version numbers follow PR numbers. The web/server direction above is
-not yet implemented. PR #4 does not yet satisfy server-owned execution or the
-complete live-view requirement. Its existing validation covers the standalone
-agent loop, not the planned server, browser, or communication protocol. The
-design discussion and documentation changes do not authorize replacing this
-code before the implementation scope is settled.
+The current implementation is v4 / PR #4: a shared server, minimal web workspace,
+real terminal panes, and command-line task submission. Version numbers follow
+PR numbers. Andy's 2026-11-08 correction explicitly required implementation to
+follow the agreed direction; the earlier pause on premature interface selection
+no longer blocks this scope. Advanced view/context manipulation remains open.
+Session state lasts for the server process; persistence across server restarts
+is not yet implemented. Validation must distinguish server behavior, agent work,
+and the actual browser interface.
 
 Use the reusable glob, search, read, write, edit, and command tools from v3.
 Avoid temporary tool-runner subcommands.
@@ -282,7 +282,7 @@ If containment prevents such an action, preserve its command, target, and
 result as an incident. Stop the affected action and hand it to Codex. Continue
 unaffected work. Use the trace or task record; no automatic collector is needed.
 
-See [the CLI, tools, and container workflow](tools.md) for current behavior.
+See [the server, tools, and container workflow](tools.md) for current behavior.
 
 Use [Codex](https://github.com/openai/codex) as a reference. Favor familiar
 model-facing patterns where they help, explain useful departures, and choose
@@ -309,8 +309,8 @@ work. A stop command remains distinct from a disconnected client.
 Expose agent control and events independently of browser components, so scripts
 can exercise agent behavior without a browser. Use browser checks for interface
 behavior. This principle does not require a second interactive CLI. Interface
-details and the proposed advanced swarm interactions remain open; this entry
-does not authorize their implementation or replace the pending PR's CLI.
+details beyond the current workspace and the proposed advanced swarm
+interactions remain open. They are not commitments of this implementation.
 
 ## Learning
 

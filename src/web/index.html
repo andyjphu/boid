@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boid</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/vendor/xterm.js"></script>
+  <script defer src="/vendor/addon-fit.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="workspace-header">
+    <strong>Boid</strong>
+    <span id="connection" role="status">Connecting…</span>
+    <div class="workspace-actions">
+      <button id="add-agent" type="button" disabled>New agent</button>
+      <button id="add-terminal" type="button" disabled>New terminal</button>
+    </div>
+  </header>
+  <div id="workspace-error" class="error-banner" role="alert" hidden></div>
+  <form id="login" hidden>
+    <label>Server token <input id="token" type="password" autocomplete="off" required></label>
+    <button type="submit">Connect</button>
+    <span>Use the token printed by the Boid server.</span>
+  </form>
+  <main id="workspace" aria-label="Agent and terminal workspace">
+    <p id="empty">Start an agent or open a terminal.</p>
+  </main>
+  <dialog id="create-dialog">
+    <form id="create-form">
+      <h1 id="create-title">New agent</h1>
+      <label id="name-field">Name
+        <input name="name" autocomplete="off" placeholder="Agent name">
+      </label>
+      <label>Working directory
+        <input name="cwd" autocomplete="off" placeholder="Server working directory">
+      </label>
+      <label id="message-field">Task
+        <textarea name="message" rows="5" placeholder="What should this agent do?"></textarea>
+      </label>
+      <p id="create-error" class="error-banner" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button id="cancel-create" type="button">Cancel</button>
+        <button id="submit-create" type="submit">Create agent</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
