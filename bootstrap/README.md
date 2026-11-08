@@ -255,6 +255,12 @@ Sophisticated communication can coexist with a small visible interface.
 Memory use matters, but no comparison between the proposed web client and
 Andy's VS Code setup has been measured.
 
+Small details carry substantial weight in Andy's design judgment. Alignment,
+spacing, scroll response and motion deserve deliberate choices even in a
+minimal interface. Judge their combined effect during actual use; a working
+feature can still feel wrong. See the [scrollbar example](cases/audience-before-interface.md#small-details-and-design-taste)
+for the corrections and Andy's assessment.
+
 ### Possibilities, not commitments
 
 Andy may want more agents than visible panes, agents influencing their own
