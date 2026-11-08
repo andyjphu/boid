@@ -217,7 +217,7 @@ function followLatest(ui) {
 function closeModelPicker(ui) {
   ui.modelPicker.hidden = true;
   ui.composer.hidden = false;
-  ui.activity.lastChild.textContent = "Esc to interrupt";
+  ui.activity.lastChild.textContent = " · Esc to interrupt";
   ui.input.focus({ preventScroll: true });
 }
 
@@ -272,7 +272,7 @@ function addSession(view) {
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
-  ui.activity.append("Esc to interrupt");
+  ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
   ui.modelPicker = element("div", "model-picker");
   ui.modelPicker.hidden = true;
   ui.modelPicker.tabIndex = -1;
@@ -393,7 +393,7 @@ function setStatus(ui, status) {
   if (ui.view) ui.view.status = status;
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
-  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
   ui.status.textContent = "";
 }
 
