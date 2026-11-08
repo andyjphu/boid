@@ -123,8 +123,16 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .entry[data-kind="error"], .stderr { color: #f0a29c; }
 .entry[data-kind="notice"] { color: #999; font-size: 11px; }
 .entry[data-kind="tool_call"], .entry[data-kind="tool_result"], .entry[data-kind="tool_arguments"] { color: #aaa; margin-bottom: 7px; }
-.entry[data-kind="tool_call"] .entry-body { display: flex; gap: 8px; align-items: baseline; }
+.entry[data-kind="tool_call"], .entry[data-kind="tool_result"] { border-left: 1px solid #414141; padding-left: 9px; }
+.entry.tool-joined-call { margin-bottom: 0; padding-bottom: 4px; }
+.entry.tool-joined-result { padding-bottom: 2px; }
+.tool-header { display: flex; gap: 8px; align-items: baseline; }
+.tool-command { flex: 1; }
 .tool-name { color: #ccc; font: 12px ui-monospace, monospace; flex-shrink: 0; }
+.tool-status { margin-left: auto; color: #888; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.entry[data-tool-failed="true"] .tool-status { color: #f0a29c; }
+.tool-output { padding-left: 16px; }
+.tool-header + .tool-output { margin-top: 4px; }
 .entry-body .tool-text { margin: 0; min-width: 0; }
 .tool-note { color: #888; font-size: 11px; }
 .session-context { color: #888; font-size: 11px; }

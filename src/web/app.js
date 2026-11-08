@@ -44,8 +44,10 @@ async function request(path, method = "GET", body, headers = {}) {
   return result;
 }
 
-function layout() {
-  const following = [...sessions.values()].filter(ui => ui.follow);
+function layout(event) {
+  if (event?.type !== "resize") {
+    for (const ui of sessions.values()) rememberPosition(ui);
+  }
   for (const ui of sessions.values()) ui.reflow = true;
   const panes = [...workspace.querySelectorAll(".pane")];
   empty.hidden = panes.length > 0;
@@ -63,9 +65,7 @@ function layout() {
     pane.querySelector(".pane-title").setAttribute("aria-expanded", String(active));
   }
   requestAnimationFrame(() => {
-    for (const ui of following) {
-      if (ui.follow) ui.trace.scrollTop = ui.trace.scrollHeight;
-    }
+    for (const ui of sessions.values()) restorePosition(ui);
     for (const ui of sessions.values()) ui.reflow = false;
   });
 }
@@ -100,12 +100,53 @@ function atBottom(trace) {
   return trace.scrollHeight - trace.scrollTop - trace.clientHeight < 32;
 }
 
+function selectedWithin(node) {
+  const selection = window.getSelection();
+  return selection && !selection.isCollapsed && selection.rangeCount > 0
+    && selection.getRangeAt(0).intersectsNode(node);
+}
+
+function rememberPosition(ui) {
+  if (ui.follow) { ui.anchor = null; return; }
+  const top = ui.trace.getBoundingClientRect().top;
+  const node = [...ui.trace.querySelectorAll(".entry")].find(node =>
+    !node.hidden && node.getBoundingClientRect().bottom > top);
+  ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
+}
+
+function restorePosition(ui) {
+  if (ui.follow && !selectedWithin(ui.trace)) {
+    ui.trace.scrollTop = ui.trace.scrollHeight;
+  } else if (ui.anchor?.node.isConnected) {
+    ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
+      - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
+  }
+}
+
+document.addEventListener("selectionchange", () => {
+  for (const ui of sessions.values()) {
+    if (selectedWithin(ui.trace)) {
+      ui.follow = false;
+      ui.latest.hidden = false;
+      rememberPosition(ui);
+    }
+    for (const item of ui.entries.values()) {
+      if (item.deferred && !selectedWithin(item.node)) {
+        item.deferred = false;
+        renderEntry(ui, item);
+        item.rendered = true;
+      }
+    }
+    restorePosition(ui);
+  }
+});
+
 function followLatest(ui) {
   if (ui.followScheduled) return;
   ui.followScheduled = true;
   requestAnimationFrame(() => {
     ui.followScheduled = false;
-    if (ui.follow) {
+    if (ui.follow && !selectedWithin(ui.trace)) {
       ui.trace.scrollTop = ui.trace.scrollHeight;
       ui.latest.hidden = true;
     }
@@ -133,14 +174,21 @@ function addSession(view) {
   ui.latest = element("a", "latest", "↓ Latest");
   ui.latest.href = "#";
   ui.latest.hidden = true;
-  ui.latest.addEventListener("click", event => { event.preventDefault(); ui.follow = true; followLatest(ui); });
+  ui.latest.addEventListener("click", event => {
+    event.preventDefault();
+    if (selectedWithin(ui.trace)) window.getSelection().removeAllRanges();
+    ui.follow = true;
+    ui.anchor = null;
+    followLatest(ui);
+  });
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
-    ui.follow = atBottom(ui.trace);
+    ui.follow = atBottom(ui.trace) && !selectedWithin(ui.trace);
     ui.latest.hidden = ui.follow;
+    rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
-    if (event.deltaY < 0) { ui.follow = false; ui.latest.hidden = false; }
+    if (event.deltaY < 0) { ui.follow = false; ui.latest.hidden = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
   ui.pane.append(ui.trace, ui.latest, ui.error, ui.composer);
@@ -152,7 +200,7 @@ function addSession(view) {
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
-    if (ui.follow) followLatest(ui);
+    restorePosition(ui);
   });
   traceResize.observe(ui.trace);
   ui.input.addEventListener("keydown", event => {
@@ -188,6 +236,93 @@ function setStatus(ui, status) {
   ui.status.textContent = status === "working" ? "Working" : status === "idle" ? "" : (status || "");
 }
 
+function toolEntry(text) {
+  const split = text.indexOf("\n");
+  const heading = split < 0 ? text : text.slice(0, split);
+  const payload = split < 0 ? "" : text.slice(split + 1);
+  const identity = /^(.+) \(([^()\r\n]+)\)$/.exec(heading);
+  let value;
+  try { value = JSON.parse(payload); } catch { /* Partial output stays visible. */ }
+  return { heading, payload, value, name: identity?.[1] || heading, callId: identity?.[2] };
+}
+
+function toolOutcome(result) {
+  if (!result) return { label: "Running", failed: false };
+  const value = result.value;
+  if (value?.timed_out) return { label: "Timed out", failed: true };
+  if (value?.signal) return { label: `Signal ${value.signal}`, failed: true };
+  if (value?.error) return { label: "Failed", failed: true };
+  if (typeof value?.exit_code === "number" && value.exit_code !== 0) {
+    return { label: `Exit ${value.exit_code}`, failed: true };
+  }
+  return { label: "Completed", failed: false };
+}
+
+function renderToolEntry(ui, item) {
+  const { node, body, kind } = item;
+  const tool = toolEntry(item.text);
+  const counterpartKind = kind === "tool_call" ? "tool_result" : "tool_call";
+  const counterpart = tool.callId && [...ui.entries.values()].find(entry => {
+    if (entry.kind !== counterpartKind) return false;
+    const other = toolEntry(entry.text);
+    return other.callId === tool.callId && other.heading === tool.heading;
+  });
+  const call = kind === "tool_call" ? item : counterpart;
+  const result = kind === "tool_result" ? item : counterpart;
+  const outcome = toolOutcome(result ? toolEntry(result.text) : null);
+  let previous = result?.node.previousElementSibling;
+  while (previous?.hidden) previous = previous.previousElementSibling;
+  const joined = Boolean(call && result && previous === call.node);
+  if (call) {
+    if (call !== item && selectedWithin(call.node)) {
+      call.deferred = true;
+    } else {
+      call.node.classList.toggle("tool-joined-call", joined);
+      call.node.dataset.toolFailed = String(outcome.failed);
+      if (call.toolStatus) call.toolStatus.textContent = outcome.label;
+    }
+  }
+  if (result) result.node.classList.toggle("tool-joined-result", joined);
+  node.title = tool.heading;
+  node.dataset.toolFailed = String(outcome.failed);
+  body.replaceChildren();
+  const header = element("div", "tool-header");
+  const command = toolEntry(call?.text || item.text);
+  const label = command.name === "exec_command" ? "$" : command.name;
+  header.append(element("span", "tool-name", label));
+  if (kind === "tool_call" || !joined) {
+    if (kind === "tool_call" || call) {
+      header.append(element("pre", "tool-text tool-command", command.value?.command
+        ?? (command.value !== undefined ? JSON.stringify(command.value, null, 2) : command.payload)));
+    }
+    const status = element("span", "tool-status", outcome.label);
+    header.append(status);
+    if (kind === "tool_call") item.toolStatus = status;
+  }
+  if (kind === "tool_call") {
+    body.append(header);
+    return;
+  }
+  // Keep results at their original event position when another visible event intervenes.
+  if (!joined) body.append(header);
+  const output = element("div", "tool-output");
+  const value = tool.value;
+  if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
+    for (const channel of ["stdout", "stderr"]) {
+      if (value[channel]?.text) output.append(element("pre", `tool-text ${channel}`, value[channel].text));
+      if (value[channel]?.truncated) output.append(element("div", "tool-note", `${channel} truncated`));
+    }
+    if (value.error) output.append(element("pre", "tool-text stderr", String(value.error)));
+    if (!output.childNodes.length) output.append(element("div", "tool-note", "No output"));
+  } else if (value && typeof value.text === "string") {
+    output.append(element("pre", "tool-text", value.text));
+    if (value.truncated) output.append(element("div", "tool-note", "Output truncated"));
+  } else {
+    output.append(element("pre", "tool-text", value !== undefined ? JSON.stringify(value, null, 2) : tool.payload || item.text));
+  }
+  body.append(output);
+}
+
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
@@ -198,30 +333,7 @@ function renderEntry(ui, item) {
       link.rel = "noopener noreferrer";
     }
   } else if (kind === "tool_call" || kind === "tool_result") {
-    const split = text.indexOf("\n");
-    const heading = split < 0 ? text : text.slice(0, split);
-    const payload = split < 0 ? "" : text.slice(split + 1);
-    let value;
-    try { value = JSON.parse(payload); } catch { /* Partial output stays visible. */ }
-    node.title = heading;
-    body.replaceChildren();
-    if (kind === "tool_call") {
-      const name = heading.replace(/ \(.*$/, "");
-      body.append(element("div", "tool-name", name === "exec_command" ? "$" : name));
-      body.append(element("pre", "tool-text", value?.command ?? (value ? JSON.stringify(value, null, 2) : payload)));
-    } else if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
-      for (const channel of ["stdout", "stderr"]) {
-        if (value[channel]?.text) body.append(element("pre", `tool-text ${channel}`, value[channel].text));
-        if (value[channel]?.truncated) body.append(element("div", "tool-note", `${channel} truncated`));
-      }
-      const outcome = value.timed_out ? "Timed out" : value.signal ? `Signal ${value.signal}` : `Exit ${value.exit_code}`;
-      body.append(element("div", "tool-note", outcome));
-    } else if (value && typeof value.text === "string") {
-      body.append(element("pre", "tool-text", value.text));
-      if (value.truncated) body.append(element("div", "tool-note", "Output truncated"));
-    } else {
-      body.append(element("pre", "tool-text", value ? JSON.stringify(value, null, 2) : payload || text));
-    }
+    renderToolEntry(ui, item);
   } else {
     body.textContent = text;
   }
@@ -268,9 +380,11 @@ function putEntry(ui, entry, delta = false) {
       item.renderScheduled = true;
       requestAnimationFrame(() => {
         item.renderScheduled = false;
+        if (selectedWithin(item.node)) { item.deferred = true; return; }
         renderEntry(ui, item);
         item.rendered = true;
         if (ui.follow) followLatest(ui);
+        else restorePosition(ui);
       });
     }
   }
@@ -296,7 +410,7 @@ function snapshot(views) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
     const follow = ui.follow;
-    const position = ui.trace.scrollTop;
+    rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
     ui.directory.textContent = view.cwd;
     ui.directory.title = view.cwd;
@@ -311,7 +425,7 @@ function snapshot(views) {
     setPending(ui, view.pending || []);
     setStatus(ui, view.status);
     if (follow) followLatest(ui);
-    else ui.trace.scrollTop = position;
+    else restorePosition(ui);
   }
 }
 

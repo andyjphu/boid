@@ -232,3 +232,28 @@ And requested deployment:
 This supersedes the implementation pause for the first pane revision. It does
 not approve every earlier proposal or withdraw the rejection of Codex's broader
 session UX. The named queue/interrupt behavior is a specific positive reference.
+
+## Codex behavior as the reference
+
+After using the first pane revision, Andy redirected the method:
+
+> good, although im realizing there is extreme benefit to not trying to remake the wheel from scratch; therefore i highly recommend that we half-shelve our work and go like this. take codex ux/ui, apply our minimization principles same rigorous disciple, and then i can tell you further how id like things to change, but for now start with replicating true behavior, apply the minimalism adivce heretofore, and then we'll start making better changes; this is a grey area i reckon, i encourage you to sync withme
+
+He resolved the execution boundary explicitly:
+
+> retaining boid's own execution system is important, reuse code if it is blatanly possible and correct, err on figuring out codex behavior and replicating
+
+Use Codex's implemented behavior as evidence before inventing another interface
+solution. Apply the earlier purpose and minimalism judgments when choosing what
+belongs. This does not authorize replacing Boid's engine or importing Codex's
+whole command surface. The chosen reference does not erase the earlier complaints
+about clutter, scrolling, and small panes.
+
+Reference inspected: OpenAI Codex `a90c80840869a8cfb313ef181d7721997b86c8e5`,
+`codex-rs/tui/src/transcript_view.rs`, `transcript_view/selection.rs`,
+`history_cell/messages.rs`, and `exec_cell/compact.rs`. Useful behaviors for
+this pass are stable text selection, retaining a reading position across
+resizing, and associating commands with their results. The Rust terminal
+renderer depends on Codex's protocol and application state; these behaviors
+fit Boid's DOM without importing that renderer. Reasoning and tool output stay
+visible; Codex's compact-output defaults are not automatically appropriate here.

@@ -371,8 +371,13 @@ context, and load lessons when relevant.
   "i just really hate the web interface's ux, and makes me question your
   judgement in underlying code implementation". Current evidence and rejected
   assumptions are preserved in the [audience case](cases/audience-before-interface.md).
-  Codex's session UX is rejected; Claude Code is a reference for simplicity,
-  not a feature specification. Prioritize readable small panes, an uncluttered
+  Andy disliked Codex's busy session UX, then chose its actual behavior as the
+  reference for the next pass, applying the minimalism judgment above. Retain
+  Boid's execution system. Reuse code where it fits clearly; otherwise inspect
+  Codex and reproduce the useful behavior in the web client. This supersedes
+  further independent pane design, not the earlier feedback about readability.
+  Claude Code remains a reference for simplicity, not a feature specification.
+  Prioritize readable small panes, an uncluttered
   appearance, and responsive scrolling while retaining live observation and
   access to the available trace. Start from what Andy needs to accomplish;
   send/stop illustrates a small interaction model, not a universal two-feature
