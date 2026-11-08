@@ -8,3 +8,7 @@ improve with experience and make effective use of agents working together.
 
 Boid's code and intended agent guidance belong in [src/](src/).
 [bootstrap/](bootstrap/) holds temporary context for agents developing Boid.
+
+![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
+
+v0.5 preview · [PR #5](https://github.com/andyjphu/boid/pull/5).
