@@ -1,0 +1,13 @@
+src/guard.rs contains code adapted from OpenAI Codex.
+Copyright 2025 OpenAI. Licensed under Apache License 2.0.
+See licenses/Apache-2.0.txt.
+
+Source revision: a90c80840869a8cfb313ef181d7721997b86c8e5
+https://github.com/openai/codex
+
+Adapted files:
+codex-rs/shell-command/src/bash.rs
+codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
+
+Boid combines their literal-word parsing and POSIX command checks in one module.
+Windows checks and Codex's policy/session dependencies are omitted.

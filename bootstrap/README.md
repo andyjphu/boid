@@ -109,9 +109,9 @@ the result the user will actually use. Protect the validity of scientific claims
 Preserve room to discover the right design. A proposal written confidently can
 be mistaken for a settled decision by the next developer. Keep assumptions and
 unresolved choices explicit until the work requires a choice. Codex is a useful
-reference without settling Boid's implementation language. Separate a new design
-decision from correction of an error; either can justify a change for different
-reasons.
+reference. Rust is now the accepted implementation language. Separate a new
+design decision from correction of an error; either can justify a change for
+different reasons.
 
 ### Cost and performance
 
@@ -145,18 +145,36 @@ Approval of this brief establishes direction; its effect on work remains unknown
 Accepted direction from Andy's Boid planning discussion.
 
 Boid is a general agent swarm harness with a CLI and OpenAI API-key access.
-Start with glob, search, reading, and editing, plus the permission structure.
-Add command execution and the agent loop. Show tool results, allow questions
-and steering during work, and make stops take effect.
+Use Rust for its compile-time guarantees, speed, and opportunities to reuse
+Codex code. Andy also expects its form to encourage disciplined development.
+The next change is v3 / PR #3. Version numbers follow PR numbers.
 
-The operator chooses what Boid may read, write, and execute. Enforce those
-limits outside the model. Restricted shell execution requires OS isolation
-as well as file access rules.
+Start with reusable glob, search, read, write, edit, and command tools. The
+agent loop will use these functions. Avoid temporary tool-runner subcommands.
+The first working agent should read its own code, make a requested change,
+run the relevant check, and show the diff. Show tool results, support steering
+during work, and make stops take effect. Every substantive change needs a PR
+that Andy approves, including changes made by Boid itself.
 
-Keep v0.1 small enough for Andy to understand; it need not run. v1 should read
-its own code, make a small requested change, run the relevant check, and show
-the diff. Every substantive Boid change goes through a PR that Andy approves.
-Keep this approval requirement when Boid starts changing its own code.
+Andy accepted ordinary process permissions inside Docker, with a small POSIX
+command guard. Docker supplies the execution boundary. The guard detects
+selected literal forced-deletion commands; it cannot establish that a command
+is safe. Do not introduce Codex App Server or a full permission framework for
+this scope. Earlier capability-handle and Codex-executor proposals are superseded.
+
+Develop locally. Build and run in Colima Docker on mm-west-2. Give the container
+only the task's files and services. Keep host credentials, the Docker socket,
+bootstrap material, and Git history outside Boid's runtime workspace. The
+emergency transfer is a recovery snapshot, not a second active checkout.
+
+Andy assigns dangerous host or system work to Codex. Boids handle fast
+implementation, research, writing, and communication. Developers and Boid
+agents must notice actions that could cause unintended damage without Docker.
+If containment prevents such an action, preserve its command, target, and
+result as an incident. Stop the affected action and hand it to Codex. Continue
+unaffected work. Use the trace or task record; no automatic collector is needed.
+
+See [the tool library and container workflow](tools.md) for current behavior.
 
 Use [Codex](https://github.com/openai/codex) as a reference. Favor familiar
 model-facing patterns where they help, explain useful departures, and choose
@@ -190,7 +208,6 @@ context, and load lessons when relevant.
 ## Unresolved choices
 
 Runtime storage, collection, retrieval, swarm topology, and review frequency
-remain open. Language and library proposals also remain provisional. Choose
-them when the next useful capability requires a decision. The current agreement
-on Markdown and Git concerns developer knowledge; it does not settle Boid's
-future memory implementation.
+remain open. Choose libraries when the next useful capability requires them.
+The current agreement on Markdown and Git concerns developer knowledge; it does
+not settle Boid's future memory implementation.

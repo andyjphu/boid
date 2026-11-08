@@ -1,0 +1,13 @@
+[package]
+name = "boid"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+libc = "0.2"
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25.1"
