@@ -866,7 +866,7 @@ function attachTerminal(info) {
   viewport.addEventListener("scroll", () => {
     host.classList.add("scrolling");
     clearTimeout(scrollbarIdle);
-    scrollbarIdle = setTimeout(() => host.classList.remove("scrolling"), 800);
+    scrollbarIdle = setTimeout(() => host.classList.remove("scrolling"), 100);
   }, { passive: true });
   const observer = new ResizeObserver(entries => {
     host.style.setProperty("--terminal-track-edge", `${viewport.getBoundingClientRect().left + viewport.clientWidth - host.getBoundingClientRect().left}px`);

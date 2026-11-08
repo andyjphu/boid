@@ -221,14 +221,15 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .composer textarea::placeholder { color: #777; }
 .error-banner { color: #f0a29c; padding: 6px 10px; overflow-wrap: anywhere; }
 .pane > .error-banner { margin: 0; border-top: 1px solid #573b39; }
-.terminal-host { box-sizing: content-box; position: relative; flex: 1; min-height: 0; padding: 4px 0 4px 2px; overflow: hidden; }
+@property --terminal-thumb-color { syntax: "<color>"; inherits: true; initial-value: transparent; }
+.terminal-host { box-sizing: content-box; position: relative; flex: 1; min-height: 0; padding: 0 0 0 2px; overflow: hidden; --terminal-thumb-color: transparent; transition: --terminal-thumb-color 300ms ease; }
 .terminal-host .xterm { height: 100%; padding-right: 1px; }
-.terminal-host .xterm-viewport { scrollbar-width: auto; scrollbar-color: auto; }
+.terminal-host .xterm-viewport { scrollbar-width: auto; scrollbar-color: auto; overscroll-behavior: none; scroll-behavior: auto; }
 .terminal-host .xterm-viewport::-webkit-scrollbar { width: 15px; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
-.terminal-host .xterm-viewport::-webkit-scrollbar-thumb { background: transparent; border: 0; border-radius: 0; }
-.terminal-host.scrolling .xterm-viewport::-webkit-scrollbar-thumb { background: #555; }
-.terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover { background: #666; }
+.terminal-host .xterm-viewport::-webkit-scrollbar-thumb { background: var(--terminal-thumb-color); border: 0; border-radius: 0; }
+.terminal-host.scrolling { --terminal-thumb-color: #555; }
+.terminal-host:has(.xterm-viewport:hover) { --terminal-thumb-color: #666; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb:active { background: #666; }
 .terminal-host .xterm-viewport::-webkit-scrollbar-button { display: none; }
 .terminal-host::after {
