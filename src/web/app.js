@@ -9,6 +9,9 @@ const terminals = new Map();
 const terminalCatalog = new Map();
 let selected = null;
 let lastSequence = -1;
+// Local revisions remain ordered when a restarted server resets its sequence.
+let catalogRevision = 0;
+const sessionLifecycle = new Map();
 let events;
 const drafts = new Map();
 let paneOrder = [];
@@ -675,7 +678,21 @@ function setPending(ui, pending) {
   restorePosition(ui);
 }
 
+function acceptSessionResponse(view, startedAt) {
+  const lifecycle = sessionLifecycle.get(String(view.id));
+  if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
+    throw new Error("This agent has ended. Choose it from Inactive to reopen.");
+  }
+  return addSession(view);
+}
+
 function snapshot(views, terminalViews = []) {
+  const revision = ++catalogRevision;
+  const active = new Set(views.map(view => String(view.id)));
+  for (const [id, lifecycle] of sessionLifecycle) {
+    if (lifecycle.open && !active.has(id)) sessionLifecycle.set(id, { open: false, revision });
+  }
+  for (const id of active) sessionLifecycle.set(id, { open: true, revision });
   views = [...views].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   reconcilingCatalog = true;
@@ -739,6 +756,9 @@ function startEvents() {
       }
       if (message.seq <= lastSequence) return;
       lastSequence = message.seq;
+      const revision = ++catalogRevision;
+      if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
+      if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
       if (["session", "closed", "status", "terminal"].includes(message.type)) refreshChoices();
       if (message.type === "session") { addSession(message.session); return; }
       if (message.type === "terminal") {
@@ -1075,8 +1095,9 @@ function addSetup(saved) {
     ui.close.disabled = true;
     ui.error.hidden = true;
     try {
+      const startedAt = catalogRevision;
       const view = await request("/api/sessions", "POST", Object.fromEntries(new FormData(ui.form)));
-      discardSetup(ui, addSession(view));
+      discardSetup(ui, acceptSessionResponse(view, startedAt));
     } catch (error) { showError(ui.error, error); }
     finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
   });
@@ -1105,8 +1126,20 @@ function sessionCard(record, action) {
   return card;
 }
 
+function focusedChoice(container) {
+  const focused = document.activeElement;
+  return container.contains(focused) ? focused.closest(".session-card")?.dataset.sessionId : null;
+}
+
+function restoreChoiceFocus(container, id) {
+  if (!id) return;
+  const card = [...container.querySelectorAll(".session-card")].find(card => card.dataset.sessionId === id);
+  if (card && !card.disabled) card.focus({ preventScroll: true });
+}
+
 function renderAgentChoices(ui, active, inactive) {
   for (const [container, records, archived] of [[ui.active, active, false], [ui.inactive, inactive, true]]) {
+    const focused = focusedChoice(container);
     container.replaceChildren();
     if (!records.length) container.append(element("p", "session-empty", "None"));
     for (const record of records) {
@@ -1119,10 +1152,10 @@ function renderAgentChoices(ui, active, inactive) {
         ui.close.disabled = true;
         ui.error.hidden = true;
         try {
+          const startedAt = catalogRevision;
           const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen" : ""}`, archived ? "POST" : "GET");
-          if (view.archived || view.status === "ending") throw new Error("This agent has ended. Choose it from Inactive to reopen.");
           const attached = sessions.has(String(view.id));
-          const agent = addSession(view);
+          const agent = acceptSessionResponse(view, startedAt);
           if (archived || !attached) discardSetup(ui, agent);
           else { discardSetup(ui); focusSession(agent); }
         } catch (error) { showError(ui.error, error); refreshChoices(); }
@@ -1130,6 +1163,7 @@ function renderAgentChoices(ui, active, inactive) {
       });
       container.append(card);
     }
+    restoreChoiceFocus(container, focused);
   }
 }
 
@@ -1145,6 +1179,7 @@ function refreshChoices() {
       if (version !== choicesVersion) return;
       for (const ui of drafts.values()) {
         renderAgentChoices(ui, active, inactive);
+        const focused = focusedChoice(ui.terminalHistory);
         ui.terminalHistory.replaceChildren();
         const archived = terminalRecords.filter(record => record.archived);
         if (!archived.length) ui.terminalHistory.append(element("p", "session-empty", "None"));
@@ -1159,6 +1194,7 @@ function refreshChoices() {
           });
           ui.terminalHistory.append(card);
         }
+        restoreChoiceFocus(ui.terminalHistory, focused);
       }
     } catch (error) {
       if (version !== choicesVersion) return;
