@@ -687,7 +687,7 @@ function setPending(ui, pending) {
 function acceptSessionResponse(view, startedAt) {
   const lifecycle = sessionLifecycle.get(String(view.id));
   if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
-    throw new Error("This agent has ended. Choose it from Inactive to reopen.");
+    throw new Error("This agent has ended. Choose it from Inactive sessions to reopen.");
   }
   return addSession(view);
 }
@@ -765,7 +765,7 @@ function startEvents() {
       const revision = ++catalogRevision;
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
-      if (["session", "closed", "status", "terminal"].includes(message.type)) refreshChoices();
+      if (["session", "closed", "status"].includes(message.type)) refreshChoices();
       if (message.type === "session") { addSession(message.session); return; }
       if (message.type === "terminal") {
         terminalCatalog.set(String(message.terminal.id), message.terminal);
@@ -1066,7 +1066,6 @@ function addSetup(saved) {
   ui.close.setAttribute("aria-label", "Discard agent draft");
   const body = element("div", "session-setup-grid");
   ui.form = element("form", "setup-form");
-  ui.form.append(element("h2", null, "New agent"));
   for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"], ["message", "Task"]]) {
     const wrapper = element("label", null, label);
     const input = element(key === "message" ? "textarea" : "input");
@@ -1084,8 +1083,7 @@ function addSetup(saved) {
   const choices = element("div", "session-choices");
   ui.active = element("div", "active-agents");
   ui.inactive = element("div", "inactive-agents");
-  ui.terminalHistory = element("div", "terminal-history");
-  choices.append(element("h2", null, "Active"), ui.active, element("h2", null, "Inactive"), ui.inactive, element("h2", null, "Terminals"), ui.terminalHistory);
+  choices.append(element("h2", null, "Active sessions"), ui.active, element("h2", null, "Inactive sessions"), ui.inactive);
   body.append(ui.form, choices);
   ui.pane.append(body, ui.error);
   ui.close.addEventListener("click", () => discardSetup(ui));
@@ -1116,7 +1114,7 @@ function sessionCard(record, action) {
   card.type = "button";
   card.dataset.sessionId = String(record.id);
   const heading = element("span", "session-card-heading");
-  heading.append(element("span", "session-card-name", record.name || "Terminal"), element("span", "session-card-status", record.status || "idle"));
+  heading.append(element("span", "session-card-name", record.name || "Agent"), element("span", "session-card-status", record.status || "idle"));
   const cwd = element("span", "session-card-cwd", record.cwd || "");
   cwd.title = record.cwd || "";
   card.append(heading, cwd);
@@ -1177,28 +1175,12 @@ function refreshChoices() {
   if (!drafts.size) return;
   choicesTimer = setTimeout(async () => {
     try {
-      const [active, inactive, terminalRecords] = await Promise.all([
-        request("/api/sessions"), request("/api/sessions/archived"), request("/api/terminals"),
+      const [active, inactive] = await Promise.all([
+        request("/api/sessions"), request("/api/sessions/archived"),
       ]);
       if (version !== choicesVersion) return;
       for (const ui of drafts.values()) {
         renderAgentChoices(ui, active, inactive);
-        const focused = focusedChoice(ui.terminalHistory);
-        ui.terminalHistory.replaceChildren();
-        const archived = terminalRecords.filter(record => record.archived);
-        if (!archived.length) ui.terminalHistory.append(element("p", "session-empty", "None"));
-        for (const record of archived) {
-          const card = sessionCard(record, "View read-only terminal history");
-          card.addEventListener("click", () => {
-            if (ui.busy) return;
-            const existing = terminals.get(String(record.id));
-            const terminal = attachTerminal(record, true);
-            if (existing) { discardSetup(ui); focusSession(terminal); }
-            else discardSetup(ui, terminal);
-          });
-          ui.terminalHistory.append(card);
-        }
-        restoreChoiceFocus(ui.terminalHistory, focused);
       }
     } catch (error) {
       if (version !== choicesVersion) return;

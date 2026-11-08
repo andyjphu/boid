@@ -136,7 +136,7 @@ shell. Names remain with the durable terminal record across server restarts.
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×
 control ends it. Agent panes use the same control to end and archive the session. The + agent setup pane reopens
-an agent stopped or displays a terminal archive without creating a new shell.
+an agent stopped; terminal records are retained separately.
 Replay retains a bounded 512 KiB history with resize events and marks omitted
 older output. Replaying bytes never sends terminal responses back to the shell.
 Views share the PTY dimensions; focusing or clicking a terminal transfers input

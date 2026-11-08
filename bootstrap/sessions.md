@@ -12,8 +12,8 @@ An agent or live terminal pane's × ends execution and preserves history.
 session choices. It can stay open while other panes are used. Creating or
 reopening an agent replaces that setup in its position. Reopening leaves the
 agent stopped until new input. A setup pane's × only discards the local draft.
-Retained terminals are available in the setup pane's Terminals group; viewing
-one replays its output without starting a replacement shell.
+The agent chooser contains only agent sessions. Terminal records remain
+retained separately; existing replay panes never start a replacement shell.
 
 + terminal starts immediately in the server's repository working directory.
 The tab follows the observed shell working directory, with the full path in its
