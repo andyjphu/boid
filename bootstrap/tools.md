@@ -44,6 +44,10 @@ visible. The hidden box retains its space so hovering does not shift the trace.
 Disconnection mutes the view. Each pane has an × control; there is no separate
 Latest control or title gesture that enlarges a pane.
 
+Streaming keeps a view at the bottom when it is already there. Reading earlier
+messages preserves the visible message and its offset as content changes.
+Scrolling back to the bottom resumes following; each pane tracks this separately.
+
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
 the current model response and all its tool calls to finish, then enters the
 next model request without cancelling work. Escape in the selected

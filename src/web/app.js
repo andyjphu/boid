@@ -88,7 +88,7 @@ function removeSession(ui) {
 }
 
 function atBottom(trace) {
-  return trace.scrollHeight - trace.scrollTop - trace.clientHeight < 32;
+  return trace.scrollHeight - trace.scrollTop - trace.clientHeight <= 1;
 }
 
 function selectedWithin(node) {
@@ -289,16 +289,18 @@ function compactOutput(ui, item, content, text, label = "Output") {
   const block = element("div", "activity-block");
   block.append(details);
   if (label !== "Command" && label !== "Arguments") block.append(preview);
-  summary.addEventListener("click", () => {
-    item[openKey] = !details.open;
-    ui.follow = false;
+  summary.addEventListener("click", event => {
+    event.preventDefault();
     rememberPosition(ui);
+    details.open = !details.open;
+    item[openKey] = details.open;
+    restorePosition(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected) return;
     if (Boolean(item[openKey]) === details.open) return;
     item[openKey] = details.open;
-    rememberPosition(ui);
+    restorePosition(ui);
   });
   return block;
 }
@@ -411,17 +413,19 @@ function renderToolEntry(ui, item) {
   }
   showResult(Boolean(owner.expandedTool));
   if (details) {
-    header.addEventListener("click", () => {
-      owner.expandedTool = !details.open;
-      showResult(owner.expandedTool);
-      ui.follow = false;
+    header.addEventListener("click", event => {
+      event.preventDefault();
       rememberPosition(ui);
+      details.open = !details.open;
+      owner.expandedTool = details.open;
+      showResult(owner.expandedTool);
+      restorePosition(ui);
     });
     details.addEventListener("toggle", () => {
       if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
       owner.expandedTool = details.open;
       showResult(details.open);
-      rememberPosition(ui);
+      restorePosition(ui);
     });
   }
 }
@@ -484,10 +488,10 @@ function putEntry(ui, entry, delta = false) {
       requestAnimationFrame(() => {
         item.renderScheduled = false;
         if (selectedWithin(item.node)) { item.deferred = true; return; }
+        rememberPosition(ui);
         renderEntry(ui, item);
         item.rendered = true;
-        if (ui.follow) followLatest(ui);
-        else restorePosition(ui);
+        restorePosition(ui);
       });
     }
   }
