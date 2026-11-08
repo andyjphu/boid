@@ -147,10 +147,11 @@ Accepted direction from Andy's Boid planning discussion.
 Boid is a general agent swarm harness with a CLI and OpenAI API-key access.
 Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
-The next change is v3 / PR #3. Version numbers follow PR numbers.
+The current change is v4 / PR #4: the first working CLI and agent loop.
+Version numbers follow PR numbers.
 
-Start with reusable glob, search, read, write, edit, and command tools. The
-agent loop will use these functions. Avoid temporary tool-runner subcommands.
+Use the reusable glob, search, read, write, edit, and command tools from v3.
+Avoid temporary tool-runner subcommands.
 The first working agent should read its own code, make a requested change,
 run the relevant check, and show the diff. Show tool results, support steering
 during work, and make stops take effect. Every substantive change needs a PR
@@ -174,7 +175,7 @@ If containment prevents such an action, preserve its command, target, and
 result as an incident. Stop the affected action and hand it to Codex. Continue
 unaffected work. Use the trace or task record; no automatic collector is needed.
 
-See [the tool library and container workflow](tools.md) for current behavior.
+See [the CLI, tools, and container workflow](tools.md) for current behavior.
 
 Use [Codex](https://github.com/openai/codex) as a reference. Favor familiar
 model-facing patterns where they help, explain useful departures, and choose
