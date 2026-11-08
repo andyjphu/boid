@@ -186,6 +186,25 @@ tool messages, and comments, preserving technical meaning.
 Choose manual work, automation, or delegation according to their full cost and
 benefit. Confirm delegated work is accepted and inspect the delivered result.
 
+## Server-owned execution
+
+Accepted architectural principle, Andy-direct 2026-11-08. Andy explicitly
+endorsed this wording:
+
+> The architectural mistake to avoid is putting agent lifecycle or coordination logic inside browser components. The server should own execution; closing the browser should leave it running.
+
+The server owns agent sessions, execution, coordination, and cancellation.
+The browser displays events and sends explicit commands. Closing a tab,
+disconnecting, or switching views must not stop an agent or change its task.
+Reconnecting obtains the server's session state; it must not start duplicate
+work. A stop command remains distinct from a disconnected client.
+
+Expose agent control and events independently of browser components, so scripts
+can exercise agent behavior without a browser. Use browser checks for interface
+behavior. This principle does not require a second interactive CLI. Interface
+details and the proposed advanced swarm interactions remain open; this entry
+does not authorize their implementation or replace the pending PR's CLI.
+
 ## Learning
 
 Accepted development goal; implementation choices remain open.
