@@ -429,13 +429,9 @@ function renderToolEntry(ui, item) {
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
-  if (kind === "assistant" || kind === "reasoning") {
+  if (kind === "reasoning") return;
+  if (kind === "assistant") {
     body.textContent = text;
-    if (kind === "reasoning") {
-      const content = element("pre", "reasoning-output", text);
-      body.replaceChildren(compactOutput(ui, item, content, text, "Reasoning"));
-      body.title = "Provider-exposed reasoning summary";
-    }
   } else if (kind === "tool_call" || kind === "tool_result") {
     renderToolEntry(ui, item);
   } else if (kind === "tool_arguments") {
@@ -467,7 +463,7 @@ function putEntry(ui, entry, delta = false) {
       node.append(body);
     }
     // Transport receipts remain in the full record; they are not model output.
-    node.hidden = kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || "");
+    node.hidden = kind === "reasoning" || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
     if (entry.replaces) {
       const replaced = ui.entries.get(String(entry.replaces));
       if (replaced) {

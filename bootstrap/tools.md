@@ -24,7 +24,9 @@ for remote access; the default listener is local.
 The web workspace shows simultaneous agent traces, per-agent input,
 and real terminal panes. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
-provider-exposed reasoning summaries, tool calls and results, and control events.
+tool calls and results, and control events. Provider-exposed reasoning summaries
+are hidden in every pane pending the v0.6 presentation work; events remain in
+the full session record.
 Models may return no summary; hidden reasoning is unavailable. Responses are displayed as plain text. Startup context is expandable;
 its full-session link retains the original event record, including transport
 receipts omitted from the reading view. The view adds no tool-result truncation.
@@ -32,7 +34,7 @@ receipts omitted from the reading view. The view adds no tool-result truncation.
 The transcript uses one 11px text size. Tool calls show one command or target
 line and use one expansion control for the operation's arguments and result.
 Results stay at their chronological position, including when a peer message
-intervenes. Reasoning expands inline from a preview. Successful tool calls have no completion
+intervenes. Successful tool calls have no completion
 label; running calls show an ellipsis, and failures retain their status. Streamed
 arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.

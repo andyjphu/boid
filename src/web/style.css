@@ -120,7 +120,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .entry[data-kind="tool_arguments"] .entry-body { white-space: pre-wrap; }
 .entry[data-pending]:not([data-pending=""])::after { content: attr(data-pending); display: block; color: #999;  margin-top: 4px; }
 .entry[data-kind="peer"] { border-left: 2px solid #777; padding-left: 4px; }
-.entry[data-kind="reasoning"] { color: #aaa; }
+.entry[data-kind="reasoning"] { display: none !important; }
 .entry[data-kind="error"], .stderr { color: #f0a29c; }
 .entry[data-kind="notice"] { color: #999;  }
 .entry[data-kind="tool_call"], .entry[data-kind="tool_result"], .entry[data-kind="tool_arguments"] { color: #aaa; margin-bottom: 7px; }
@@ -154,7 +154,6 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .activity-details[open] + .activity-preview { display: none; }
 .activity-details:not([open]) > .activity-full { display: none; }
 .activity-full { margin: 4px 0 0; }
-.reasoning-output { font-style: italic; }
 .session-context { color: #888;  }
 .session-context summary { cursor: pointer; }
 .session-context .entry-body { margin-top: 8px; font: inherit; }

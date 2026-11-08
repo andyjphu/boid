@@ -210,6 +210,9 @@ Hidden model reasoning is unavailable. Do not invent a thought stream or imply
 that a provider's reasoning summary reveals all internal reasoning. Make any
 display truncation or unavailable content identifiable.
 
+For PR #5, Andy explicitly superseded reasoning visibility: hide reasoning in
+every pane and retain its events in the full record. Rework presentation in v0.6.
+
 Visibility does not transfer responsibility to Andy. He intervenes only as
 attention permits. Agents still own their work, ordinary problem solving, and
 clear requests for decisions they cannot make. Silence is not approval, and
@@ -383,6 +386,8 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
 
 ### v0.6 backlog
 
+- Rework reasoning presentation. Andy requested reasoning be hidden in every
+  pane for PR #5; retain its events in the full record while it is hidden.
 - Add Daybreak support, carried from the earlier v5 backlog by Andy's instruction
   to pin this version and acknowledge the backlog for v0.6. Determine the
   required provider/model support and configuration; the current reasoning
