@@ -110,3 +110,14 @@ This establishes Claude Code as the closest reference so far, not blanket
 approval of its features or a decision to clone it. The reasons remain to be
 confirmed; Woo's analysis of hierarchy, direct interaction and control of
 attention is an interpretation, not an additional user requirement.
+
+Andy then gave the concrete comparison:
+
+> good hypotheses, i wont acknowledge that they are correct; instead ill walk through what i hate about codex and what i liked more back when iw as using claude code; I hate how slow scrolling is in codex, how ugly codex is, and how busy codex feels; its unreadable in the small panes we seek to represent agents; not even speaking of the interaction dynamics; claude code is simpler, thats it.
+
+The supported priorities are scrolling responsiveness, visual simplicity,
+appearance, and readability in small agent panes. Andy explicitly withheld
+confirmation of Woo's earlier hypotheses. Do not treat message queueing,
+interruption, keyboard conventions, or collapsed detail as accepted preferences
+from this exchange. Interaction dynamics remain a separate discussion. Judge
+the visual result at the intended small pane size, not only in a large view.
