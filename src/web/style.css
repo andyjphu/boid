@@ -222,7 +222,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .error-banner { color: #f0a29c; padding: 6px 10px; overflow-wrap: anywhere; }
 .pane > .error-banner { margin: 0; border-top: 1px solid #573b39; }
 @property --terminal-thumb-color { syntax: "<color>"; inherits: true; initial-value: transparent; }
-.terminal-host { box-sizing: content-box; position: relative; flex: 1; min-height: 0; padding: 0 0 0 2px; overflow: hidden; --terminal-thumb-color: transparent; transition: --terminal-thumb-color 300ms ease; }
+.terminal-host { box-sizing: content-box; position: relative; flex: 1; min-height: 0; padding: 0 0 0 2px; overflow: hidden; --terminal-thumb-color: transparent; transition: --terminal-thumb-color 900ms ease; }
 .terminal-host .xterm { height: 100%; padding-right: 1px; }
 .terminal-host .xterm-viewport { scrollbar-width: auto; scrollbar-color: auto; overscroll-behavior: none; scroll-behavior: auto; }
 .terminal-host .xterm-viewport::-webkit-scrollbar { width: 7.5px; }
