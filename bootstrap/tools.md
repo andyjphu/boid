@@ -41,9 +41,14 @@ arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.
 
 An empty message box appears on pane hover or keyboard focus; a draft keeps it
-visible. The hidden box retains its space so hovering does not shift the trace.
+visible. The hidden empty box collapses completely; Working retains its own slot below
+the stream. Browser text assistance is disabled on text inputs.
 Disconnection mutes the view. Each pane has an × control; there is no separate
 Latest control or title gesture that enlarges a pane.
+
+Adjacent queued messages form a compact block with a lighter background and
+full-opacity text. Delivered messages from the same `input_batch` join as well;
+separate batches and intervening visible output retain their separation.
 
 Streaming keeps a view at the bottom when it is already there. Reading earlier
 messages preserves the visible message and its offset as content changes.

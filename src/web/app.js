@@ -10,8 +10,18 @@ let selected = null;
 let lastSequence = -1;
 let events;
 
+function disableTextAssistance(input) {
+  for (const [name, value] of Object.entries({
+    spellcheck: "false", autocorrect: "off", autocapitalize: "off",
+    writingsuggestions: "false", autocomplete: "off",
+  })) input.setAttribute(name, value);
+}
+
+document.querySelectorAll("input, textarea").forEach(disableTextAssistance);
+
 function element(tag, className, text) {
   const node = document.createElement(tag);
+  if (tag === "input" || tag === "textarea") disableTextAssistance(node);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
@@ -136,6 +146,7 @@ document.addEventListener("selectionchange", () => {
         item.rendered = true;
       }
     }
+    groupUserEntries(ui);
     restorePosition(ui);
   }
 });
@@ -531,6 +542,23 @@ function renderEntry(ui, item) {
   }
 }
 
+function groupUserEntries(ui) {
+  let previous;
+  for (const item of ui.entries.values()) {
+    item.node.classList.remove("user-joined-before", "user-joined-after");
+  }
+  for (const item of ui.entries.values()) {
+    if (item.node.hidden) continue;
+    if (item.kind === "user" && previous?.kind === "user"
+      && ((ui.pending.has(item.id) && ui.pending.has(previous.id))
+        || (item.inputBatch != null && item.inputBatch === previous.inputBatch))) {
+      previous.node.classList.add("user-joined-after");
+      item.node.classList.add("user-joined-before");
+    }
+    previous = item;
+  }
+}
+
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
   let item = ui.entries.get(id);
@@ -562,12 +590,15 @@ function putEntry(ui, entry, delta = false) {
       }
     }
     ui.trace.append(node);
-    item = { id, node, body, kind, text: "" };
+    item = { id, node, body, kind, text: "", groupChanged: true };
     ui.entries.set(id, item);
     if (kind === "user") ui.pending.add(id);
   }
+  const batchChanged = !delta && item.inputBatch !== entry.input_batch;
+  if (batchChanged) item.groupChanged = true;
+  if (!delta) item.inputBatch = entry.input_batch;
   const text = delta ? item.text + (entry.text || "") : (entry.text || "");
-  if (text !== item.text || !item.rendered) {
+  if (text !== item.text || !item.rendered || batchChanged) {
     item.text = text;
     if (!item.renderScheduled) {
       item.renderScheduled = true;
@@ -577,6 +608,10 @@ function putEntry(ui, entry, delta = false) {
         rememberPosition(ui);
         renderEntry(ui, item);
         item.rendered = true;
+        if (item.groupChanged) {
+          groupUserEntries(ui);
+          item.groupChanged = false;
+        }
         restorePosition(ui);
       });
     }
@@ -584,10 +619,13 @@ function putEntry(ui, entry, delta = false) {
 }
 
 function setPending(ui, pending) {
+  rememberPosition(ui);
   ui.pending = new Set(pending);
   for (const item of ui.entries.values()) {
     if (item.kind === "user") item.node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   }
+  groupUserEntries(ui);
+  restorePosition(ui);
 }
 
 function snapshot(views) {
@@ -645,6 +683,8 @@ function startEvents() {
       if (!ui) return;
       if (message.type === "closed") { removeSession(ui); return; }
       if (message.type === "input") {
+        const item = ui.entries.get(String(message.id));
+        if (item) item.inputBatch = message.input_batch;
         ui.pending.delete(String(message.id));
         setPending(ui, ui.pending);
       }

@@ -393,6 +393,9 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
   the working directory retains its muted appearance. Pane frames meet with
   shared 1px borders and no gaps or outer workspace padding. Terminal scroll
   thumbs fill their track, with a very faint full-height divider.
+- Condense queued and same-batch messages, distinguish pending input by its
+  background, and collapse the unused composer so progress sits below the stream.
+  Disable browser text assistance in input fields.
 - Rework reasoning presentation. Andy requested reasoning be hidden in every
   pane for PR #5; retain its events in the full record while it is hidden.
 - Add `/model` with Codex's keyboard picker pattern. Andy selected one profile
