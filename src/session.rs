@@ -1,4 +1,4 @@
-use crate::{api::Client, runtime::Hub, tool_calls};
+use crate::{api::Client, runtime::Hub, skills, tool_calls};
 use anyhow::{Context, Result};
 use boid::Tools;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,8 @@ pub struct Session {
     pub model: String,
     pub instructions: String,
     pub tools: Value,
+    #[serde(default)]
+    pub skills: skills::Skills,
     #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
@@ -208,6 +210,7 @@ impl Session {
         hub.checkpoint(id, self)?;
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
+            "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
             "send_message" => {
                 #[derive(serde::Deserialize)]

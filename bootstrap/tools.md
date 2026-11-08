@@ -106,6 +106,16 @@ selection returns its API error without switching models or falling back.
 Daybreak does not select a reasoning stream. See the
 [OpenAI Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak).
 
+## Skills in v0.8
+
+New sessions list bundled skills in their startup instructions. `read_skill`
+loads the full text into the model conversation and visible tool trace.
+Humanizer is bundled for writing and editing prose. Existing saved sessions
+keep their captured instructions, tools, and skill versions through recovery;
+new skill availability applies to new sessions. See [bundled skills](../src/skills/README.md)
+for supported behavior and provenance. Skill loading is implemented; a recorded
+load alone does not establish better writing or compliance.
+
 ## Headless routes
 
 The browser and scripts use the same authenticated API:

@@ -9,6 +9,11 @@ pub fn definitions() -> Value {
     let string = json!({"type": "string"});
     json!([
         definition(
+            "read_skill",
+            "Read the complete guidance for a skill listed in this session's startup catalog. Returns the session's saved skill version without executing scripts.",
+            &[("name", string.clone())],
+        ),
+        definition(
             "read_file",
             "Read up to 32 KiB from a regular file. Paths are relative to the working directory unless absolute.",
             &[("path", string.clone())],
