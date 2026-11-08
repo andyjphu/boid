@@ -788,6 +788,21 @@ document.addEventListener("focusin", event => {
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
+  if (!event.defaultPrevented && !event.isComposing && !dialog.open
+      && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
+      && !event.target.closest("input, textarea, [contenteditable]")) {
+    const selection = window.getSelection();
+    const reader = selection && !selection.isCollapsed && [...sessions.values()].find(ui =>
+      ui.trace.contains(selection.anchorNode) && ui.trace.contains(selection.focusNode));
+    if (reader) {
+      event.preventDefault();
+      reader.input.focus({ preventScroll: true });
+      reader.input.setRangeText(event.key, reader.input.selectionStart, reader.input.selectionEnd, "end");
+      selection.removeAllRanges();
+      reader.input.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+  }
   if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open) return;
   const ui = [...sessions.values()].find(ui => ui.pane === selected);
   if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;

@@ -48,6 +48,10 @@ Streaming keeps a view at the bottom when it is already there. Reading earlier
 messages preserves the visible message and its offset as content changes.
 Scrolling back to the bottom resumes following; each pane tracks this separately.
 
+Typing while transcript text is selected focuses that pane's prompt and inserts
+the typed character at its saved caret. Copy shortcuts and navigation keep their
+normal behavior.
+
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
 the current model response and all its tool calls to finish, then enters the
 next model request without cancelling work. Escape in the selected
