@@ -59,8 +59,15 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
-    pub async fn run(&mut self, client: &Client, tools: &Tools, hub: &Hub, id: &str) -> Result<()> {
-        loop {
+    // Returns whether another step is needed. Input is applied between steps.
+    pub async fn step(
+        &mut self,
+        client: &Client,
+        tools: &Tools,
+        hub: &Hub,
+        id: &str,
+    ) -> Result<bool> {
+        let Some(call) = self.pending.pop_front() else {
             for (sender, text) in hub.take_inbox(id) {
                 self.user(format!("Peer message from {sender}:\n{text}"));
                 hub.entry(
@@ -114,39 +121,36 @@ impl Session {
                 .collect();
             self.pending = calls?;
             self.history.extend(output);
-            if self.pending.is_empty() {
-                return Ok(());
+            return Ok(!self.pending.is_empty());
+        };
+        hub.entry(
+            id,
+            "tool_call",
+            format!("{} ({})\n{}", call.name, call.id, call.arguments),
+        );
+        self.running = Some(call);
+        let call = self.running.as_ref().expect("running call");
+        let result = match call.name.as_str() {
+            "list_agents" => hub.peers(),
+            "send_message" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Message {
+                    to: String,
+                    text: String,
+                }
+                match serde_json::from_str::<Message>(&call.arguments) {
+                    Ok(message) => hub
+                        .send_peer(id, &message.to, &message.text)
+                        .unwrap_or_else(|e| json!({"error":e.to_string()})),
+                    Err(error) => json!({"error":error.to_string()}),
+                }
             }
-            while let Some(call) = self.pending.pop_front() {
-                hub.entry(
-                    id,
-                    "tool_call",
-                    format!("{} ({})\n{}", call.name, call.id, call.arguments),
-                );
-                self.running = Some(call);
-                let call = self.running.as_ref().expect("running call");
-                let result = match call.name.as_str() {
-                    "list_agents" => hub.peers(),
-                    "send_message" => {
-                        #[derive(serde::Deserialize)]
-                        #[serde(deny_unknown_fields)]
-                        struct Message {
-                            to: String,
-                            text: String,
-                        }
-                        match serde_json::from_str::<Message>(&call.arguments) {
-                            Ok(message) => hub
-                                .send_peer(id, &message.to, &message.text)
-                                .unwrap_or_else(|e| json!({"error":e.to_string()})),
-                            Err(error) => json!({"error":error.to_string()}),
-                        }
-                    }
-                    _ => tool_calls::execute(tools, &call.name, &call.arguments).await,
-                };
-                let call = self.running.take().expect("running call");
-                self.finish(call, result, hub, id);
-            }
-        }
+            _ => tool_calls::execute(tools, &call.name, &call.arguments).await,
+        };
+        let call = self.running.take().expect("running call");
+        self.finish(call, result, hub, id);
+        Ok(true)
     }
     pub fn interrupt(&mut self, hub: &Hub, id: &str) {
         if !self.partial_text.is_empty() {

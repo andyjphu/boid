@@ -268,8 +268,9 @@ Accepted direction from Andy's Boid planning discussion.
 Boid is a general agent swarm harness using OpenAI API-key access.
 Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
-The current implementation is v4 / PR #4: a shared server, minimal web workspace,
-real terminal panes, and command-line task submission. Version numbers follow
+The merged v4 / PR #4 provides a shared server, web workspace,
+real terminal panes, and command-line task submission. V5 revises individual
+agent panes and queued input. Version numbers follow
 PR numbers. Andy's 2026-11-08 correction explicitly required implementation to
 follow the agreed direction; the earlier pause on premature interface selection
 no longer blocks this scope. Advanced view/context manipulation remains open.
@@ -375,9 +376,14 @@ context, and load lessons when relevant.
   appearance, and responsive scrolling while retaining live observation and
   access to the available trace. Start from what Andy needs to accomplish;
   send/stop illustrates a small interaction model, not a universal two-feature
-  limit. Queueing and interruption semantics remain proposals. Do not import
+  limit. Andy subsequently approved Enter to send, Shift+Enter for multiline
+  input, queued delivery at the next model/tool boundary, and Escape in the
+  selected pane to interrupt and apply queued input. Mouse selection should
+  not add a blue outline; scrolling past an edge should not rubberband. Do not import
   menus, modes, or configuration controls solely because reference apps have
-  them. Implementation is paused while judgment and design are being calibrated.
+  them. Andy authorized the first pane revision; this supersedes the earlier
+  implementation pause. The updated preview is for his UX review, not evidence
+  of UX acceptance.
 - Add Daybreak support (Andy, 2026-11-08). Determine the required provider/model
   support and configuration; the current reasoning-summary stream does not
   establish Daybreak support. This is v5 scope, not part of PR #4.

@@ -103,6 +103,7 @@ pub async fn serve() -> Result<()> {
         .route("/api/sessions/{id}", get(session))
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/stop", post(stop))
+        .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
         .with_state(app.clone())
         .merge(terminals.router())
@@ -250,6 +251,13 @@ async fn stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl 
         Json(json!({"status":"stop_requested"})),
     ))
 }
+async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    app.hub.interrupt(&id).map_err(invalid)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"status":"interrupt_requested"})),
+    ))
+}
 async fn events(
     State(app): State<App>,
 ) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
@@ -292,6 +300,10 @@ async fn asset(Path(path): Path<String>) -> Response {
         "vendor/addon-fit.js" => {
             bytes("text/javascript", include_bytes!("web/vendor/addon-fit.js"))
         }
+        "vendor/markdown-it.min.js" => bytes(
+            "text/javascript",
+            include_bytes!("web/vendor/markdown-it.min.js"),
+        ),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
 }

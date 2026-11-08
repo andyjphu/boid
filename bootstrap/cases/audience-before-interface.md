@@ -214,3 +214,21 @@ the final explanation captured the intended principle; it does not establish
 that the agent will apply it reliably. Implementation remains paused. Retain
 this full case for Boid's later learning and developer calibration without
 automatically adding the whole failure trace to ordinary runtime prompts.
+
+## First implementation authorized
+
+Andy approved most of the proposed first pane pass, with this specific steering:
+
+> good choice, i approve of most of your position, i havent read all of it; one thing to clarify: I hate buttons. enter should send; shift+enter should multiline; I liked codex's system where if you send  a message to agent as its working, that gets queued until next good discrete instance aswell as a send immediately if you esc, this is good behavior, lets follow this pattern if the user is "selected" on a pane. one more note, i dont know if this is from you or otherwise, but when i click on a div, it outlines it with this annoying blue outline? i can explain later if you dont know
+
+He added:
+
+> nit: remove rubberbanding when trying to scroll down past bottom of page
+
+And requested deployment:
+
+> update server, and ping me when done
+
+This supersedes the implementation pause for the first pane revision. It does
+not approve every earlier proposal or withdraw the rejection of Codex's broader
+session UX. The named queue/interrupt behavior is a specific positive reference.

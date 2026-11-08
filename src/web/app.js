@@ -8,6 +8,9 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
 let focused = null;
+let selected = null;
+const markdown = window.markdownit({ html: false, linkify: false, typographer: false });
+markdown.disable("image");
 let lastSequence = -1;
 let events;
 
@@ -57,8 +60,7 @@ function layout() {
     pane.classList.toggle("focused", active);
     pane.style.gridColumn = active && expanded ? "span 2" : "";
     pane.style.gridRow = active && expanded ? `span ${spanRows}` : "";
-    pane.querySelector(".focus-button").textContent = active ? "Unfocus" : "Focus";
-    pane.querySelector(".focus-button").setAttribute("aria-pressed", String(active));
+    pane.querySelector(".pane-title").setAttribute("aria-expanded", String(active));
   }
   requestAnimationFrame(() => {
     for (const ui of following) {
@@ -73,17 +75,23 @@ function makePane(name, cwd, kind) {
   pane.setAttribute("aria-label", name);
   const header = element("header", "pane-header");
   const title = element("span", "pane-title", name);
+  title.tabIndex = 0;
+  title.setAttribute("role", "button");
+  title.title = "Double-click to enlarge; Enter when focused";
   const status = element("span", "pane-status", "idle");
-  const focus = element("button", "focus-button", "Focus");
-  focus.type = "button";
-  focus.addEventListener("click", () => { focused = focused === pane ? null : pane; layout(); });
-  header.append(title, status, focus);
+  function toggleSize() { focused = focused === pane ? null : pane; layout(); }
+  title.addEventListener("dblclick", toggleSize);
+  title.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); toggleSize(); }
+  });
+  header.append(title, status);
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
   directory.title = cwd || "Server working directory";
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  pane.append(header, directory);
+  header.append(directory);
+  pane.append(header);
   workspace.append(pane);
   return { pane, header, title, status, directory, error };
 }
@@ -110,25 +118,22 @@ function addSession(view) {
   const ui = makePane(view.name || id, view.cwd, "agent");
   ui.id = id;
   ui.entries = new Map();
+  ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
-  ui.input.rows = 2;
-  ui.input.placeholder = "Message this agent…";
+  ui.input.rows = 1;
+  ui.input.placeholder = "Message…";
+  ui.input.title = "Enter to send · Shift+Enter for a new line · Esc to interrupt";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
-  const actions = element("div", "composer-actions");
-  ui.send = element("button", null, "Send");
-  ui.send.type = "submit";
-  ui.send.title = "Send input; an active turn will be interrupted and steered.";
-  ui.stop = element("button", null, "Stop");
-  ui.stop.type = "button";
-  ui.latest = element("button", "latest", "Latest ↓");
-  ui.latest.type = "button";
+  ui.sending = false;
+  ui.latest = element("a", "latest", "↓ Latest");
+  ui.latest.href = "#";
   ui.latest.hidden = true;
-  ui.latest.addEventListener("click", () => { ui.follow = true; followLatest(ui); });
+  ui.latest.addEventListener("click", event => { event.preventDefault(); ui.follow = true; followLatest(ui); });
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     ui.follow = atBottom(ui.trace);
@@ -137,10 +142,13 @@ function addSession(view) {
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; ui.latest.hidden = false; }
   }, { passive: true });
-  const hint = element("span", "composer-hint", "⌘ / Ctrl + Enter to send");
-  actions.append(ui.send, ui.stop, ui.latest, hint);
-  ui.composer.append(ui.input, actions);
-  ui.pane.append(ui.trace, ui.error, ui.composer);
+  ui.composer.append(ui.input);
+  ui.pane.append(ui.trace, ui.latest, ui.error, ui.composer);
+  function resizeInput() {
+    ui.input.style.height = "auto";
+    ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
+  }
+  ui.input.addEventListener("input", resizeInput);
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -148,34 +156,28 @@ function addSession(view) {
   });
   traceResize.observe(ui.trace);
   ui.input.addEventListener("keydown", event => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       ui.composer.requestSubmit();
     }
   });
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
-    if (ui.send.disabled || !ui.input.value.trim()) return;
+    if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
-    ui.send.disabled = true;
+    ui.sending = true;
     ui.error.hidden = true;
     try {
-      await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
-      if (ui.input.value === text) ui.input.value = "";
+      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
+      await ui.submission;
+      if (ui.input.value === text) { ui.input.value = ""; resizeInput(); }
     } catch (error) { showError(ui.error, error); }
-    finally { ui.send.disabled = false; }
-  });
-  ui.stop.addEventListener("click", async () => {
-    ui.stop.disabled = true;
-    ui.error.hidden = true;
-    try {
-      await request(`/api/sessions/${encodeURIComponent(id)}/stop`, "POST");
-    } catch (error) { showError(ui.error, error); }
-    finally { ui.stop.disabled = ui.pane.dataset.status !== "working"; }
+    finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
   setStatus(ui, view.status);
   for (const entry of view.entries || []) putEntry(ui, entry);
+  setPending(ui, view.pending || []);
   followLatest(ui);
   layout();
   return ui;
@@ -183,29 +185,103 @@ function addSession(view) {
 
 function setStatus(ui, status) {
   ui.pane.dataset.status = status || "idle";
-  ui.status.textContent = status || "idle";
-  ui.stop.disabled = status !== "working";
+  ui.status.textContent = status === "working" ? "Working" : status === "idle" ? "" : (status || "");
+}
+
+function renderEntry(ui, item) {
+  const { node, body, kind, text } = item;
+  node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
+  if (kind === "assistant" || kind === "reasoning") {
+    body.innerHTML = markdown.render(text);
+    for (const link of body.querySelectorAll("a")) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+  } else if (kind === "tool_call" || kind === "tool_result") {
+    const split = text.indexOf("\n");
+    const heading = split < 0 ? text : text.slice(0, split);
+    const payload = split < 0 ? "" : text.slice(split + 1);
+    let value;
+    try { value = JSON.parse(payload); } catch { /* Partial output stays visible. */ }
+    node.title = heading;
+    body.replaceChildren();
+    if (kind === "tool_call") {
+      const name = heading.replace(/ \(.*$/, "");
+      body.append(element("div", "tool-name", name === "exec_command" ? "$" : name));
+      body.append(element("pre", "tool-text", value?.command ?? (value ? JSON.stringify(value, null, 2) : payload)));
+    } else if (value && typeof value === "object" && !Array.isArray(value) && ("stdout" in value || "stderr" in value)) {
+      for (const channel of ["stdout", "stderr"]) {
+        if (value[channel]?.text) body.append(element("pre", `tool-text ${channel}`, value[channel].text));
+        if (value[channel]?.truncated) body.append(element("div", "tool-note", `${channel} truncated`));
+      }
+      const outcome = value.timed_out ? "Timed out" : value.signal ? `Signal ${value.signal}` : `Exit ${value.exit_code}`;
+      body.append(element("div", "tool-note", outcome));
+    } else if (value && typeof value.text === "string") {
+      body.append(element("pre", "tool-text", value.text));
+      if (value.truncated) body.append(element("div", "tool-note", "Output truncated"));
+    } else {
+      body.append(element("pre", "tool-text", value ? JSON.stringify(value, null, 2) : payload || text));
+    }
+  } else {
+    body.textContent = text;
+  }
 }
 
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
-  let existing = ui.entries.get(id);
-  if (!existing) {
+  let item = ui.entries.get(id);
+  if (!item) {
+    const kind = entry.kind || "notice";
     const node = element("article", "entry");
-    node.dataset.kind = entry.kind || "notice";
-    const label = element("div", "entry-kind", (entry.kind || "notice").replaceAll("_", " "));
-    const body = element("pre", "entry-body");
-    const text = document.createTextNode("");
-    body.append(text);
-    node.append(label, body);
+    node.dataset.kind = kind;
+    const body = element("div", "entry-body");
+    if (kind === "context" && ui.entries.size === 0) {
+      const details = element("details", "session-context");
+      details.append(element("summary", null, "Context"), body);
+      const raw = element("a", "raw-transcript", "Full session record");
+      raw.href = `/api/sessions/${encodeURIComponent(ui.id)}`;
+      raw.target = "_blank";
+      raw.rel = "noopener";
+      details.append(raw);
+      node.append(details);
+    } else {
+      if (kind === "reasoning") node.append(element("div", "entry-kind", "Reasoning summary"));
+      if (kind === "context") node.append(element("div", "entry-kind", "Context"));
+      node.append(body);
+    }
+    // Transport receipts remain in the full record; they are not model output.
+    node.hidden = kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || "");
+    const previous = [...ui.entries.values()].at(-1);
+    if (kind === "tool_call" && previous?.kind === "tool_arguments"
+        && previous.text.trim() === (entry.text || "").split("\n").slice(1).join("\n").trim()) {
+      previous.node.hidden = true;
+    }
     ui.trace.append(node);
-    existing = { node, text };
-    ui.entries.set(id, existing);
+    item = { id, node, body, kind, text: "" };
+    ui.entries.set(id, item);
+    if (kind === "user") ui.pending.add(id);
   }
-  if (delta) existing.text.appendData(entry.text || "");
-  else if (existing.text.data !== (entry.text || "")) existing.text.data = entry.text || "";
-  if (ui.follow) followLatest(ui);
-  else ui.latest.hidden = false;
+  const text = delta ? item.text + (entry.text || "") : (entry.text || "");
+  if (text !== item.text || !item.rendered) {
+    item.text = text;
+    if (!item.renderScheduled) {
+      item.renderScheduled = true;
+      requestAnimationFrame(() => {
+        item.renderScheduled = false;
+        renderEntry(ui, item);
+        item.rendered = true;
+        if (ui.follow) followLatest(ui);
+      });
+    }
+  }
+  if (!ui.follow) ui.latest.hidden = false;
+}
+
+function setPending(ui, pending) {
+  ui.pending = new Set(pending);
+  for (const item of ui.entries.values()) {
+    if (item.kind === "user") item.node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
+  }
 }
 
 function snapshot(views) {
@@ -232,6 +308,7 @@ function snapshot(views) {
     for (const [id, entry] of ui.entries) {
       if (!present.has(id)) { entry.node.remove(); ui.entries.delete(id); }
     }
+    setPending(ui, view.pending || []);
     setStatus(ui, view.status);
     if (follow) followLatest(ui);
     else ui.trace.scrollTop = position;
@@ -261,6 +338,10 @@ function startEvents() {
       if (message.type === "session") { addSession(message.session); return; }
       const ui = sessions.get(String(message.session_id));
       if (!ui) return;
+      if (message.type === "input") {
+        ui.pending.delete(String(message.id));
+        setPending(ui, ui.pending);
+      }
       if (message.type === "entry") putEntry(ui, message.entry);
       if (message.type === "delta") putEntry(ui, { id: message.entry_id, text: message.text }, true);
       if (message.type === "status") setStatus(ui, message.status);
@@ -351,6 +432,7 @@ function attachTerminal(info) {
       observer.disconnect();
       term.dispose();
       if (focused === ui.pane) focused = null;
+      if (selected === ui.pane) selected = null;
       ui.pane.remove();
       terminals.delete(id);
       layout();
@@ -445,6 +527,26 @@ async function initialize() {
     if (error.status !== 401) showError(workspaceError, error);
   }
 }
+document.addEventListener("pointerdown", event => {
+  selected = event.target.closest(".pane");
+});
+document.addEventListener("focusin", event => {
+  selected = event.target.closest(".pane");
+});
+document.addEventListener("keydown", async event => {
+  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open) return;
+  const ui = [...sessions.values()].find(ui => ui.pane === selected);
+  if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
+  event.preventDefault();
+  ui.interrupting = true;
+  ui.error.hidden = true;
+  try {
+    await ui.submission?.catch(() => {});
+    await request(`/api/sessions/${encodeURIComponent(ui.id)}/interrupt`, "POST");
+  }
+  catch (error) { showError(ui.error, error); }
+  finally { ui.interrupting = false; }
+});
 initialize();
 window.addEventListener("resize", layout, { passive: true });
 layout();

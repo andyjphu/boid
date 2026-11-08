@@ -24,6 +24,7 @@ pub struct View {
     pub cwd: String,
     pub status: String,
     pub entries: Vec<Entry>,
+    pub pending: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +53,7 @@ struct Handle {
     view: View,
     commands: mpsc::Sender<Command>,
     cancel: watch::Sender<u64>,
+    interrupt: watch::Sender<()>,
     order: u64,
     inbox: VecDeque<(String, String)>,
     wake: Arc<Notify>,
@@ -178,9 +180,11 @@ impl Hub {
             cwd: cwd.to_string_lossy().into_owned(),
             status: "idle".into(),
             entries: vec![],
+            pending: vec![],
         };
         let (commands, receiver) = mpsc::channel(32);
         let (cancel, cancelled) = watch::channel(0);
+        let (interrupt, interrupted) = watch::channel(());
         let wake = Arc::new(Notify::new());
         let mut view = view;
         let identity = format!(
@@ -209,6 +213,7 @@ impl Hub {
                     view: view.clone(),
                     commands,
                     cancel,
+                    interrupt,
                     order: 0,
                     inbox: VecDeque::new(),
                     wake: wake.clone(),
@@ -219,8 +224,16 @@ impl Hub {
             let hub = self.clone();
             let worker_id = id.clone();
             let task = tokio::spawn(async move {
-                hub.worker(worker_id, receiver, cancelled, wake, tools, identity)
-                    .await;
+                hub.worker(
+                    worker_id,
+                    receiver,
+                    cancelled,
+                    interrupted,
+                    wake,
+                    tools,
+                    identity,
+                )
+                .await;
             });
             data.sessions.get_mut(&id).unwrap().task = Some(task);
         }
@@ -254,11 +267,27 @@ impl Hub {
             text,
         };
         handle.view.entries.push(entry.clone());
+        handle.view.pending.push(message_id.clone());
         self.emit(
             &mut data,
             json!({"type":"entry","session_id":id,"entry":entry}),
         );
         Ok(message_id)
+    }
+    pub fn interrupt(&self, id: &str) -> Result<()> {
+        let data = self.0.data.lock().unwrap();
+        let handle = data.sessions.get(id).context("Unknown session.")?;
+        handle.interrupt.send_replace(());
+        Ok(())
+    }
+    fn input_delivered(&self, session: &str, id: &str, state: &str) {
+        let mut data = self.0.data.lock().unwrap();
+        let handle = data.sessions.get_mut(session).unwrap();
+        handle.view.pending.retain(|pending| pending != id);
+        self.emit(
+            &mut data,
+            json!({"type":"input","session_id":session,"id":id,"state":state}),
+        );
     }
     pub fn stop(&self, id: &str) -> Result<()> {
         let mut data = self.0.data.lock().unwrap();
@@ -332,6 +361,7 @@ impl Hub {
         id: String,
         mut commands: mpsc::Receiver<Command>,
         mut cancel: watch::Receiver<u64>,
+        mut interrupt: watch::Receiver<()>,
         wake: Arc<Notify>,
         tools: Tools,
         identity: String,
@@ -344,19 +374,30 @@ impl Hub {
         loop {
             enum Next {
                 Command(Option<Command>),
-                Finished(Result<()>),
+                Finished(Result<bool>),
+                Interrupt,
                 Peer,
                 Stop(u64),
             }
-            let next = if active {
+            // Drain input only between completed steps. Receiving input must not
+            // drop a running model request or tool future.
+            let next = if cancel.has_changed().unwrap_or(false) {
+                Next::Stop(*cancel.borrow_and_update())
+            } else if interrupt.has_changed().unwrap_or(false) {
+                interrupt.borrow_and_update();
+                Next::Interrupt
+            } else if let Ok(command) = commands.try_recv() {
+                Next::Command(Some(command))
+            } else if active {
                 tokio::select! { biased;
                     _ = cancel.changed() => Next::Stop(*cancel.borrow_and_update()),
-                    command = commands.recv() => Next::Command(command),
-                    result = session.run(&self.0.client, &tools, self, &id) => Next::Finished(result),
+                    _ = interrupt.changed() => Next::Interrupt,
+                    result = session.step(&self.0.client, &tools, self, &id) => Next::Finished(result),
                 }
             } else {
                 tokio::select! { biased;
                     _ = cancel.changed() => Next::Stop(*cancel.borrow_and_update()),
+                    _ = interrupt.changed() => Next::Interrupt,
                     command = commands.recv() => Next::Command(command),
                     _ = wake.notified(), if !stopped => Next::Peer,
                 }
@@ -368,6 +409,7 @@ impl Hub {
                     order,
                 })) => {
                     if order <= stop_through {
+                        self.input_delivered(&id, &input_id, "cancelled");
                         self.entry(
                             &id,
                             "notice",
@@ -377,9 +419,9 @@ impl Hub {
                     }
                     if active {
                         session.interrupt(self, &id);
-                        self.entry(&id, "notice", "Current attempt interrupted by new user input; completed results retained.");
                     }
-                    session.user(text.clone());
+                    session.user(text);
+                    self.input_delivered(&id, &input_id, "applied");
                     self.entry(
                         &id,
                         "notice",
@@ -388,6 +430,13 @@ impl Hub {
                     active = true;
                     stopped = false;
                     self.status(&id, "working");
+                }
+                Next::Interrupt => {
+                    session.interrupt(self, &id);
+                    self.entry(&id, "notice", "Execution interrupted. Queued input will be applied next; completed results retained.");
+                    active = false;
+                    stopped = true;
+                    self.status(&id, "stopped");
                 }
                 Next::Stop(order) => {
                     stop_through = order;
@@ -408,16 +457,18 @@ impl Hub {
                     session.interrupt(self, &id);
                     break;
                 }
-                Next::Finished(result) => {
-                    active = false;
-                    if let Err(error) = result {
-                        session.interrupt(self, &id);
-                        self.entry(&id, "error", format!("{error:#}"));
-                        stopped = true;
-                        self.status(&id, "error");
-                    } else {
+                Next::Finished(Ok(more)) => {
+                    active = more;
+                    if !active {
                         self.status(&id, "idle");
                     }
+                }
+                Next::Finished(Err(error)) => {
+                    active = false;
+                    session.interrupt(self, &id);
+                    self.entry(&id, "error", format!("{error:#}"));
+                    stopped = true;
+                    self.status(&id, "error");
                 }
                 Next::Peer => {
                     let has_messages = !self
@@ -471,6 +522,162 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn queued_input_waits_for_a_boundary_and_escape_applies_it_in_order() {
+        use axum::{Json, Router, routing::post};
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        // Each response waits for the test to release it, keeping the actual
+        // worker and HTTP cancellation paths under test without API access.
+        let (requests, mut received) = mpsc::channel::<(Value, oneshot::Sender<Value>)>(8);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/",
+            post(move |Json(input): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    let (release, wait) = oneshot::channel();
+                    requests.send((input, release)).await.unwrap();
+                    let output = wait.await.unwrap_or(json!([]));
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!(
+                            "data: {}\n\n",
+                            json!({
+                                "type":"response.completed", "response":{"output":output}
+                            })
+                        ),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let hub = Hub::new(Client::test_client_at(endpoint)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = hub
+            .create(Create {
+                name: "target".into(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                message: "Start".into(),
+            })
+            .unwrap();
+        let (_, release_first) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let first = hub.message(&target.id, "First correction".into()).unwrap();
+        let second = hub.message(&target.id, "Second correction".into()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), received.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(hub.view(&target.id).unwrap().pending, vec![first, second]);
+        release_first
+            .send(json!([{
+                "type":"function_call", "call_id":"old_call", "name":"write_file",
+                "arguments":json!({"path":"old-work", "content":"must not execute"}).to_string()
+            }]))
+            .unwrap();
+        let (after_boundary, _release_second) =
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let input = after_boundary["input"].as_array().unwrap();
+        assert_eq!(input[input.len() - 2]["content"], "First correction");
+        assert_eq!(input[input.len() - 1]["content"], "Second correction");
+        assert!(input.iter().any(|item| {
+            item["call_id"] == "old_call"
+                && item["output"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Not executed"))
+        }));
+        assert!(!dir.path().join("old-work").exists());
+        assert!(hub.view(&target.id).unwrap().pending.is_empty());
+
+        let third = hub.message(&target.id, "Third correction".into()).unwrap();
+        let fourth = hub.message(&target.id, "Fourth correction".into()).unwrap();
+        assert_eq!(hub.view(&target.id).unwrap().pending, vec![third, fourth]);
+        hub.interrupt(&target.id).unwrap();
+        let (after_escape, release_third) =
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let input = after_escape["input"].as_array().unwrap();
+        assert_eq!(input[input.len() - 2]["content"], "Third correction");
+        assert_eq!(input[input.len() - 1]["content"], "Fourth correction");
+        assert!(hub.view(&target.id).unwrap().pending.is_empty());
+
+        // A tool gets to finish before queued input changes the next request.
+        release_third.send(json!([{
+            "type":"function_call", "call_id":"running_call", "name":"exec_command",
+            "arguments":json!({
+                "command":"touch started; while [ ! -e finish ]; do sleep 0.01; done; printf completed",
+                "timeout_ms":5000
+            }).to_string()
+        }])).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dir.path().join("started").exists() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let fifth = hub
+            .message(&target.id, "Keep the completed tool result".into())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), received.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(hub.view(&target.id).unwrap().pending, vec![fifth]);
+        std::fs::write(dir.path().join("finish"), "").unwrap();
+        let (after_tool, release_fourth) =
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let input = after_tool["input"].as_array().unwrap();
+        let output = input
+            .iter()
+            .find(|item| {
+                item["type"] == "function_call_output" && item["call_id"] == "running_call"
+            })
+            .unwrap();
+        let output: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["stdout"]["text"], "completed");
+        assert_eq!(
+            input.last().unwrap()["content"],
+            "Keep the completed tool result"
+        );
+
+        // Input accepted as a response finishes must also reach a request.
+        release_fourth.send(json!([])).unwrap();
+        hub.message(&target.id, "Continue after completion".into())
+            .unwrap();
+        let (after_completion, _release_fifth) =
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            after_completion["input"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["content"],
+            "Continue after completion"
+        );
+        hub.shutdown().await;
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn stop_bypasses_full_input_queue_and_peer_delivery_does_not_restart_it() {
         let hub = Hub::new(Client::test_client()).unwrap();
         let create = |name: &str| Create {
@@ -484,6 +691,7 @@ mod tests {
                 .unwrap();
         }
         hub.stop(&target.id).unwrap();
+        hub.interrupt(&target.id).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 if hub.view(&target.id).unwrap().status == "stopped" {
@@ -503,6 +711,7 @@ mod tests {
         .unwrap();
         tokio::task::yield_now().await;
         assert_eq!(hub.view(&target.id).unwrap().status, "stopped");
+        assert!(hub.view(&target.id).unwrap().pending.is_empty());
         assert_eq!(hub.take_inbox(&target.id).len(), 1);
         assert!(
             !hub.view(&target.id)

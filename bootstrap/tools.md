@@ -21,17 +21,23 @@ for remote access; the default listener is local.
 
 ## Sessions and live views
 
-The web workspace shows simultaneous agent traces, per-agent input and Stop,
-and real terminal panes. Focus enlarges a view while retaining other panes.
+The web workspace shows simultaneous agent traces, per-agent input,
+and real terminal panes. Double-click an agent name to enlarge its view while
+retaining the other panes; a keyboard-focused name also responds to Enter.
 Traces show selected instructions and tools, user and peer messages, text,
 provider-exposed reasoning summaries, tool calls and results, and control events.
-Models may return no summary; hidden reasoning is unavailable. Text is displayed
-without interpreting it as HTML. The view adds no extra tool-result truncation.
+Models may return no summary; hidden reasoning is unavailable. Responses use
+Markdown with raw HTML and images disabled. Startup context is expandable;
+its full-session link retains the original event record, including transport
+receipts omitted from the reading view. The view adds no tool-result truncation.
 
-New user input interrupts an active attempt and steers the next request.
-Completed results stay in context; interrupted actions are marked potentially
-partial. Stop has a priority path independent of the input queue and cancels
-older queued requests. Later user input can resume work.
+Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
+the current model response or tool call to finish. Escape in the selected
+agent pane interrupts immediately and applies queued input. Without queued
+input, it leaves execution stopped. Draft text is preserved. Completed results
+stay in context; interrupted actions are marked potentially partial. The
+headless Stop route retains its separate priority path and cancels older queued
+requests. Later user input can resume work.
 
 `list_agents` exposes session identities and status. `send_message` queues an
 attributed message for the recipient's next model request. It does not interrupt
@@ -61,8 +67,9 @@ The browser and scripts use the same authenticated API:
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
 | `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
+| `POST /api/sessions/{id}/interrupt` | Interrupt current work and apply queued input; stop if none |
 | `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
-| `GET /api/events` | SSE snapshot, entries, deltas, status |
+| `GET /api/events` | SSE snapshot, entries, deltas, input delivery, status |
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
@@ -126,7 +133,7 @@ Build `boid-dev` from `bootstrap/Dockerfile` on stdin. Run `cargo fetch --locked
 with registry access, then `cargo fmt --check`, `cargo test --locked --offline`,
 and `cargo build --locked --offline` without network. Share dependency downloads;
 keep build artifacts separate for each source workspace. The frontend has no
-build step. Pinned terminal assets and licenses are under `src/web/vendor/`.
+build step. Pinned terminal/Markdown assets and licenses are under `src/web/vendor/`.
 
 On the Docker host, set `BOID_WORKSPACE` to the task directory. This uses the
 existing compiled binary volume and publishes only on host loopback:
