@@ -251,7 +251,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
   border: 1px solid #484848; border-radius: 0; background: #1e1e1e; color: #ddd;
 }
 .session-setup-grid textarea { resize: vertical; min-height: 60px; }
-.session-setup-grid .default-value { color: #888; }
+.session-setup-grid .default-value { color: #bbb; }
 .session-choices { min-width: 0; }
 .session-choices h2:not(:first-child) { margin-top: 12px; }
 .session-card { display: block; width: 100%; text-align: left; padding: 5px; margin-bottom: 4px; border-radius: 0; overflow: hidden; }

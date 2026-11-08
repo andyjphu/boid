@@ -1055,9 +1055,9 @@ function addSetup(saved) {
   ui.pane.classList.add("setup-pane");
   ui.id = values.id;
   ui.directory.hidden = true;
-  ui.status.textContent = "setup";
-  ui.close.title = "Discard this setup";
-  ui.close.setAttribute("aria-label", "Discard agent setup");
+  ui.status.textContent = "";
+  ui.close.title = "Discard draft";
+  ui.close.setAttribute("aria-label", "Discard agent draft");
   const body = element("div", "session-setup-grid");
   ui.form = element("form", "setup-form");
   ui.form.append(element("h2", null, "New agent"));
