@@ -14,7 +14,6 @@
   <nav class="workspace-actions" aria-label="Create">
     <button id="add-agent" type="button" disabled>+ agent</button>
     <button id="add-terminal" type="button" disabled>+ terminal</button>
-    <button id="session-history" type="button" disabled>History</button>
   </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
@@ -25,30 +24,5 @@
   <main id="workspace" aria-label="Agent and terminal workspace">
     <p id="empty">Start an agent or open a terminal.</p>
   </main>
-  <dialog id="create-dialog">
-    <form id="create-form">
-      <h1 id="create-title">New agent</h1>
-      <label id="name-field">Name
-        <input name="name" autocomplete="off" placeholder="Agent name">
-      </label>
-      <label>Working directory
-        <input name="cwd" autocomplete="off" placeholder="Server working directory">
-      </label>
-      <label id="message-field">Task
-        <textarea name="message" rows="5" placeholder="What should this agent do?"></textarea>
-      </label>
-      <p id="create-error" class="error-banner" role="alert" hidden></p>
-      <div class="dialog-actions">
-        <button id="cancel-create" type="button">Cancel</button>
-        <button id="submit-create" type="submit">Create agent</button>
-      </div>
-    </form>
-  </dialog>
-  <dialog id="history-dialog">
-    <h1>History</h1>
-    <div id="history-list"></div>
-    <p id="history-error" class="error-banner" role="alert" hidden></p>
-    <div class="dialog-actions"><button id="close-history" type="button">Close</button></div>
-  </dialog>
 </body>
 </html>

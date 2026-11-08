@@ -242,30 +242,22 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 #login { padding: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 #login span { color: #aaa; }
 #token { background: #252525; border: 1px solid #555; color: inherit; padding: 5px; }
-dialog {
-  width: min(480px, calc(100vw - 32px));
-  color: inherit;
-  background: #252525;
-  border: 1px solid #555;
-  border-radius: 4px;
-  padding: 20px;
+.session-setup-grid { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr); gap: 10px; min-height: 0; overflow: auto; }
+.setup-pane .session-setup-grid { padding: 8px; flex: 1; align-content: start; }
+.session-setup-grid h2 { margin: 0 0 7px; font-size: 11px; font-weight: 600; }
+.session-setup-grid label { display: block; margin: 0 0 8px; color: #aaa; }
+.session-setup-grid input, .session-setup-grid textarea {
+  display: block; width: 100%; margin-top: 3px; padding: 4px;
+  border: 1px solid #484848; border-radius: 0; background: #1e1e1e; color: #ddd;
 }
-dialog::backdrop { background: #0008; }
-dialog h1 { margin: 0 0 15px; font-size: 16px; }
-dialog label { display: block; margin: 12px 0; color: #bbb; }
-dialog input, dialog textarea {
-  display: block;
-  width: 100%;
-  margin-top: 5px;
-  padding: 7px;
-  border: 1px solid #484848;
-  border-radius: 2px;
-  background: #1e1e1e;
-  color: #ddd;
-}
-dialog textarea { resize: vertical; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.session-setup-grid textarea { resize: vertical; min-height: 60px; }
+.session-setup-grid .default-value { color: #888; }
+.session-choices { min-width: 0; }
+.session-choices h2:not(:first-child) { margin-top: 12px; }
+.session-card { display: block; width: 100%; text-align: left; padding: 5px; margin-bottom: 4px; border-radius: 0; overflow: hidden; }
+.session-card-heading { display: flex; justify-content: space-between; gap: 6px; }
+.session-card-name { overflow: hidden; text-overflow: ellipsis; }
+.session-card-status { color: #999; flex-shrink: 0; }
+.session-card-cwd, .session-card-task { display: block; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
+.session-empty { color: #888; margin: 0 0 8px; }
 [hidden] { display: none !important; }
-#history-list { max-height: 60vh; overflow: auto; }
-.history-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
-.history-row span { flex: 1; min-width: 0; overflow-wrap: anywhere; }

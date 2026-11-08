@@ -10,6 +10,46 @@ const terminalCatalog = new Map();
 let selected = null;
 let lastSequence = -1;
 let events;
+const drafts = new Map();
+let paneOrder = [];
+let savedHistory = new Set();
+let orderKey = "";
+let catalogReady = false;
+let reconcilingCatalog = false;
+
+function loadPaneOrder(cwd) {
+  const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
+  if (key === orderKey) return;
+  orderKey = key;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+    const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
+    paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
+    savedHistory = new Set((saved?.history || []).filter(key => valid(key) && key.startsWith("terminal:")));
+    for (const draft of saved?.drafts || []) {
+      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) addSetup(draft);
+    }
+  } catch { paneOrder = []; savedHistory.clear(); }
+}
+
+function rememberPaneOrder() {
+  if (!catalogReady || reconcilingCatalog) return;
+  const panes = new Map([...workspace.querySelectorAll(".pane")].map(pane => [pane.dataset.paneKey, pane]));
+  paneOrder = paneOrder.filter(key => panes.has(key));
+  for (const key of panes.keys()) if (!paneOrder.includes(key)) paneOrder.push(key);
+  for (let i = 0; i < paneOrder.length; i++) {
+    const pane = panes.get(paneOrder[i]);
+    const current = workspace.querySelectorAll(".pane")[i];
+    if (pane !== current) workspace.insertBefore(pane, current || null);
+  }
+  try {
+    sessionStorage.setItem(orderKey, JSON.stringify({
+      version: 1, order: paneOrder,
+      history: [...terminals.values()].filter(ui => ui.history).map(ui => `terminal:${ui.id}`),
+      drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
+    }));
+  } catch { /* Storage availability must not prevent session access. */ }
+}
 
 function disableTextAssistance(input) {
   for (const [name, value] of Object.entries({
@@ -52,6 +92,7 @@ async function request(path, method = "GET", body, headers = {}) {
 }
 
 function layout(event) {
+  rememberPaneOrder();
   if (event?.type !== "resize") {
     for (const ui of sessions.values()) rememberPosition(ui);
   }
@@ -75,9 +116,10 @@ function paneIcon(kind) {
   return icon;
 }
 
-function makePane(name, cwd, kind) {
+function makePane(name, cwd, kind, id) {
   const pane = element("section", `pane ${kind}-pane`);
   pane.setAttribute("aria-label", name);
+  pane.dataset.paneKey = `${kind}:${id}`;
   const header = element("header", "pane-header");
   const tab = element("div", "pane-tab");
   const title = element("span", "pane-title", name);
@@ -179,7 +221,9 @@ async function openModelPicker(ui) {
   ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
   ui.modelPicker.focus({ preventScroll: true });
   try {
-    const config = await request("/api/config");
+    const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}`);
+    ui.view = view;
+    const config = view.profile || { model: view.model };
     if (ui.modelPicker.hidden) return;
     ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
       && config.cyber_access_program === "daybreak_blue";
@@ -196,7 +240,7 @@ async function openModelPicker(ui) {
     ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), choices);
     if (!ui.modelAvailable) {
       const current = [config.model, config.reasoning_effort, config.cyber_access_program].filter(Boolean).join(" · ");
-      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This profile is unavailable on this server.`));
+      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This session retains its original profile.`));
     }
     ui.modelPicker.append(element("div", "model-hint", "Enter select · Esc back"));
     option.focus({ preventScroll: true });
@@ -208,7 +252,8 @@ async function openModelPicker(ui) {
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
-  const ui = makePane(view.name || id, view.cwd, "agent");
+  const ui = makePane(view.name || id, view.cwd, "agent", id);
+  ui.view = view;
   ui.id = id;
   ui.entries = new Map();
   ui.pending = new Set(view.pending || []);
@@ -336,6 +381,7 @@ function addSession(view) {
 }
 
 function setStatus(ui, status) {
+  if (ui.view) ui.view.status = status;
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
   ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
@@ -630,7 +676,15 @@ function setPending(ui, pending) {
 }
 
 function snapshot(views, terminalViews = []) {
+  views = [...views].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  reconcilingCatalog = true;
   reconcileTerminals(terminalViews);
+  if (!catalogReady) {
+    for (const info of terminalViews) {
+      if (info.archived && savedHistory.has(`terminal:${info.id}`)) attachTerminal(info, true);
+    }
+  }
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
@@ -640,6 +694,7 @@ function snapshot(views, terminalViews = []) {
   for (const view of views) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
+    ui.view = view;
     const follow = ui.follow;
     rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
@@ -658,6 +713,10 @@ function snapshot(views, terminalViews = []) {
     if (follow) followLatest(ui);
     else restorePosition(ui);
   }
+  reconcilingCatalog = false;
+  catalogReady = true;
+  layout();
+  refreshChoices();
 }
 
 function startEvents() {
@@ -680,6 +739,7 @@ function startEvents() {
       }
       if (message.seq <= lastSequence) return;
       lastSequence = message.seq;
+      if (["session", "closed", "status", "terminal"].includes(message.type)) refreshChoices();
       if (message.type === "session") { addSession(message.session); return; }
       if (message.type === "terminal") {
         terminalCatalog.set(String(message.terminal.id), message.terminal);
@@ -718,7 +778,7 @@ function reconcileTerminals(infos) {
 function attachTerminal(info, history = false) {
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
-  const ui = makePane(info.name || "#?", info.cwd, "terminal");
+  const ui = makePane(info.name || "#?", info.cwd, "terminal", id);
   ui.id = id;
   ui.title.title = "Double-click or press F2 to rename";
   ui.title.tabIndex = 0;
@@ -918,6 +978,8 @@ function attachTerminal(info, history = false) {
   ui.update = latest => {
     info = latest;
     setName(info.name);
+    ui.directory.textContent = info.cwd || "";
+    ui.directory.title = (info.cwd || "") + (info.running && info.cwd_observed === false ? " (last known directory)" : "");
     ui.status.textContent = info.running ? "" : (info.status || "ended");
     if (info.persistence_error) showError(ui.error, `History could not be saved: ${info.persistence_error}`);
     if (!info.running) term.options.disableStdin = true;
@@ -938,86 +1000,186 @@ function attachTerminal(info, history = false) {
   return ui;
 }
 
-const historyDialog = document.querySelector("#history-dialog");
-const historyList = document.querySelector("#history-list");
-const historyError = document.querySelector("#history-error");
-document.querySelector("#close-history").addEventListener("click", () => historyDialog.close());
-document.querySelector("#session-history").addEventListener("click", async () => {
-  historyError.hidden = true;
-  historyList.replaceChildren();
-  historyDialog.showModal();
-  try {
-    const [agents, terminalRecords] = await Promise.all([
-      request("/api/sessions/archived"), request("/api/terminals"),
-    ]);
-    const records = [
-      ...agents.map(record => ({ ...record, kind: "agent" })),
-      ...terminalRecords.filter(record => record.archived).map(record => ({ ...record, kind: "terminal" })),
-    ];
-    if (!records.length) historyList.append(element("p", "", "No ended sessions yet."));
-    for (const record of records) {
-      const row = element("div", "history-row");
-      const name = record.name || `Terminal ${String(record.id).replace(/^term-/, "").slice(0, 8)}`;
-      const label = element("span", "", name);
-      label.title = `${record.cwd} · ${record.status}`;
-      const open = element("button", "", record.kind === "agent" ? "Reopen" : "View record");
-      open.type = "button";
-      open.addEventListener("click", async () => {
-        open.disabled = true;
-        try {
-          if (record.kind === "agent") {
-            const view = await request(`/api/sessions/${encodeURIComponent(record.id)}/reopen`, "POST");
-            if (view?.id) addSession(view);
-          } else {
-            attachTerminal(record, true);
-          }
-          historyDialog.close();
-        } catch (error) { showError(historyError, error); open.disabled = false; }
-      });
-      row.append(label, open);
-      historyList.append(row);
-    }
-  } catch (error) { showError(historyError, error); }
-});
+const agentDefaults = {
+  name: "canary", cwd: "/work", message: "Inspect the working directory and summarize what is here.",
+};
+let choicesVersion = 0;
+let choicesTimer;
 
-const dialog = document.querySelector("#create-dialog");
-const createForm = document.querySelector("#create-form");
-const createError = document.querySelector("#create-error");
-const createButton = document.querySelector("#submit-create");
-let createKind = "agent";
-function openCreate(kind) {
-  createKind = kind;
-  createError.hidden = true;
-  document.querySelector("#create-title").textContent = kind === "agent" ? "New agent" : "New terminal";
-  createButton.textContent = kind === "agent" ? "Create agent" : "Open terminal";
-  document.querySelector("#name-field").hidden = kind !== "agent";
-  document.querySelector("#message-field").hidden = kind !== "agent";
-  dialog.showModal();
-  createForm.elements[kind === "agent" ? "name" : "cwd"].focus();
+function focusSession(ui) {
+  selected = ui.pane;
+  ui.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (ui.input) ui.input.focus({ preventScroll: true });
+  else ui.title.focus({ preventScroll: true });
 }
-document.querySelector("#add-agent").addEventListener("click", () => openCreate("agent"));
-document.querySelector("#add-terminal").addEventListener("click", () => openCreate("terminal"));
-document.querySelector("#cancel-create").addEventListener("click", () => dialog.close());
-createForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  createButton.disabled = true;
-  createError.hidden = true;
-  const fields = Object.fromEntries(new FormData(createForm));
-  try {
-    if (createKind === "agent") {
-      const view = await request("/api/sessions", "POST", fields);
-      const ui = addSession(view);
-      dialog.close();
-      createForm.elements.name.value = "";
-      createForm.elements.message.value = "";
-      ui.input.focus();
-    } else {
-      const info = await request("/api/terminals", "POST", { cwd: fields.cwd, cols: 80, rows: 24 });
-      attachTerminal(info);
-      dialog.close();
+
+function discardSetup(ui, replacement) {
+  if (replacement) {
+    const key = replacement.pane.dataset.paneKey;
+    paneOrder = paneOrder.filter(item => item !== key).map(item => item === `draft:${ui.id}` ? key : item);
+  }
+  drafts.delete(ui.id);
+  if (selected === ui.pane) selected = null;
+  ui.pane.remove();
+  layout();
+  if (replacement) focusSession(replacement);
+}
+
+function addSetup(saved) {
+  const values = saved || {
+    id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
+    ...agentDefaults,
+  };
+  if (drafts.has(values.id)) return drafts.get(values.id);
+  const ui = makePane("New agent", "", "draft", values.id);
+  ui.pane.classList.add("setup-pane");
+  ui.id = values.id;
+  ui.directory.hidden = true;
+  ui.status.textContent = "setup";
+  ui.close.title = "Discard this setup";
+  ui.close.setAttribute("aria-label", "Discard agent setup");
+  const body = element("div", "session-setup-grid");
+  ui.form = element("form", "setup-form");
+  ui.form.append(element("h2", null, "New agent"));
+  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"], ["message", "Task"]]) {
+    const wrapper = element("label", null, label);
+    const input = element(key === "message" ? "textarea" : "input");
+    input.name = key;
+    input.value = values[key];
+    if (key === "message") input.rows = 4;
+    const update = () => {
+      input.classList.toggle("default-value", input.value === agentDefaults[key]);
+      rememberPaneOrder();
+    };
+    input.addEventListener("input", update);
+    input.classList.toggle("default-value", input.value === agentDefaults[key]);
+    wrapper.append(input);
+    ui.form.append(wrapper);
+  }
+  const submit = element("button", "setup-submit", "Create agent");
+  submit.type = "submit";
+  ui.form.append(submit);
+  const choices = element("div", "session-choices");
+  ui.active = element("div", "active-agents");
+  ui.inactive = element("div", "inactive-agents");
+  ui.terminalHistory = element("div", "terminal-history");
+  choices.append(element("h2", null, "Active"), ui.active, element("h2", null, "Inactive"), ui.inactive, element("h2", null, "Terminals"), ui.terminalHistory);
+  body.append(ui.form, choices);
+  ui.pane.append(body, ui.error);
+  ui.close.addEventListener("click", () => discardSetup(ui));
+  ui.form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (ui.busy) return;
+    ui.busy = true;
+    submit.disabled = true;
+    ui.close.disabled = true;
+    ui.error.hidden = true;
+    try {
+      const view = await request("/api/sessions", "POST", Object.fromEntries(new FormData(ui.form)));
+      discardSetup(ui, addSession(view));
+    } catch (error) { showError(ui.error, error); }
+    finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
+  });
+  drafts.set(ui.id, ui);
+  layout();
+  refreshChoices();
+  return ui;
+}
+
+function sessionCard(record, action) {
+  const card = element("button", "session-card");
+  card.type = "button";
+  card.dataset.sessionId = String(record.id);
+  const heading = element("span", "session-card-heading");
+  heading.append(element("span", "session-card-name", record.name || "Terminal"), element("span", "session-card-status", record.status || "idle"));
+  const cwd = element("span", "session-card-cwd", record.cwd || "");
+  cwd.title = record.cwd || "";
+  card.append(heading, cwd);
+  const task = record.entries?.find(entry => entry.kind === "user")?.text;
+  if (task) {
+    const excerpt = element("span", "session-card-task", task.replace(/\s+/g, " ").slice(0, 160));
+    excerpt.title = task;
+    card.append(excerpt);
+  }
+  card.title = action;
+  return card;
+}
+
+function renderAgentChoices(ui, active, inactive) {
+  for (const [container, records, archived] of [[ui.active, active, false], [ui.inactive, inactive, true]]) {
+    container.replaceChildren();
+    if (!records.length) container.append(element("p", "session-empty", "None"));
+    for (const record of records) {
+      const card = sessionCard(record, archived ? "Reopen paused with history" : "Focus existing agent");
+      card.disabled = record.status === "ending" || (archived && !record.archived);
+      card.addEventListener("click", async () => {
+        if (ui.busy) return;
+        ui.busy = true;
+        card.disabled = true;
+        ui.close.disabled = true;
+        ui.error.hidden = true;
+        try {
+          const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen" : ""}`, archived ? "POST" : "GET");
+          if (view.archived || view.status === "ending") throw new Error("This agent has ended. Choose it from Inactive to reopen.");
+          const attached = sessions.has(String(view.id));
+          const agent = addSession(view);
+          if (archived || !attached) discardSetup(ui, agent);
+          else { discardSetup(ui); focusSession(agent); }
+        } catch (error) { showError(ui.error, error); refreshChoices(); }
+        finally { ui.busy = false; card.disabled = false; ui.close.disabled = false; }
+      });
+      container.append(card);
     }
-  } catch (error) { showError(createError, error); }
-  finally { createButton.disabled = false; }
+  }
+}
+
+function refreshChoices() {
+  const version = ++choicesVersion;
+  clearTimeout(choicesTimer);
+  if (!drafts.size) return;
+  choicesTimer = setTimeout(async () => {
+    try {
+      const [active, inactive, terminalRecords] = await Promise.all([
+        request("/api/sessions"), request("/api/sessions/archived"), request("/api/terminals"),
+      ]);
+      if (version !== choicesVersion) return;
+      for (const ui of drafts.values()) {
+        renderAgentChoices(ui, active, inactive);
+        ui.terminalHistory.replaceChildren();
+        const archived = terminalRecords.filter(record => record.archived);
+        if (!archived.length) ui.terminalHistory.append(element("p", "session-empty", "None"));
+        for (const record of archived) {
+          const card = sessionCard(record, "View read-only terminal history");
+          card.addEventListener("click", () => {
+            if (ui.busy) return;
+            const existing = terminals.get(String(record.id));
+            const terminal = attachTerminal(record, true);
+            if (existing) { discardSetup(ui); focusSession(terminal); }
+            else discardSetup(ui, terminal);
+          });
+          ui.terminalHistory.append(card);
+        }
+      }
+    } catch (error) {
+      if (version !== choicesVersion) return;
+      for (const ui of drafts.values()) showError(ui.error, error);
+    }
+  }, 40);
+}
+
+document.querySelector("#add-agent").addEventListener("click", () => {
+  const ui = addSetup();
+  ui.form.elements.name.focus();
+});
+document.querySelector("#add-terminal").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  workspaceError.hidden = true;
+  try {
+    const info = await request("/api/terminals", "POST", { cols: 80, rows: 24 });
+    attachTerminal(info);
+  } catch (error) { showError(workspaceError, error); }
+  finally { button.disabled = false; }
 });
 
 function requireLogin() {
@@ -1025,7 +1187,6 @@ function requireLogin() {
   document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
-  document.querySelector("#session-history").disabled = true;
 }
 
 async function connect(token) {
@@ -1033,10 +1194,9 @@ async function connect(token) {
   const config = await request("/api/config");
   login.hidden = true;
   workspaceError.hidden = true;
-  createForm.elements.cwd.value ||= config.cwd || "";
+  loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
-  document.querySelector("#session-history").disabled = false;
   startEvents();
   for (const ui of terminals.values()) ui.reconnect();
 }
@@ -1072,7 +1232,7 @@ document.addEventListener("keydown", async event => {
     closeModelPicker(picker);
     return;
   }
-  if (!event.defaultPrevented && !event.isComposing && !dialog.open && !picker
+  if (!event.defaultPrevented && !event.isComposing && !picker
       && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
       && !event.target.closest("input, textarea, [contenteditable], .model-picker")) {
     const selection = window.getSelection();
@@ -1087,7 +1247,7 @@ document.addEventListener("keydown", async event => {
       return;
     }
   }
-  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open || historyDialog.open) return;
+  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
   const ui = [...sessions.values()].find(ui => ui.pane === selected);
   if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
   event.preventDefault();
