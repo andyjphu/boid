@@ -154,5 +154,6 @@ unless needed and explicitly scoped. Review the resulting diff through a PR.
 The container launch supplies the boundary; the binary does not create it.
 
 Record unintended destructive actions even when containment prevents damage.
-Preserve the command, target, and result; hand dangerous host/system work to
-Codex and continue unaffected work.
+Preserve the command, target, and result; stop the affected action and report
+it. Continue unaffected work. Andy's personal task routing is described in
+the development brief; Boid has no required Codex handoff.

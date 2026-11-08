@@ -275,12 +275,17 @@ Keep Git history outside the runtime workspace unless needed and explicitly
 scoped for the task. The emergency transfer is a recovery snapshot, not a
 second active checkout.
 
-Andy assigns dangerous host or system work to Codex. Boids handle fast
-implementation, research, writing, and communication. Developers and Boid
-agents must notice actions that could cause unintended damage without Docker.
-If containment prevents such an action, preserve its command, target, and
-result as an incident. Stop the affected action and hand it to Codex. Continue
-unaffected work. Use the trace or task record; no automatic collector is needed.
+Andy personally assigns dangerous host or system work to Codex and intends
+to give Boid work that does not require that access. He clarified this on
+2026-11-08: "i meant i will personally send dangerous work to codex". This is
+operator workflow for developers to understand, not a Boid delegation rule
+or integration. Do not put that routing policy into runtime guidance.
+
+Developers and Boid agents must still notice actions that could cause
+unintended damage without Docker. If containment prevents such an action,
+preserve its command, target, and result as an incident. Stop the affected
+action and report it; continue unaffected work. Use the trace or task record;
+no automatic collector is needed.
 
 See [the server, tools, and container workflow](tools.md) for current behavior.
 
