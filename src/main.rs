@@ -14,7 +14,8 @@ boid serve (or boid with no arguments) starts the shared server and prints its w
 boid \"task\" submits a session to the running server and returns its ID.
 The server owns execution; closing a submitting command or browser leaves it running.
 
-Server: OPENAI_API_KEY required; BOID_MODEL defaults to gpt-6.1-sol.
+Server: OPENAI_API_KEY required; BOID_MODEL defaults to gpt-6-sol with medium reasoning.
+BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.
 BOID_LISTEN defaults to 127.0.0.1:7734. Run inside the task container.
 Client: BOID_URL defaults to http://127.0.0.1:7734.
 BOID_CWD selects a server-side directory; omitted uses the server working directory.

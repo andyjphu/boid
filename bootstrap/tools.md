@@ -4,7 +4,7 @@ Run `boid serve` (or `boid` with no arguments) inside the task container. The
 shared server listens on `127.0.0.1:7734` by default and prints a browser URL.
 A second server cannot bind the same address. `BOID_LISTEN` changes the listener;
 no system service is installed. Set `OPENAI_API_KEY`; `BOID_MODEL` defaults to
-`gpt-6.1-sol`.
+`gpt-6-sol`, with medium reasoning effort and Daybreak Blue.
 
 `boid "task"` submits to the running server, prints its session ID, and exits.
 `BOID_URL` selects a server. `BOID_CWD` optionally selects a directory as seen
@@ -22,7 +22,8 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Pane titles do not change the layout.
+and real terminal panes. Each has a compact tab header with an icon and a left
+close control. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
 tool calls and results, and control events. Provider-exposed reasoning summaries
 are hidden in every pane pending the v0.6 presentation work; events remain in
@@ -40,9 +41,14 @@ arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.
 
 An empty message box appears on pane hover or keyboard focus; a draft keeps it
-visible. The hidden box retains its space so hovering does not shift the trace.
+visible. The hidden empty box collapses completely; Working retains its own slot below
+the stream. Browser text assistance is disabled on text inputs.
 Disconnection mutes the view. Each pane has an × control; there is no separate
 Latest control or title gesture that enlarges a pane.
+
+Adjacent queued messages form a compact block with a lighter background and
+full-opacity text. Delivered messages from the same `input_batch` join as well;
+separate batches and intervening visible output retain their separation.
 
 Streaming keeps a view at the bottom when it is already there. Reading earlier
 messages preserves the visible message and its offset as content changes.
@@ -80,6 +86,18 @@ and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
 context. API failures are reported without automatic retries. Runtime guidance
 is compiled from `src/PRINCIPLES.md`; parent/bootstrap discovery is not automatic.
 
+The active v0.6 profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
+local keyboard picker for that single profile; Enter confirms and Escape closes
+it. The command is not sent to an agent. The picker reads server configuration,
+so it does not imply an unavailable model was activated.
+
+Requests send `reasoning.effort: medium` and `access_programs.cyber: daybreak_blue`
+by default. `BOID_CYBER_ACCESS_PROGRAM` can explicitly select `standard`,
+`daybreak_blue`, or `daybreak_red` for a compatible model/project. An incompatible
+selection returns its API error without switching models or falling back.
+Daybreak does not select a reasoning stream. See the
+[OpenAI Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak).
+
 ## Headless routes
 
 The browser and scripts use the same authenticated API:
@@ -98,12 +116,17 @@ The browser and scripts use the same authenticated API:
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
+| `PATCH /api/terminals/{id}` | Rename with `{ "name": "..." }` |
 | `DELETE /api/terminals/{id}` | End and wait for the shell |
 
 Agent behavior can be checked headlessly. Browser checks establish interface
 behavior. Tool unit tests alone do not establish disconnect or coordination behavior.
 
 ## Interactive terminals
+
+Terminals start as #1, #2, etc. Double-click a terminal name to edit it; Enter
+saves and Escape cancels. Renaming updates other views without replacing the
+shell. Names remain for the server process lifetime, like terminal sessions.
 
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×

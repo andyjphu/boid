@@ -11,13 +11,10 @@
   <script defer src="/app.js"></script>
 </head>
 <body class="disconnected">
-  <header class="workspace-header">
-    <strong>Boid</strong>
-    <div class="workspace-actions">
-      <button id="add-agent" type="button" disabled>New agent</button>
-      <button id="add-terminal" type="button" disabled>New terminal</button>
-    </div>
-  </header>
+  <nav class="workspace-actions" aria-label="Create">
+    <button id="add-agent" type="button" disabled>+ agent</button>
+    <button id="add-terminal" type="button" disabled>+ terminal</button>
+  </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
     <label>Server token <input id="token" type="password" autocomplete="off" required></label>

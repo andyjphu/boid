@@ -346,3 +346,30 @@ Andy later explicitly changed the UI requirement:
 This supersedes retaining the Completed label. It does not revoke the praise for
 explaining the earlier choice. Keep the distinction between approval of an
 agent's reasoning and approval of the resulting interface.
+
+## Small details and design taste
+
+During v0.6, Andy successively corrected the terminal scrollbar's track fit,
+divider separation, idle visibility, vertical inset and motion. Earlier repairs
+had satisfied parts of the request while leaving other visible defects. His
+last correction was:
+
+> why is there top and bottom padding to the scroll indicator? why cant i scroll up all the way? also why is it rubberbandy? there should be no transition delay if you are adding it; also the transition in and out should be slower
+
+The delivered repair removed vertical host padding, disabled overscroll on the
+actual viewport, and used a 300ms thumb fade with zero transition delay while
+preserving immediate scrolling. Isolated browser checks reached the oldest
+retained line; a blocked scroll limit and physical Mac trackpad bounce were
+not reproduced. Implementation: `7b1d8aa`.
+
+Andy then said:
+
+> good; principly, small details like these matter so much; design taste like this is highly important. i dont know what lesson to let you take away but this is an example of something i really care about
+
+Interpretation: the precise feel of an everyday interaction has substantial
+value to Andy. Minimalism still calls for care in every element that remains.
+Consider the whole interaction when applying a correction, including how its
+geometry and motion behave together. The particular scrollbar measurements
+belong to this implementation; the broader judgment applies to other surfaces.
+This praise supports the delivered correction and the importance of such
+details. It does not establish that future design choices are calibrated.

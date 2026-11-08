@@ -10,6 +10,7 @@ pub struct Session {
     pending: VecDeque<Call>,
     running: Option<Call>,
     partial_text: String,
+    model_requests: u64,
 }
 
 #[cfg(test)]
@@ -61,6 +62,9 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
+    pub fn next_input_batch(&self) -> u64 {
+        self.model_requests + 1
+    }
     pub fn has_pending_tools(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -74,6 +78,7 @@ impl Session {
         id: &str,
     ) -> Result<bool> {
         let Some(call) = self.pending.pop_front() else {
+            self.model_requests += 1;
             for (sender, text) in hub.take_inbox(id) {
                 self.user(format!("Peer message from {sender}:\n{text}"));
                 hub.entry(

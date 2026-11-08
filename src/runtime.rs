@@ -18,6 +18,8 @@ pub struct Entry {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_batch: Option<u64>,
 }
 #[derive(Clone, Serialize)]
 pub struct View {
@@ -85,7 +87,9 @@ impl Hub {
         })))
     }
     pub fn config(&self) -> Value {
-        json!({"cwd": self.0.cwd, "model": self.0.client.model})
+        let mut config = self.0.client.config();
+        config["cwd"] = json!(self.0.cwd);
+        config
     }
     pub fn views(&self) -> Vec<View> {
         self.0
@@ -134,6 +138,7 @@ impl Hub {
             kind: kind.into(),
             text: text.into(),
             replaces,
+            input_batch: None,
         };
         let mut data = self.0.data.lock().unwrap();
         if let Some(handle) = data.sessions.get_mut(session) {
@@ -207,6 +212,7 @@ impl Hub {
             id: Uuid::new_v4().to_string(),
             kind: "context".into(),
             replaces: None,
+            input_batch: None,
             text: format!(
                 "{identity}\nModel: {}\n\n{}\n\nTool definitions:\n{}",
                 self.0.client.model,
@@ -214,7 +220,7 @@ impl Hub {
                 tool_calls::definitions()
             ),
         });
-        view.entries.push(Entry { id: Uuid::new_v4().to_string(), kind: "notice".into(), replaces: None, text: "Reasoning shown here is the provider's exposed summary. Hidden model reasoning is unavailable. Sessions live in this server process; browser disconnection does not stop them.".into() });
+        view.entries.push(Entry { id: Uuid::new_v4().to_string(), kind: "notice".into(), replaces: None, input_batch: None, text: "Reasoning shown here is the provider's exposed summary. Hidden model reasoning is unavailable. Sessions live in this server process; browser disconnection does not stop them.".into() });
         {
             let mut data = self.0.data.lock().unwrap();
             if data.closing {
@@ -279,6 +285,7 @@ impl Hub {
             kind: "user".into(),
             text,
             replaces: None,
+            input_batch: None,
         };
         handle.view.entries.push(entry.clone());
         handle.view.pending.push(message_id.clone());
@@ -311,15 +318,20 @@ impl Hub {
         self.emit(&mut data, json!({"type":"closed","session_id":id}));
         Ok(())
     }
-    fn input_delivered(&self, session: &str, id: &str, state: &str) {
+    fn input_delivered(&self, session: &str, id: &str, state: &str, input_batch: Option<u64>) {
         let mut data = self.0.data.lock().unwrap();
         let handle = data.sessions.get_mut(session).unwrap();
         handle.view.pending.retain(|pending| pending != id);
-        self.emit(
-            &mut data,
-            json!({"type":"input","session_id":session,"id":id,"state":state}),
-        );
+        if let Some(entry) = handle.view.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.input_batch = input_batch;
+        }
+        let mut event = json!({"type":"input","session_id":session,"id":id,"state":state});
+        if let Some(batch) = input_batch {
+            event["input_batch"] = json!(batch);
+        }
+        self.emit(&mut data, event);
     }
+
     pub fn stop(&self, id: &str) -> Result<()> {
         let mut data = self.0.data.lock().unwrap();
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
@@ -364,6 +376,7 @@ impl Hub {
             id: Uuid::new_v4().to_string(),
             kind: "peer".into(),
             replaces: None,
+            input_batch: None,
             text: format!(
                 "Received from {sender} ({from}); queued for the next model request:\n{text}"
             ),
@@ -443,7 +456,7 @@ impl Hub {
                     order,
                 })) => {
                     if order <= stop_through {
-                        self.input_delivered(&id, &input_id, "cancelled");
+                        self.input_delivered(&id, &input_id, "cancelled", None);
                         self.entry(
                             &id,
                             "notice",
@@ -452,7 +465,12 @@ impl Hub {
                         continue;
                     }
                     session.user(text);
-                    self.input_delivered(&id, &input_id, "applied");
+                    self.input_delivered(
+                        &id,
+                        &input_id,
+                        "applied",
+                        Some(session.next_input_batch()),
+                    );
                     self.entry(
                         &id,
                         "notice",
@@ -605,6 +623,22 @@ mod tests {
                 .is_err()
         );
         assert_eq!(hub.view(&target.id).unwrap().pending, vec![first, second]);
+        let view = hub.view(&target.id).unwrap();
+        assert_eq!(
+            view.entries
+                .iter()
+                .find(|entry| entry.text == "Start")
+                .unwrap()
+                .input_batch,
+            Some(1)
+        );
+        assert!(
+            view.entries
+                .iter()
+                .filter(|entry| view.pending.contains(&entry.id))
+                .all(|entry| entry.input_batch.is_none())
+        );
+        let (_, mut delivery_events) = hub.subscribe();
         release_first
             .send(json!([
                 {
@@ -625,6 +659,22 @@ mod tests {
         let input = after_boundary["input"].as_array().unwrap();
         assert_eq!(input[input.len() - 2]["content"], "First correction");
         assert_eq!(input[input.len() - 1]["content"], "Second correction");
+        let view = hub.view(&target.id).unwrap();
+        assert!(
+            view.entries
+                .iter()
+                .filter(
+                    |entry| entry.text == "First correction" || entry.text == "Second correction"
+                )
+                .all(|entry| entry.input_batch == Some(2))
+        );
+        let mut batches = Vec::new();
+        while let Ok(event) = delivery_events.try_recv() {
+            if event["type"] == "input" && event["state"] == "applied" {
+                batches.push(event["input_batch"].clone());
+            }
+        }
+        assert_eq!(batches, vec![json!(2), json!(2)]);
         for (call_id, file, content) in [
             ("first_call", "first-work", "first completed"),
             ("second_call", "second-work", "second completed"),
@@ -661,6 +711,16 @@ mod tests {
         let input = after_escape["input"].as_array().unwrap();
         assert_eq!(input[input.len() - 2]["content"], "Third correction");
         assert_eq!(input[input.len() - 1]["content"], "Fourth correction");
+        assert!(
+            hub.view(&target.id)
+                .unwrap()
+                .entries
+                .iter()
+                .filter(
+                    |entry| entry.text == "Third correction" || entry.text == "Fourth correction"
+                )
+                .all(|entry| entry.input_batch == Some(3))
+        );
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
 
         // A tool gets to finish before queued input changes the next request.
@@ -726,6 +786,17 @@ mod tests {
             "Keep the completed tool result"
         );
 
+        assert_eq!(
+            hub.view(&target.id)
+                .unwrap()
+                .entries
+                .iter()
+                .find(|entry| entry.text == "Keep the completed tool result")
+                .unwrap()
+                .input_batch,
+            Some(4)
+        );
+
         // Input accepted as a response finishes must also reach a request.
         release_fourth.send(json!([])).unwrap();
         hub.message(&target.id, "Continue after completion".into())
@@ -789,6 +860,14 @@ mod tests {
         assert_eq!(hub.view(&target.id).unwrap().status, "stopped");
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
         assert_eq!(hub.take_inbox(&target.id).len(), 1);
+        assert!(
+            hub.view(&target.id)
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == "user")
+                .all(|entry| entry.input_batch.is_none())
+        );
         assert!(
             !hub.view(&target.id)
                 .unwrap()

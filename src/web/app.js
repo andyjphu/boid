@@ -10,8 +10,18 @@ let selected = null;
 let lastSequence = -1;
 let events;
 
+function disableTextAssistance(input) {
+  for (const [name, value] of Object.entries({
+    spellcheck: "false", autocorrect: "off", autocapitalize: "off",
+    writingsuggestions: "false", autocomplete: "off",
+  })) input.setAttribute(name, value);
+}
+
+document.querySelectorAll("input, textarea").forEach(disableTextAssistance);
+
 function element(tag, className, text) {
   const node = document.createElement(tag);
+  if (tag === "input" || tag === "textarea") disableTextAssistance(node);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
@@ -56,27 +66,35 @@ function layout(event) {
   });
 }
 
+// Microsoft Codicons 0.0.36, CC-BY-4.0; attribution in vendor/codicons-NOTICE.
+function paneIcon(kind) {
+  const icon = element("span", "pane-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = kind === "terminal" ? "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"currentColor\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M1.5 3L3 1.5H21L22.5 3V21L21 22.5H3L1.5 21V3ZM3 3V21H21V3H3Z\"/><path d=\"M7.06078 7.49988L6.00012 8.56054L10.2427 12.8032L6 17.0459L7.06066 18.1066L12 13.1673V12.4391L7.06078 7.49988Z\"/><rect x=\"12\" y=\"16.5\" width=\"6\" height=\"1.5\"/></svg>" : "<svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"currentColor\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M8.48 4h4l.5.5v2.03h.52l.5.5V8l-.5.5h-.52v3l-.5.5H9.36l-2.5 2.76L6 14.4V12H3.5l-.5-.64V8.5h-.5L2 8v-.97l.5-.5H3V4.36L3.53 4h4V2.86A1 1 0 0 1 7 2a1 1 0 0 1 2 0 1 1 0 0 1-.52.83V4zM12 8V5H4v5.86l2.5.14H7v2.19l1.8-2.04.35-.15H12V8zm-2.12.51a2.71 2.71 0 0 1-1.37.74v-.01a2.71 2.71 0 0 1-2.42-.74l-.7.71c.34.34.745.608 1.19.79.45.188.932.286 1.42.29a3.7 3.7 0 0 0 2.58-1.07l-.7-.71zM6.49 6.5h-1v1h1v-1zm3 0h1v1h-1v-1z\"/></svg>";
+  return icon;
+}
+
 function makePane(name, cwd, kind) {
   const pane = element("section", `pane ${kind}-pane`);
   pane.setAttribute("aria-label", name);
   const header = element("header", "pane-header");
+  const tab = element("div", "pane-tab");
   const title = element("span", "pane-title", name);
   const status = element("span", "pane-status", "idle");
-  header.append(title, status);
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
   directory.title = cwd || "Server working directory";
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  header.append(directory);
   const close = element("button", "pane-close", "×");
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  header.append(close);
+  tab.append(close, paneIcon(kind), title, directory);
+  header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
-  return { pane, header, title, status, directory, error, close };
+  return { pane, header, tab, title, status, directory, error, close };
 }
 
 function removeSession(ui) {
@@ -128,6 +146,7 @@ document.addEventListener("selectionchange", () => {
         item.rendered = true;
       }
     }
+    groupUserEntries(ui);
     restorePosition(ui);
   }
 });
@@ -141,6 +160,48 @@ function followLatest(ui) {
       ui.trace.scrollTop = ui.trace.scrollHeight;
     }
   });
+}
+
+function closeModelPicker(ui) {
+  ui.modelPicker.hidden = true;
+  ui.composer.hidden = false;
+  ui.activity.lastChild.textContent = " · Esc to interrupt";
+  ui.input.focus({ preventScroll: true });
+}
+
+async function openModelPicker(ui) {
+  ui.slashSuggestion.hidden = true;
+  ui.composer.hidden = true;
+  ui.modelPicker.hidden = false;
+  ui.activity.lastChild.textContent = "";
+  ui.modelAvailable = false;
+  ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
+  ui.modelPicker.focus({ preventScroll: true });
+  try {
+    const config = await request("/api/config");
+    if (ui.modelPicker.hidden) return;
+    ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
+      && config.cyber_access_program === "daybreak_blue";
+    const option = element("div", "model-option", "GPT-6 Sol · Medium · Daybreak" + (ui.modelAvailable ? " (current)" : ""));
+    option.tabIndex = 0;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(ui.modelAvailable));
+    option.setAttribute("aria-disabled", String(!ui.modelAvailable));
+    option.addEventListener("click", () => { if (ui.modelAvailable) closeModelPicker(ui); });
+    const choices = element("div", "model-options");
+    choices.setAttribute("role", "listbox");
+    choices.setAttribute("aria-label", "Model and effort");
+    choices.append(option);
+    ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), choices);
+    if (!ui.modelAvailable) {
+      const current = [config.model, config.reasoning_effort, config.cyber_access_program].filter(Boolean).join(" · ");
+      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This profile is unavailable on this server.`));
+    }
+    ui.modelPicker.append(element("div", "model-hint", "Enter select · Esc back"));
+    option.focus({ preventScroll: true });
+  } catch (error) {
+    if (!ui.modelPicker.hidden) { closeModelPicker(ui); showError(ui.error, error); }
+  }
 }
 
 function addSession(view) {
@@ -157,6 +218,24 @@ function addSession(view) {
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
+  ui.modelPicker = element("div", "model-picker");
+  ui.modelPicker.hidden = true;
+  ui.modelPicker.tabIndex = -1;
+  ui.modelPicker.setAttribute("role", "dialog");
+  ui.modelPicker.setAttribute("aria-label", "Select model and effort");
+  ui.modelPicker.addEventListener("keydown", event => {
+    if (event.isComposing) return;
+    if (["Escape", "Enter", "ArrowUp", "ArrowDown", "Tab"].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape" || (event.key === "Enter" && ui.modelAvailable)) closeModelPicker(ui);
+      else ui.modelPicker.querySelector(".model-option")?.focus({ preventScroll: true });
+    }
+  });
+  ui.slashSuggestion = element("div", "slash-suggestion", "/model  Select model and effort");
+  ui.slashSuggestion.hidden = true;
+  ui.slashSuggestion.addEventListener("mousedown", event => event.preventDefault());
+  ui.slashSuggestion.addEventListener("click", () => { ui.input.value = "/model"; ui.composer.requestSubmit(); });
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
   ui.input.rows = 1;
@@ -173,14 +252,16 @@ function addSession(view) {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.error, ui.activity, ui.composer);
+  ui.pane.append(ui.trace, ui.error, ui.activity, ui.modelPicker, ui.slashSuggestion, ui.composer);
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
+    const text = ui.input.value.trim();
+    ui.slashSuggestion.hidden = ui.slashDismissed || !text || !"/model".startsWith(text) || ui.input.value.includes("\n");
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; resizeInput(); });
+  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -196,6 +277,14 @@ function addSession(view) {
     } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
   });
   ui.input.addEventListener("keydown", event => {
+    if (!event.isComposing && !ui.slashSuggestion.hidden && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (["Escape", "Tab", "ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "Escape") { ui.slashDismissed = true; ui.slashSuggestion.hidden = true; }
+        if (event.key === "Tab") { ui.input.value = "/model"; resizeInput(); }
+        return;
+      }
+    }
     if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
         && ui.input.selectionStart === ui.input.selectionEnd) {
       const prompts = [...ui.entries.values()].filter(item => item.kind === "user").map(item => item.text);
@@ -220,6 +309,13 @@ function addSession(view) {
     event.preventDefault();
     if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
+    if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
+      ui.input.value = "";
+      historyIndex = null;
+      resizeInput();
+      await openModelPicker(ui);
+      return;
+    }
     ui.sending = true;
     ui.error.hidden = true;
     try {
@@ -241,6 +337,7 @@ function addSession(view) {
 function setStatus(ui, status) {
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
+  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
   ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
 }
 
@@ -445,6 +542,23 @@ function renderEntry(ui, item) {
   }
 }
 
+function groupUserEntries(ui) {
+  let previous;
+  for (const item of ui.entries.values()) {
+    item.node.classList.remove("user-joined-before", "user-joined-after");
+  }
+  for (const item of ui.entries.values()) {
+    if (item.node.hidden) continue;
+    if (item.kind === "user" && previous?.kind === "user"
+      && ((ui.pending.has(item.id) && ui.pending.has(previous.id))
+        || (item.inputBatch != null && item.inputBatch === previous.inputBatch))) {
+      previous.node.classList.add("user-joined-after");
+      item.node.classList.add("user-joined-before");
+    }
+    previous = item;
+  }
+}
+
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
   let item = ui.entries.get(id);
@@ -476,12 +590,15 @@ function putEntry(ui, entry, delta = false) {
       }
     }
     ui.trace.append(node);
-    item = { id, node, body, kind, text: "" };
+    item = { id, node, body, kind, text: "", groupChanged: true };
     ui.entries.set(id, item);
     if (kind === "user") ui.pending.add(id);
   }
+  const batchChanged = !delta && item.inputBatch !== entry.input_batch;
+  if (batchChanged) item.groupChanged = true;
+  if (!delta) item.inputBatch = entry.input_batch;
   const text = delta ? item.text + (entry.text || "") : (entry.text || "");
-  if (text !== item.text || !item.rendered) {
+  if (text !== item.text || !item.rendered || batchChanged) {
     item.text = text;
     if (!item.renderScheduled) {
       item.renderScheduled = true;
@@ -491,6 +608,10 @@ function putEntry(ui, entry, delta = false) {
         rememberPosition(ui);
         renderEntry(ui, item);
         item.rendered = true;
+        if (item.groupChanged) {
+          groupUserEntries(ui);
+          item.groupChanged = false;
+        }
         restorePosition(ui);
       });
     }
@@ -498,10 +619,13 @@ function putEntry(ui, entry, delta = false) {
 }
 
 function setPending(ui, pending) {
+  rememberPosition(ui);
   ui.pending = new Set(pending);
   for (const item of ui.entries.values()) {
     if (item.kind === "user") item.node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   }
+  groupUserEntries(ui);
+  restorePosition(ui);
 }
 
 function snapshot(views) {
@@ -559,6 +683,8 @@ function startEvents() {
       if (!ui) return;
       if (message.type === "closed") { removeSession(ui); return; }
       if (message.type === "input") {
+        const item = ui.entries.get(String(message.id));
+        if (item) item.inputBatch = message.input_batch;
         ui.pending.delete(String(message.id));
         setPending(ui, ui.pending);
       }
@@ -572,8 +698,68 @@ function startEvents() {
 function attachTerminal(info) {
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
-  const ui = makePane(`Terminal ${id.replace(/^term-/, "").slice(0, 8)}`, info.cwd, "terminal");
-  ui.title.title = id;
+  const ui = makePane(info.name || "#?", info.cwd, "terminal");
+  ui.id = id;
+  ui.title.title = "Double-click or press F2 to rename";
+  ui.title.tabIndex = 0;
+  function setName(name) {
+    ui.name = name || "#?";
+    ui.title.textContent = ui.name;
+    ui.pane.setAttribute("aria-label", ui.name);
+    ui.close.setAttribute("aria-label", `Close ${ui.name}`);
+  }
+  setName(info.name);
+  ui.setName = setName;
+  let editing = false;
+  function rename() {
+    if (editing) return;
+    editing = true;
+    const input = element("input", "pane-name-input");
+    input.type = "text";
+    input.value = ui.name;
+    input.maxLength = 128;
+    input.size = Math.max(4, Math.min(24, ui.name.length + 2));
+    input.setAttribute("aria-label", "Terminal name");
+    ui.title.hidden = true;
+    ui.title.after(input);
+    let saving = false;
+    function finish() {
+      if (!editing) return;
+      editing = false;
+      input.remove();
+      ui.title.hidden = false;
+    }
+    input.addEventListener("keydown", async event => {
+      if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") { finish(); ui.title.focus({ preventScroll: true }); return; }
+      if (saving) return;
+      const name = input.value.trim();
+      if (!name) { input.select(); return; }
+      saving = true;
+      input.disabled = true;
+      try {
+        const summary = await request(`/api/terminals/${encodeURIComponent(id)}`, "PATCH", { name });
+        setName(summary.name);
+        ui.error.hidden = true;
+        finish();
+        ui.title.focus({ preventScroll: true });
+      } catch (error) {
+        saving = false;
+        input.disabled = false;
+        showError(ui.error, error);
+        input.focus({ preventScroll: true });
+      }
+    });
+    input.addEventListener("blur", () => { if (!saving) finish(); });
+    input.focus({ preventScroll: true });
+    input.select();
+  }
+  ui.title.addEventListener("dblclick", rename);
+  ui.title.addEventListener("keydown", event => {
+    if (event.key === "F2") { event.preventDefault(); rename(); }
+  });
   const close = ui.close;
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
@@ -629,6 +815,7 @@ function attachTerminal(info) {
           return;
         }
         const message = JSON.parse(event.data);
+        if (message.type === "name") setName(message.name);
         if (message.type === "hello") clientId = message.id;
         if (message.type === "replay_start") {
           replaying = true;
@@ -654,6 +841,7 @@ function attachTerminal(info) {
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
+        if (current) setName(current.name);
         if (!current || !current.running) { ui.status.textContent = "exited"; return; }
       } catch (error) {
         if (error.status === 401) { requireLogin(); return; }
@@ -672,10 +860,20 @@ function attachTerminal(info) {
     if (host.contains(document.activeElement)) takeControl();
   }
   window.addEventListener("focus", resumeControl);
-  const observer = new ResizeObserver(() => {
-    if (host.clientWidth > 0 && host.clientHeight > 0) resize();
+  const screen = host.querySelector(".xterm-screen");
+  const viewport = host.querySelector(".xterm-viewport");
+  let scrollbarIdle;
+  viewport.addEventListener("scroll", () => {
+    host.classList.add("scrolling");
+    clearTimeout(scrollbarIdle);
+    scrollbarIdle = setTimeout(() => host.classList.remove("scrolling"), 100);
+  }, { passive: true });
+  const observer = new ResizeObserver(entries => {
+    host.style.setProperty("--terminal-track-edge", `${viewport.getBoundingClientRect().left + viewport.clientWidth - host.getBoundingClientRect().left}px`);
+    if (entries.some(entry => entry.target === host) && host.clientWidth > 0 && host.clientHeight > 0) resize();
   });
   observer.observe(host);
+  observer.observe(screen);
   close.addEventListener("click", async () => {
     close.disabled = true;
     try {
@@ -684,6 +882,7 @@ function attachTerminal(info) {
       clearTimeout(retry);
       socket?.close();
       observer.disconnect();
+      clearTimeout(scrollbarIdle);
       window.removeEventListener("focus", resumeControl);
       term.dispose();
       if (selected === ui.pane) selected = null;
@@ -758,7 +957,7 @@ async function connect(token) {
   const list = await request("/api/terminals");
   for (const info of list) {
     const existing = terminals.get(String(info.id));
-    if (existing) existing.reconnect();
+    if (existing) { existing.setName(info.name); existing.reconnect(); }
     else attachTerminal(info);
   }
 }
@@ -788,9 +987,15 @@ document.addEventListener("focusin", event => {
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
-  if (!event.defaultPrevented && !event.isComposing && !dialog.open
+  const picker = [...sessions.values()].find(ui => ui.pane === selected && !ui.modelPicker.hidden);
+  if (picker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
+    event.preventDefault();
+    closeModelPicker(picker);
+    return;
+  }
+  if (!event.defaultPrevented && !event.isComposing && !dialog.open && !picker
       && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
-      && !event.target.closest("input, textarea, [contenteditable]")) {
+      && !event.target.closest("input, textarea, [contenteditable], .model-picker")) {
     const selection = window.getSelection();
     const reader = selection && !selection.isCollapsed && [...sessions.values()].find(ui =>
       ui.trace.contains(selection.anchorNode) && ui.trace.contains(selection.focusNode));

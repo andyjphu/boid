@@ -255,6 +255,12 @@ Sophisticated communication can coexist with a small visible interface.
 Memory use matters, but no comparison between the proposed web client and
 Andy's VS Code setup has been measured.
 
+Small details carry substantial weight in Andy's design judgment. Alignment,
+spacing, scroll response and motion deserve deliberate choices even in a
+minimal interface. Judge their combined effect during actual use; a working
+feature can still feel wrong. See the [scrollbar example](cases/audience-before-interface.md#small-details-and-design-taste)
+for the corrections and Andy's assessment.
+
 ### Possibilities, not commitments
 
 Andy may want more agents than visible panes, agents influencing their own
@@ -374,8 +380,7 @@ context, and load lessons when relevant.
 
 Andy called the deployed version "best work so far" and requested a pin on
 2026-11-08. Tag `v0.5` points to `7b99a98`, the deployed implementation.
-Preserve this as the accepted baseline for subsequent changes. PR #5 remains
-unmerged until Andy approves it.
+Preserve this as the accepted baseline for subsequent changes. PR #5 was merged with Andy's approval; v0.6 starts from merged main.
 
 The accepted pane uses 11px plain text, 4px side padding, one-line collapsed
 tool calls with one expansion control, and Working / Esc-to-interrupt status.
@@ -384,17 +389,34 @@ composer appears on hover, keyboard focus, or with a draft. Debug UI assets
 load from disk on refresh. See [tools](tools.md) for current behavior and the
 [audience case](cases/audience-before-interface.md) for the decisions behind it.
 
-### v0.6 backlog
+### v0.6 work
 
 - Remove the Boid title and replace the full workspace header with one divided
-  pill for New agent / New terminal, floating at the top center to maximize
-  workspace space (Andy, 2026-11-08).
+  pill labeled + agent / + terminal, floating at the top center. Use equal-width
+  halves so the divider is centered on the viewport (Andy, 2026-11-08).
+- Use compact square tab-shaped pane headers with terminal/bot icons and the close
+  control on the left. Terminals start as #1, #2, etc. and can be renamed;
+  the working directory retains its muted appearance. Pane frames meet with
+  shared 1px borders and no gaps or outer workspace padding. Terminal scroll
+  thumbs fill their track, with a very faint full-height divider.
+- Condense queued and same-batch messages, distinguish pending input by its
+  background, and collapse the unused composer so progress sits below the stream.
+  Disable browser text assistance in input fields.
 - Rework reasoning presentation. Andy requested reasoning be hidden in every
   pane for PR #5; retain its events in the full record while it is hidden.
-- Add Daybreak support, carried from the earlier v5 backlog by Andy's instruction
-  to pin this version and acknowledge the backlog for v0.6. Determine the
-  required provider/model support and configuration; the current reasoning
-  summary stream does not establish Daybreak support.
+- Add `/model` with Codex's keyboard picker pattern. Andy selected one profile
+  for now: GPT-6 Sol, medium, Daybreak. The server and displayed profile must
+  agree; selecting a command must not send it to the agent.
+- Daybreak Blue is verified with the existing key on `gpt-6-sol`. Use that exact
+  model with medium effort as Andy subsequently requested. Daybreak access and
+  reasoning presentation are separate; raw reasoning availability is not
+  established by this setting.
+
+### v2 backlog
+
+- Multiple agent/terminal views per pane, selected through tabs. A right-aligned
+  + control appears on hover to create another view. Andy explicitly deferred
+  this until after initial Boid validation; v0.6 only changes the tab appearance.
 
 ### Later decisions
 
