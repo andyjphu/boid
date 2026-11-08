@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
@@ -29,6 +30,8 @@ pub struct View {
     pub profile: Value,
     pub cwd: String,
     pub status: String,
+    #[serde(default)]
+    pub working_since_ms: Option<u64>,
     pub entries: Vec<Entry>,
     pub pending: Vec<String>,
     #[serde(default)]
@@ -151,6 +154,7 @@ impl Hub {
             }
             record.view.profile["model"] = json!(record.engine.model);
             record.paused = true;
+            record.view.working_since_ms = None;
             record.view.status = if record.view.archived {
                 "archived"
             } else {
@@ -269,6 +273,21 @@ impl Hub {
         }
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
+        next.view.working_since_ms = if next.view.status == "working" {
+            let previous = if handle.record.view.status == "working" {
+                handle.record.view.working_since_ms
+            } else {
+                None
+            };
+            Some(previous.unwrap_or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            }))
+        } else {
+            None
+        };
         self.0
             .store
             .save(id, &next)
@@ -304,8 +323,10 @@ impl Hub {
                 events.push(event);
             }
         }
-        if current.view.status != previous.view.status {
-            events.push(json!({"type":"status","session_id":id,"status":current.view.status}));
+        if current.view.status != previous.view.status
+            || current.view.working_since_ms != previous.view.working_since_ms
+        {
+            events.push(json!({"type":"status","session_id":id,"status":current.view.status,"working_since_ms":current.view.working_since_ms}));
         }
         if current.view.archived
             && current.view.status == "archived"
@@ -328,6 +349,7 @@ impl Hub {
             handle.storage_error = Some(message.clone());
             handle.record.paused = true;
             handle.record.view.status = "error".into();
+            handle.record.view.working_since_ms = None;
             handle.halt.send_replace(());
             let entry = Self::make_entry("error", message);
             handle.record.view.entries.push(entry.clone());
@@ -337,7 +359,7 @@ impl Hub {
             );
             self.emit(
                 &mut data,
-                json!({"type":"status","session_id":id,"status":"error"}),
+                json!({"type":"status","session_id":id,"status":"error","working_since_ms":null}),
             );
         }
     }
@@ -465,6 +487,7 @@ impl Hub {
             profile: engine.profile.clone(),
             cwd: cwd.to_string_lossy().into_owned(),
             status: "idle".into(),
+            working_since_ms: None,
             entries: vec![Self::make_entry(
                 "context",
                 format!(
@@ -612,6 +635,7 @@ impl Hub {
         let mut record = h.record.clone();
         record.view.archived = false;
         record.view.status = "stopped".into();
+        record.view.working_since_ms = None;
         record.paused = true;
         self.0.store.save(id, &record)?;
         data.sessions.remove(id);
@@ -1263,6 +1287,7 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(hub.view(&view.id).unwrap().working_since_ms.is_some());
         let queued = hub.message(&view.id, "Queued before crash".into()).unwrap();
         // Abort without graceful shutdown or interruption accounting: the
         // persisted intent must reconcile an already-started side effect.
@@ -1289,6 +1314,7 @@ mod tests {
         let restored = Hub::open(client, state.path().into()).unwrap();
         let recovered = restored.view(&view.id).unwrap();
         assert_eq!(recovered.status, "stopped");
+        assert_eq!(recovered.working_since_ms, None);
         assert_eq!(recovered.profile, view.profile);
         assert_eq!(recovered.pending, vec![queued]);
         assert!(
@@ -1388,6 +1414,57 @@ mod tests {
         reopened.shutdown().await;
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn working_time_survives_updates_and_reconnect_until_status_changes() {
+        let state = tempfile::tempdir().unwrap();
+        let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+        let view = hub
+            .create(Create {
+                name: "clock".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        assert_eq!(view.working_since_ms, None);
+        let (_, mut events) = hub.subscribe();
+        hub.status(&view.id, "working");
+        let started = hub.view(&view.id).unwrap().working_since_ms.unwrap();
+        assert!(started > 0);
+        let event = events.try_recv().unwrap();
+        assert_eq!(event["working_since_ms"], started);
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        hub.status(&view.id, "working");
+        hub.entry(&view.id, "notice", "Uninterrupted work");
+        assert_eq!(hub.view(&view.id).unwrap().working_since_ms, Some(started));
+        let (snapshot, _) = hub.subscribe();
+        assert_eq!(snapshot["sessions"][0]["working_since_ms"], started);
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(
+                state
+                    .path()
+                    .join("sessions")
+                    .join(format!("{}.json", view.id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["view"]["working_since_ms"], started);
+        hub.status(&view.id, "idle");
+        assert_eq!(hub.view(&view.id).unwrap().working_since_ms, None);
+        let mut cleared = false;
+        while let Ok(event) = events.try_recv() {
+            if event["type"] == "status" && event["status"] == "idle" {
+                cleared = event["working_since_ms"].is_null();
+            }
+        }
+        assert!(cleared);
+        hub.status(&view.id, "working");
+        assert!(hub.view(&view.id).unwrap().working_since_ms.unwrap() > started);
+        hub.close(&view.id).await.unwrap();
+        assert_eq!(hub.view(&view.id).unwrap().working_since_ms, None);
+        hub.shutdown().await;
     }
 
     #[tokio::test]
