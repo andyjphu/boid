@@ -15,7 +15,6 @@ const sessionLifecycle = new Map();
 let events;
 const drafts = new Map();
 let paneOrder = [];
-let savedHistory = new Set();
 let orderKey = "";
 let catalogReady = false;
 let reconcilingCatalog = false;
@@ -28,7 +27,6 @@ function loadPaneOrder(cwd) {
     const saved = JSON.parse(sessionStorage.getItem(key) || "null");
     const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
-    savedHistory = new Set((saved?.history || []).filter(key => valid(key) && key.startsWith("terminal:")));
     for (const draft of saved?.drafts || []) {
       if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) {
         const restored = { ...draft };
@@ -38,7 +36,7 @@ function loadPaneOrder(cwd) {
         addSetup(restored);
       }
     }
-  } catch { paneOrder = []; savedHistory.clear(); }
+  } catch { paneOrder = []; }
 }
 
 function rememberPaneOrder() {
@@ -54,7 +52,6 @@ function rememberPaneOrder() {
   try {
     sessionStorage.setItem(orderKey, JSON.stringify({
       version: 2, order: paneOrder,
-      history: [...terminals.values()].filter(ui => ui.history).map(ui => `terminal:${ui.id}`),
       drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
     }));
   } catch { /* Storage availability must not prevent session access. */ }
@@ -714,11 +711,6 @@ function snapshot(views, terminalViews = []) {
   terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   reconcilingCatalog = true;
   reconcileTerminals(terminalViews);
-  if (!catalogReady) {
-    for (const info of terminalViews) {
-      if (info.archived && savedHistory.has(`terminal:${info.id}`)) attachTerminal(info, true);
-    }
-  }
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
@@ -804,15 +796,16 @@ function reconcileTerminals(infos) {
   for (const info of infos) terminalCatalog.set(String(info.id), info);
   for (const [id, ui] of terminals) {
     const info = terminalCatalog.get(id);
-    if (!info || (info.archived && !ui.history)) ui.dispose();
+    if (!info || info.archived || !info.running) ui.dispose();
     else ui.update(info);
   }
   for (const info of infos) {
-    if (!info.archived && !terminals.has(String(info.id))) attachTerminal(info);
+    if (info.running && !info.archived && !terminals.has(String(info.id))) attachTerminal(info);
   }
 }
 
-function attachTerminal(info, history = false) {
+function attachTerminal(info) {
+  if (!info.running || info.archived) return;
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
   const ui = makePane(info.name || "#?", info.cwd, "terminal", id);
@@ -877,9 +870,7 @@ function attachTerminal(info, history = false) {
   ui.title.addEventListener("keydown", event => {
     if (event.key === "F2") { event.preventDefault(); rename(); }
   });
-  ui.history = history;
   const close = ui.close;
-  if (history) close.title = "Close retained terminal record";
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
   const term = new Terminal({
@@ -913,7 +904,7 @@ function attachTerminal(info, history = false) {
     if (closed) return;
     clearTimeout(retry);
     if (socket) { socket.onclose = null; socket.close(); }
-    ui.status.textContent = info.running ? "" : (info.status || "ended");
+    ui.status.textContent = "";
     ui.pane.classList.add("disconnected");
     term.options.disableStdin = true;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -961,11 +952,7 @@ function attachTerminal(info, history = false) {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
         if (!current) { ui.dispose(); return; }
-        if (!current.running) {
-          ui.update(current);
-          ui.pane.classList.remove("disconnected");
-          return;
-        }
+        if (!current.running || current.archived) { ui.dispose(); return; }
       } catch (error) {
         if (error.status === 401) { requireLogin(); return; }
       }
@@ -1013,16 +1000,16 @@ function attachTerminal(info, history = false) {
     layout();
   };
   ui.update = latest => {
+    if (!latest.running || latest.archived) { ui.dispose(); return; }
     info = latest;
     setName(info.name);
     ui.directory.textContent = info.cwd || "";
     ui.directory.title = (info.cwd || "") + (info.running && info.cwd_observed === false ? " (last known directory)" : "");
-    ui.status.textContent = info.running ? "" : (info.status || "ended");
+    ui.status.textContent = "";
     if (info.persistence_error) showError(ui.error, `History could not be saved: ${info.persistence_error}`);
     if (!info.running) term.options.disableStdin = true;
   };
   close.addEventListener("click", async () => {
-    if (ui.history) { ui.dispose(); return; }
     close.disabled = true;
     try {
       await request(`/api/terminals/${encodeURIComponent(id)}`, "DELETE");
