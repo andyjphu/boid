@@ -190,8 +190,14 @@ earlier failures to carry the meaning of feedback beyond its example;
 of a mechanism while retaining the original purposes. Similarity is a reason
 to compare their evidence, not proof of one cause or a population frequency.
 
-Next evidence: live outcome after the backend repair is deployed, later
-operator feedback, and whether a worker exposed to this case handles a related
-task with less corrective effort. Retain any recurrence and the guidance
+Later update, 2026-11-08: Ursa reports that Andy authorized the restart and
+`36351e2` is now deployed to the v7 preview. He verified the executable hash,
+retained the prior agent transcript by prefix hash, and recovered four terminal
+identities without automatically replacing their ended shells. The earlier
+isolated-only state above is historical and superseded by this attributed
+deployment report. Catastrophe has not independently repeated the live check.
+
+Next evidence: operator feedback after the deployed repair, and whether a
+worker exposed to this case handles a related task with less corrective effort. Retain any recurrence and the guidance
 version that preceded it. Do not mark the learning hypothesis resolved merely
 because this case was written or read.
