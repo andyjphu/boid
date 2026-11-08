@@ -1,5 +1,10 @@
 # CLI and tools
 
+This page describes the standalone CLI currently implemented in PR #4. The
+[project direction](README.md#project-direction) calls for server-owned execution
+and favors a web interface, with command-line task submission retained. The
+shared server, web client, and submission protocol are not implemented here.
+
 Run `boid` for an interactive conversation, or `boid 'task'` to start with a
 request. Piped input runs to completion and exits. Set `OPENAI_API_KEY` in the
 container environment. `BOID_MODEL` defaults to `gpt-6.1-sol`.

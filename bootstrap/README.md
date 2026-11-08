@@ -208,6 +208,10 @@ Andy strongly leans toward a web interface because he anticipates advanced
 swarm interaction and communication. Aim to settle on one interactive interface;
 maintaining CLI and web feature parity is not a requirement. A scriptable server
 and a shell command that starts it do not require a second interactive product.
+Retain command-line task submission such as `boid "message for task"`. In the
+server design, this submits work to the shared server so the same session can
+be observed and controlled from the web interface. The current CLI executes
+locally in its own process; it does not yet perform this submission.
 The pending CLI is existing work, not proof that the final product should be
 terminal-based. The current VS Code layout is evidence of taste, not a complete
 specification to reproduce.
@@ -244,8 +248,11 @@ Use Rust for its compile-time guarantees, speed, and opportunities to reuse
 Codex code. Andy also expects its form to encourage disciplined development.
 The current implementation is v4 / PR #4: a working CLI and agent loop, pending
 review. Version numbers follow PR numbers. The web/server direction above is
-not yet implemented. The design discussion and documentation changes do not
-authorize replacing this code before the implementation scope is settled.
+not yet implemented. PR #4 does not yet satisfy server-owned execution or the
+complete live-view requirement. Its existing validation covers the standalone
+agent loop, not the planned server, browser, or communication protocol. The
+design discussion and documentation changes do not authorize replacing this
+code before the implementation scope is settled.
 
 Use the reusable glob, search, read, write, edit, and command tools from v3.
 Avoid temporary tool-runner subcommands.

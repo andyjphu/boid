@@ -1,9 +1,7 @@
 # Boid
 
-Boid is an agent coding harness with a command-line interface 
-intended to harness the benefits of multi-agent collaboration/swarms, 
-while also addressing the inequities of existing harnesses
-(context compaction losing work, agents not learning from mistakes)
+Boid is an agent swarm harness. It aims to make collaboration useful, preserve
+work across context changes, and help agents learn from mistakes.
 
 The goal is useful work, done quickly and with good judgment. Boid should
 improve with experience and make effective use of agents working together.
