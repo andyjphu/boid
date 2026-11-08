@@ -22,7 +22,8 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Pane titles do not change the layout.
+and real terminal panes. Each has a compact tab header with an icon and a left
+close control. Pane titles do not change the layout.
 Traces show selected instructions and tools, user and peer messages, text,
 tool calls and results, and control events. Provider-exposed reasoning summaries
 are hidden in every pane pending the v0.6 presentation work; events remain in
@@ -110,12 +111,17 @@ The browser and scripts use the same authenticated API:
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
+| `PATCH /api/terminals/{id}` | Rename with `{ "name": "..." }` |
 | `DELETE /api/terminals/{id}` | End and wait for the shell |
 
 Agent behavior can be checked headlessly. Browser checks establish interface
 behavior. Tool unit tests alone do not establish disconnect or coordination behavior.
 
 ## Interactive terminals
+
+Terminals start as #1, #2, etc. Double-click a terminal name to edit it; Enter
+saves and Escape cancels. Renaming updates other views without replacing the
+shell. Names remain for the server process lifetime, like terminal sessions.
 
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×

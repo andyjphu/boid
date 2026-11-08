@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -31,11 +31,13 @@ pub struct TerminalHub(Arc<Hub>);
 struct Hub {
     cwd: PathBuf,
     closing: AtomicBool,
+    next_number: AtomicU64,
     terminals: Mutex<BTreeMap<String, Arc<Terminal>>>,
 }
 
 struct Terminal {
     id: String,
+    name: Mutex<String>,
     cwd: String,
     running: AtomicBool,
     output_done: AtomicBool,
@@ -60,6 +62,7 @@ enum TerminalEvent {
     Data(Vec<u8>),
     Resize(PtySize),
     Control(String),
+    Name(String),
 }
 
 impl TerminalEvent {
@@ -83,6 +86,11 @@ impl TerminalEvent {
                     .to_string()
                     .into(),
             ),
+            Self::Name(name) => Message::Text(
+                serde_json::json!({"type":"name", "name":name})
+                    .to_string()
+                    .into(),
+            ),
         }
     }
 }
@@ -103,7 +111,7 @@ impl Output {
             match old {
                 TerminalEvent::Resize(size) => self.initial_size = size,
                 TerminalEvent::Data(bytes) => self.dropped += bytes.len(),
-                TerminalEvent::Control(_) => {}
+                TerminalEvent::Control(_) | TerminalEvent::Name(_) => {}
             }
         }
         let _ = self.tx.send(event);
@@ -113,6 +121,7 @@ impl Output {
 #[derive(Serialize)]
 struct Summary {
     id: String,
+    name: String,
     cwd: String,
     running: bool,
 }
@@ -123,6 +132,12 @@ struct Create {
     cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +153,7 @@ impl TerminalHub {
         Self(Arc::new(Hub {
             cwd,
             closing: AtomicBool::new(false),
+            next_number: AtomicU64::new(1),
             terminals: Mutex::new(BTreeMap::new()),
         }))
     }
@@ -145,7 +161,7 @@ impl TerminalHub {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/api/terminals", get(list).post(create))
-            .route("/api/terminals/{id}", delete(close))
+            .route("/api/terminals/{id}", delete(close).patch(rename))
             .route("/api/terminals/{id}/ws", get(connect))
             .with_state(self.clone())
     }
@@ -180,7 +196,7 @@ impl TerminalHub {
 }
 
 impl Terminal {
-    fn open(id: String, cwd: PathBuf, size: PtySize) -> anyhow::Result<Arc<Self>> {
+    fn open(id: String, name: String, cwd: PathBuf, size: PtySize) -> anyhow::Result<Arc<Self>> {
         let pair = native_pty_system().openpty(size)?;
         let mut command = CommandBuilder::new_default_prog();
         command.cwd(&cwd);
@@ -193,6 +209,7 @@ impl Terminal {
         drop(pair.slave);
         let terminal = Arc::new(Self {
             id,
+            name: Mutex::new(name),
             cwd: cwd.to_string_lossy().into_owned(),
             running: AtomicBool::new(true),
             output_done: AtomicBool::new(false),
@@ -224,6 +241,7 @@ impl Terminal {
     fn summary(&self) -> Summary {
         Summary {
             id: self.id.clone(),
+            name: self.name.lock().unwrap().clone(),
             cwd: self.cwd.clone(),
             running: self.running.load(Ordering::SeqCst),
         }
@@ -403,7 +421,8 @@ async fn create(
         ));
     }
     let id = format!("term-{}", uuid::Uuid::new_v4());
-    let terminal = tokio::task::spawn_blocking(move || Terminal::open(id, cwd, size))
+    let name = format!("#{}", hub.0.next_number.fetch_add(1, Ordering::SeqCst));
+    let terminal = tokio::task::spawn_blocking(move || Terminal::open(id, name, cwd, size))
         .await
         .map_err(internal)?
         .map_err(internal)?;
@@ -440,6 +459,28 @@ async fn create(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
+    Ok(Json(terminal.summary()))
+}
+
+async fn rename(
+    State(hub): State<TerminalHub>,
+    Path(id): Path<String>,
+    Json(request): Json<Rename>,
+) -> Result<Json<Summary>, Error> {
+    let name = request.name.trim();
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Terminal name must contain 1 to 128 characters without control characters.".into(),
+        ));
+    }
+    let terminal = hub.find(&id)?;
+    {
+        let mut current = terminal.name.lock().unwrap();
+        *current = name.to_owned();
+        let output = terminal.output.lock().unwrap();
+        let _ = output.tx.send(TerminalEvent::Name(current.clone()));
+    }
     Ok(Json(terminal.summary()))
 }
 
@@ -485,6 +526,15 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
         return;
     }
     let (replay, mut output, controller) = terminal.attach();
+    let name = terminal.name.lock().unwrap().clone();
+    if socket
+        .send(TerminalEvent::Name(name).message())
+        .await
+        .is_err()
+    {
+        terminal.release_control(&client_id);
+        return;
+    }
     if replay_to(&mut socket, replay, controller).await.is_err() {
         terminal.release_control(&client_id);
         return;

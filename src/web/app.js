@@ -56,27 +56,35 @@ function layout(event) {
   });
 }
 
+// Microsoft Codicons 0.0.36, CC-BY-4.0; attribution in vendor/codicons-NOTICE.
+function paneIcon(kind) {
+  const icon = element("span", "pane-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = kind === "terminal" ? "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"currentColor\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M1.5 3L3 1.5H21L22.5 3V21L21 22.5H3L1.5 21V3ZM3 3V21H21V3H3Z\"/><path d=\"M7.06078 7.49988L6.00012 8.56054L10.2427 12.8032L6 17.0459L7.06066 18.1066L12 13.1673V12.4391L7.06078 7.49988Z\"/><rect x=\"12\" y=\"16.5\" width=\"6\" height=\"1.5\"/></svg>" : "<svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" xmlns=\"http://www.w3.org/2000/svg\" fill=\"currentColor\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M8.48 4h4l.5.5v2.03h.52l.5.5V8l-.5.5h-.52v3l-.5.5H9.36l-2.5 2.76L6 14.4V12H3.5l-.5-.64V8.5h-.5L2 8v-.97l.5-.5H3V4.36L3.53 4h4V2.86A1 1 0 0 1 7 2a1 1 0 0 1 2 0 1 1 0 0 1-.52.83V4zM12 8V5H4v5.86l2.5.14H7v2.19l1.8-2.04.35-.15H12V8zm-2.12.51a2.71 2.71 0 0 1-1.37.74v-.01a2.71 2.71 0 0 1-2.42-.74l-.7.71c.34.34.745.608 1.19.79.45.188.932.286 1.42.29a3.7 3.7 0 0 0 2.58-1.07l-.7-.71zM6.49 6.5h-1v1h1v-1zm3 0h1v1h-1v-1z\"/></svg>";
+  return icon;
+}
+
 function makePane(name, cwd, kind) {
   const pane = element("section", `pane ${kind}-pane`);
   pane.setAttribute("aria-label", name);
   const header = element("header", "pane-header");
+  const tab = element("div", "pane-tab");
   const title = element("span", "pane-title", name);
   const status = element("span", "pane-status", "idle");
-  header.append(title, status);
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
   directory.title = cwd || "Server working directory";
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  header.append(directory);
   const close = element("button", "pane-close", "×");
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  header.append(close);
+  tab.append(close, paneIcon(kind), title, directory);
+  header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
-  return { pane, header, title, status, directory, error, close };
+  return { pane, header, tab, title, status, directory, error, close };
 }
 
 function removeSession(ui) {
@@ -650,8 +658,68 @@ function startEvents() {
 function attachTerminal(info) {
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
-  const ui = makePane(`Terminal ${id.replace(/^term-/, "").slice(0, 8)}`, info.cwd, "terminal");
-  ui.title.title = id;
+  const ui = makePane(info.name || "#?", info.cwd, "terminal");
+  ui.id = id;
+  ui.title.title = "Double-click or press F2 to rename";
+  ui.title.tabIndex = 0;
+  function setName(name) {
+    ui.name = name || "#?";
+    ui.title.textContent = ui.name;
+    ui.pane.setAttribute("aria-label", ui.name);
+    ui.close.setAttribute("aria-label", `Close ${ui.name}`);
+  }
+  setName(info.name);
+  ui.setName = setName;
+  let editing = false;
+  function rename() {
+    if (editing) return;
+    editing = true;
+    const input = element("input", "pane-name-input");
+    input.type = "text";
+    input.value = ui.name;
+    input.maxLength = 128;
+    input.size = Math.max(4, Math.min(24, ui.name.length + 2));
+    input.setAttribute("aria-label", "Terminal name");
+    ui.title.hidden = true;
+    ui.title.after(input);
+    let saving = false;
+    function finish() {
+      if (!editing) return;
+      editing = false;
+      input.remove();
+      ui.title.hidden = false;
+    }
+    input.addEventListener("keydown", async event => {
+      if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") { finish(); ui.title.focus({ preventScroll: true }); return; }
+      if (saving) return;
+      const name = input.value.trim();
+      if (!name) { input.select(); return; }
+      saving = true;
+      input.disabled = true;
+      try {
+        const summary = await request(`/api/terminals/${encodeURIComponent(id)}`, "PATCH", { name });
+        setName(summary.name);
+        ui.error.hidden = true;
+        finish();
+        ui.title.focus({ preventScroll: true });
+      } catch (error) {
+        saving = false;
+        input.disabled = false;
+        showError(ui.error, error);
+        input.focus({ preventScroll: true });
+      }
+    });
+    input.addEventListener("blur", () => { if (!saving) finish(); });
+    input.focus({ preventScroll: true });
+    input.select();
+  }
+  ui.title.addEventListener("dblclick", rename);
+  ui.title.addEventListener("keydown", event => {
+    if (event.key === "F2") { event.preventDefault(); rename(); }
+  });
   const close = ui.close;
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
@@ -707,6 +775,7 @@ function attachTerminal(info) {
           return;
         }
         const message = JSON.parse(event.data);
+        if (message.type === "name") setName(message.name);
         if (message.type === "hello") clientId = message.id;
         if (message.type === "replay_start") {
           replaying = true;
@@ -732,6 +801,7 @@ function attachTerminal(info) {
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
+        if (current) setName(current.name);
         if (!current || !current.running) { ui.status.textContent = "exited"; return; }
       } catch (error) {
         if (error.status === 401) { requireLogin(); return; }
@@ -836,7 +906,7 @@ async function connect(token) {
   const list = await request("/api/terminals");
   for (const info of list) {
     const existing = terminals.get(String(info.id));
-    if (existing) existing.reconnect();
+    if (existing) { existing.setName(info.name); existing.reconnect(); }
     else attachTerminal(info);
   }
 }

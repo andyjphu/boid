@@ -66,18 +66,31 @@ body.disconnected .workspace-actions,
 }
 .pane-header {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 4px;
-  background: #222;
+  align-items: stretch;
+  background: #181818;
   border-bottom: 1px solid #333;
   flex-shrink: 0;
 }
+.pane-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px;
+  background: #222;
+  border: 1px solid #3d3d3d;
+  border-left: 0;
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+}
+.pane-icon, .pane-icon svg { display: block; width: 14px; height: 14px; flex-shrink: 0; color: #aaa; }
 .pane-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-status { font-size: 11px; color: #aaa; margin-left: auto; white-space: nowrap; order: 2; }
+.pane-title:focus-visible { outline: 1px solid #777; outline-offset: 1px; }
+.pane-name-input { min-width: 4ch; max-width: 24ch; padding: 0 2px; border: 1px solid #555; background: #181818; color: inherit; }
+.pane-status { font-size: 11px; color: #aaa; margin-left: auto; padding: 4px; white-space: nowrap; }
 .pane[data-status="error"] .pane-status { color: #f0a29c; }
 .pane-header button { padding: 1px 5px; font-size: 11px; }
-.pane-header .pane-close { order: 3; border: 0; background: transparent; color: #999; padding: 0 2px; font-size: 17px; line-height: 1; }
+.pane-header .pane-close { flex-shrink: 0; border: 0; background: transparent; color: #999; padding: 0 2px; font-size: 17px; line-height: 1; }
 .pane-header .pane-close:hover { color: #ddd; }
 .pane-cwd {
   margin: 0;

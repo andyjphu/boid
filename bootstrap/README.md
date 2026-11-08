@@ -388,6 +388,9 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
 - Remove the Boid title and replace the full workspace header with one divided
   pill labeled + agent / + terminal, floating at the top center. Use equal-width
   halves so the divider is centered on the viewport (Andy, 2026-11-08).
+- Use compact tab-shaped pane headers with terminal/bot icons and the close
+  control on the left. Terminals start as #1, #2, etc. and can be renamed;
+  the working directory retains its muted appearance.
 - Rework reasoning presentation. Andy requested reasoning be hidden in every
   pane for PR #5; retain its events in the full record while it is hidden.
 - Add `/model` with Codex's keyboard picker pattern. Andy selected one profile
@@ -397,6 +400,12 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
   model with medium effort as Andy subsequently requested. Daybreak access and
   reasoning presentation are separate; raw reasoning availability is not
   established by this setting.
+
+### v2 backlog
+
+- Multiple agent/terminal views per pane, selected through tabs. A right-aligned
+  + control appears on hover to create another view. Andy explicitly deferred
+  this until after initial Boid validation; v0.6 only changes the tab appearance.
 
 ### Later decisions
 
