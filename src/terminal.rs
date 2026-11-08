@@ -217,6 +217,7 @@ impl Journal {
     }
     fn compact(&mut self, meta: &Summary, output: &Output) -> std::io::Result<()> {
         let mut temporary = tempfile::NamedTempFile::new_in(self.path.parent().unwrap())?;
+        let mut bytes = Vec::new();
         for record in [
             Record::Format { version: 1 },
             Record::Meta(meta.clone()),
@@ -226,16 +227,19 @@ impl Journal {
                 dropped: output.dropped,
             },
         ] {
-            serde_json::to_writer(&mut temporary, &record)?;
-            temporary.write_all(b"\n")?;
+            serde_json::to_writer(&mut bytes, &record)?;
+            bytes.push(b'\n');
         }
         for event in &output.history {
             if matches!(event, TerminalEvent::Control(_) | TerminalEvent::Name(_)) {
                 continue;
             }
-            serde_json::to_writer(&mut temporary, &Record::Event(StoredEvent::from(event)))?;
-            temporary.write_all(b"\n")?;
+            serde_json::to_writer(&mut bytes, &Record::Event(StoredEvent::from(event)))?;
+            bytes.push(b'\n');
         }
+        // Serialize in memory: JSON byte arrays otherwise cause a filesystem
+        // write per number/delimiter, which stalls cross-VM bind mounts.
+        temporary.write_all(&bytes)?;
         temporary.as_file().sync_data()?;
         temporary.persist(&self.path).map_err(|error| error.error)?;
         self.file = OpenOptions::new().append(true).open(&self.path)?;
@@ -444,7 +448,7 @@ impl Terminal {
             }
         }
         if changed {
-            if let Err(error) = self.checkpoint() {
+            if let Err(error) = self.checkpoint_metadata() {
                 *self.persistence_error.lock().unwrap() = Some(error.to_string());
             }
             self.catalog
@@ -559,6 +563,16 @@ impl Terminal {
         self.checkpoint()?;
         self.catalog
             .terminal_upsert(serde_json::to_value(self.summary())?);
+        Ok(())
+    }
+
+    fn checkpoint_metadata(&self) -> anyhow::Result<()> {
+        // Metadata does not rewrite replay or hold the PTY output lock. Read the
+        // current summary under the journal lock so concurrent updates cannot
+        // append an older summary after a newer checkpoint.
+        let mut journal = self.journal.lock().unwrap();
+        journal.append(&Record::Meta(self.summary()))?;
+        journal.file.sync_data()?;
         Ok(())
     }
 
@@ -779,34 +793,41 @@ async fn create(
     let monitoring = terminal.clone();
     tokio::spawn(async move {
         while monitoring.running.load(Ordering::SeqCst) {
-            let outcome = {
-                let Some(live) = monitoring.live() else {
-                    break;
+            let polling = monitoring.clone();
+            let poll = tokio::task::spawn_blocking(move || {
+                let monitoring = polling;
+                let outcome = {
+                    let Some(live) = monitoring.live() else {
+                        return;
+                    };
+                    let mut child = live.child.lock().unwrap();
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            monitoring.running.store(false, Ordering::SeqCst);
+                            Some(format!("\r\n[Shell exited: {status}]\r\n"))
+                        }
+                        Err(error) => Some(format!("\r\n[Shell status error: {error}]\r\n")),
+                        Ok(None) => {
+                            monitoring.observe_cwd(child.process_id());
+                            None
+                        }
+                    }
                 };
-                let mut child = live.child.lock().unwrap();
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        monitoring.running.store(false, Ordering::SeqCst);
-                        Some(format!("\r\n[Shell exited: {status}]\r\n"))
+                if let Some(message) = outcome {
+                    *monitoring.status.lock().unwrap() = "exited".into();
+                    monitoring.running.store(false, Ordering::SeqCst);
+                    monitoring.live.lock().unwrap().take();
+                    monitoring.publish(message.into_bytes());
+                    if let Err(error) = monitoring.checkpoint() {
+                        *monitoring.persistence_error.lock().unwrap() = Some(error.to_string());
                     }
-                    Err(error) => Some(format!("\r\n[Shell status error: {error}]\r\n")),
-                    Ok(None) => {
-                        monitoring.observe_cwd(child.process_id());
-                        None
-                    }
+                    monitoring
+                        .catalog
+                        .terminal_upsert(serde_json::to_value(monitoring.summary()).unwrap());
                 }
-            };
-            if let Some(message) = outcome {
-                *monitoring.status.lock().unwrap() = "exited".into();
-                monitoring.running.store(false, Ordering::SeqCst);
-                monitoring.live.lock().unwrap().take();
-                monitoring.publish(message.into_bytes());
-                if let Err(error) = monitoring.checkpoint() {
-                    *monitoring.persistence_error.lock().unwrap() = Some(error.to_string());
-                }
-                monitoring
-                    .catalog
-                    .terminal_upsert(serde_json::to_value(monitoring.summary()).unwrap());
+            })
+            .await;
+            if poll.is_err() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -829,7 +850,11 @@ async fn rename(
     }
     let terminal = hub.find(&id)?;
     *terminal.name.lock().unwrap() = name.to_owned();
-    terminal.checkpoint().map_err(internal)?;
+    let saving = terminal.clone();
+    tokio::task::spawn_blocking(move || saving.checkpoint_metadata())
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
     let summary = terminal.summary();
     terminal
         .catalog
@@ -1050,6 +1075,32 @@ mod persistence_tests {
         .unwrap();
         assert_eq!(terminal.summary().cwd, destination.to_string_lossy());
         assert_eq!(changed["terminal"]["running"], true);
+        let Json(renamed) = rename(
+            State(hub.clone()),
+            Path(created.id.clone()),
+            Json(Rename {
+                name: "Retained shell".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.name, "Retained shell");
+        // Recover a copy before End: cwd/name journal records must themselves
+        // be durable, without relying on the full close checkpoint.
+        let copy = state.path().join("metadata-recovery.jsonl");
+        fs::copy(
+            state
+                .path()
+                .join("terminals")
+                .join(format!("{}.jsonl", created.id)),
+            &copy,
+        )
+        .unwrap();
+        let from_metadata = Terminal::restore(copy, catalog.clone()).unwrap();
+        assert_eq!(from_metadata.summary().cwd, destination.to_string_lossy());
+        assert_eq!(from_metadata.summary().name, "Retained shell");
+        assert!(from_metadata.summary().cwd_observed);
+        assert!(from_metadata.live().is_none());
         close(State(hub.clone()), Path(created.id.clone()))
             .await
             .unwrap();
