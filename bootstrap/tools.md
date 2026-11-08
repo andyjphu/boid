@@ -4,7 +4,7 @@ Run `boid serve` (or `boid` with no arguments) inside the task container. The
 shared server listens on `127.0.0.1:7734` by default and prints a browser URL.
 A second server cannot bind the same address. `BOID_LISTEN` changes the listener;
 no system service is installed. Set `OPENAI_API_KEY`; `BOID_MODEL` defaults to
-`gpt-6.1-sol`.
+`gpt-6-sol`, with medium reasoning effort and Daybreak Blue.
 
 `boid "task"` submits to the running server, prints its session ID, and exits.
 `BOID_URL` selects a server. `BOID_CWD` optionally selects a directory as seen
@@ -79,6 +79,18 @@ The Responses client streams with `store: false`, explicit conversation input,
 and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
 context. API failures are reported without automatic retries. Runtime guidance
 is compiled from `src/PRINCIPLES.md`; parent/bootstrap discovery is not automatic.
+
+The active v0.6 profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
+local keyboard picker for that single profile; Enter confirms and Escape closes
+it. The command is not sent to an agent. The picker reads server configuration,
+so it does not imply an unavailable model was activated.
+
+Requests send `reasoning.effort: medium` and `access_programs.cyber: daybreak_blue`
+by default. `BOID_CYBER_ACCESS_PROGRAM` can explicitly select `standard`,
+`daybreak_blue`, or `daybreak_red` for a compatible model/project. An incompatible
+selection returns its API error without switching models or falling back.
+Daybreak does not select a reasoning stream. See the
+[OpenAI Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak).
 
 ## Headless routes
 

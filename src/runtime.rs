@@ -85,7 +85,9 @@ impl Hub {
         })))
     }
     pub fn config(&self) -> Value {
-        json!({"cwd": self.0.cwd, "model": self.0.client.model})
+        let mut config = self.0.client.config();
+        config["cwd"] = json!(self.0.cwd);
+        config
     }
     pub fn views(&self) -> Vec<View> {
         self.0

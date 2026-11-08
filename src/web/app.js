@@ -143,6 +143,48 @@ function followLatest(ui) {
   });
 }
 
+function closeModelPicker(ui) {
+  ui.modelPicker.hidden = true;
+  ui.composer.hidden = false;
+  ui.activity.lastChild.textContent = " · Esc to interrupt";
+  ui.input.focus({ preventScroll: true });
+}
+
+async function openModelPicker(ui) {
+  ui.slashSuggestion.hidden = true;
+  ui.composer.hidden = true;
+  ui.modelPicker.hidden = false;
+  ui.activity.lastChild.textContent = "";
+  ui.modelAvailable = false;
+  ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
+  ui.modelPicker.focus({ preventScroll: true });
+  try {
+    const config = await request("/api/config");
+    if (ui.modelPicker.hidden) return;
+    ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
+      && config.cyber_access_program === "daybreak_blue";
+    const option = element("div", "model-option", "GPT-6 Sol · Medium · Daybreak" + (ui.modelAvailable ? " (current)" : ""));
+    option.tabIndex = 0;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(ui.modelAvailable));
+    option.setAttribute("aria-disabled", String(!ui.modelAvailable));
+    option.addEventListener("click", () => { if (ui.modelAvailable) closeModelPicker(ui); });
+    const choices = element("div", "model-options");
+    choices.setAttribute("role", "listbox");
+    choices.setAttribute("aria-label", "Model and effort");
+    choices.append(option);
+    ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), choices);
+    if (!ui.modelAvailable) {
+      const current = [config.model, config.reasoning_effort, config.cyber_access_program].filter(Boolean).join(" · ");
+      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This profile is unavailable on this server.`));
+    }
+    ui.modelPicker.append(element("div", "model-hint", "Enter select · Esc back"));
+    option.focus({ preventScroll: true });
+  } catch (error) {
+    if (!ui.modelPicker.hidden) { closeModelPicker(ui); showError(ui.error, error); }
+  }
+}
+
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
@@ -157,6 +199,24 @@ function addSession(view) {
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
+  ui.modelPicker = element("div", "model-picker");
+  ui.modelPicker.hidden = true;
+  ui.modelPicker.tabIndex = -1;
+  ui.modelPicker.setAttribute("role", "dialog");
+  ui.modelPicker.setAttribute("aria-label", "Select model and effort");
+  ui.modelPicker.addEventListener("keydown", event => {
+    if (event.isComposing) return;
+    if (["Escape", "Enter", "ArrowUp", "ArrowDown", "Tab"].includes(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape" || (event.key === "Enter" && ui.modelAvailable)) closeModelPicker(ui);
+      else ui.modelPicker.querySelector(".model-option")?.focus({ preventScroll: true });
+    }
+  });
+  ui.slashSuggestion = element("div", "slash-suggestion", "/model  Select model and effort");
+  ui.slashSuggestion.hidden = true;
+  ui.slashSuggestion.addEventListener("mousedown", event => event.preventDefault());
+  ui.slashSuggestion.addEventListener("click", () => { ui.input.value = "/model"; ui.composer.requestSubmit(); });
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
   ui.input.rows = 1;
@@ -173,14 +233,16 @@ function addSession(view) {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.error, ui.activity, ui.composer);
+  ui.pane.append(ui.trace, ui.error, ui.activity, ui.modelPicker, ui.slashSuggestion, ui.composer);
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
+    const text = ui.input.value.trim();
+    ui.slashSuggestion.hidden = ui.slashDismissed || !text || !"/model".startsWith(text) || ui.input.value.includes("\n");
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; resizeInput(); });
+  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -196,6 +258,14 @@ function addSession(view) {
     } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
   });
   ui.input.addEventListener("keydown", event => {
+    if (!event.isComposing && !ui.slashSuggestion.hidden && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (["Escape", "Tab", "ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "Escape") { ui.slashDismissed = true; ui.slashSuggestion.hidden = true; }
+        if (event.key === "Tab") { ui.input.value = "/model"; resizeInput(); }
+        return;
+      }
+    }
     if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
         && ui.input.selectionStart === ui.input.selectionEnd) {
       const prompts = [...ui.entries.values()].filter(item => item.kind === "user").map(item => item.text);
@@ -220,6 +290,13 @@ function addSession(view) {
     event.preventDefault();
     if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
+    if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
+      ui.input.value = "";
+      historyIndex = null;
+      resizeInput();
+      await openModelPicker(ui);
+      return;
+    }
     ui.sending = true;
     ui.error.hidden = true;
     try {
@@ -241,6 +318,7 @@ function addSession(view) {
 function setStatus(ui, status) {
   ui.pane.dataset.status = status || "idle";
   ui.activity.hidden = status !== "working";
+  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
   ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
 }
 
@@ -788,9 +866,15 @@ document.addEventListener("focusin", event => {
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
-  if (!event.defaultPrevented && !event.isComposing && !dialog.open
+  const picker = [...sessions.values()].find(ui => ui.pane === selected && !ui.modelPicker.hidden);
+  if (picker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
+    event.preventDefault();
+    closeModelPicker(picker);
+    return;
+  }
+  if (!event.defaultPrevented && !event.isComposing && !dialog.open && !picker
       && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
-      && !event.target.closest("input, textarea, [contenteditable]")) {
+      && !event.target.closest("input, textarea, [contenteditable], .model-picker")) {
     const selection = window.getSelection();
     const reader = selection && !selection.isCollapsed && [...sessions.values()].find(ui =>
       ui.trace.contains(selection.anchorNode) && ui.trace.contains(selection.focusNode));
