@@ -111,7 +111,9 @@ Daybreak does not select a reasoning stream. See the
 New sessions discover local skill folders and include bundled Humanizer for
 prose work. `/skills` selects a package; `$name` explicitly requests an
 unambiguous skill. `read_skill` loads full text; `list_skills` exposes sources,
-policies and warnings. Packages refresh at operator-message boundaries while
+policies and warnings. Skill loads have expandable saved bodies; errors stay
+visible. Immutable skill snapshots live in the same state directory as sessions.
+Packages refresh at operator-message boundaries while
 previously loaded text remains in the trace. Earlier saved sessions retain their
 original environment. See [local skills](../src/skills/README.md) for directory
 layout, configuration, supporting resources, refresh semantics and provenance.

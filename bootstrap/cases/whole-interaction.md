@@ -3,7 +3,7 @@
 2026-11-08. Boid v0.6 to v0.7. Prepared by Agent Catastrophe.
 
 Andy called this a crucial case and requested that Boid agents see it when
-working on Boid itself. The case joins three related episodes: default-field
+working on Boid itself. The original case joins three related episodes: default-field
 behavior, preservation of terminal styling, and latency introduced by live
 directory labels. The analysis below is preliminary. The source excerpts
 retain both the mistakes and the later successful diagnosis.
@@ -175,7 +175,7 @@ full request rather than replacing it with this list.
 
 ## Sources and continuity
 
-[Source excerpts](evidence/whole-interaction/excerpts.json) contain 23 selected
+[Source excerpts](evidence/whole-interaction/excerpts.json) contain 34 selected
 original visible messages, each with role, timestamp, source file/line, and
 SHA-256 of the original line and extracted text. They include the original
 dense request, intervening agent responses, Catastrophe's full initial
@@ -201,3 +201,54 @@ Next evidence: operator feedback after the deployed repair, and whether a
 worker exposed to this case handles a related task with less corrective effort. Retain any recurrence and the guidance
 version that preceded it. Do not mark the learning hypothesis resolved merely
 because this case was written or read.
+
+
+## Later positive outcome: stable reveal and visible conversation
+
+Added during v0.8 integration, preserving the earlier episodes above. This is
+an explicitly approved result, alongside the earlier mistakes and measured
+repairs. The original visible exchanges are retained as `ursa-13748` through
+`ursa-14543` in the source excerpts.
+
+Andy first described the intended hover behavior in a dense turn (`ursa-13748`).
+It distinguishes revealing the prompt, covering some messages temporarily,
+manually uncovering them, and automatic following of the last message rather
+than the extra scroll space. Ursa restated that distinction (`ursa-13753`), and
+Andy accepted it (`ursa-13760`). The full wording is retained because a rule such
+as “never move the stream” would lose several meanings in that turn.
+
+A later correction (`ursa-14358`, followed by the agent-pane clarification at
+`ursa-14365`) accepted the absence of movement on click but identified a problem
+while composing: the prompt hid the active conversation. Ursa proposed keeping
+hover/click stable while clearing space on typing, submission and followed
+output; history reading would keep its anchor, and an actually hidden prompt
+would restore the ordinary message endpoint (`ursa-14377`).
+
+Andy requested a checkpoint before the trial (`ursa-14384`):
+
+> sure lets try this but first checkpoint this as v0.7.1 (we're still on 0.7 right?) so that i can refer back to this if need be, its already at 95% satisfaction rn
+
+The retained v0.7.1 tag is `4fed21b`. The trial became `1cf12a1`, and Andy then
+said (`ursa-14522`):
+
+> mark this as an extremely good ux result, im not sure what lessojn there is to learn here but it was an amazing result, mark this 0.7.2
+
+The v0.7.2 tag preserves that acceptance. Catastrophe inspected the tagged code,
+Ursa's browser-check source/report and active-conversation screenshot during the
+integration review. The report covered hover/focus stability, typing and new
+output clearance, visible drafts outside pointer hover, multiline shrink,
+normal endpoint after hiding, and history anchors. Those original checks remain
+attributed to Ursa; later v0.8 verification is recorded with that implementation.
+
+Preliminary interpretation: the useful distinction was between passive reveal
+and active conversation, with additional state for history reading and actual
+prompt visibility. The correction refined the first design rather than
+invalidating its accepted parts. The retained checkpoint allowed a reversible
+trial. Andy's explicit approval establishes a successful UX result here; it does
+not establish a universal scrolling rule, that a guidance change caused the
+success, or that future agents have learned the distinction.
+
+For v0.8 this is a concrete baseline: skill selection should participate in the
+same composition behavior, preserve the reserved working footer, and expose
+captured skill content without overwhelming the conversation. It is a reason
+to inspect the combined interaction, not merely whether a picker opens.

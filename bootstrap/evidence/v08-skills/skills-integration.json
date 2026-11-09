@@ -1,0 +1,42 @@
+{
+  "checks": [
+    "Real catalog preserves sources and policy; keyboard selection clears the composer and retains elapsed footer",
+    "Full Humanizer body is retained under disclosure; selection errors and discovery warnings stay visible",
+    "Narrow picker stays within pane; Escape restores focus without interruption",
+    "History position survives skill selection",
+    "Late catalog response cannot replace a reopened picker or steal focus",
+    "Ending pane discards in-flight picker response"
+  ],
+  "pageErrors": [],
+  "selected": {
+    "height": 708,
+    "last": 699.5,
+    "prompt": 721.5,
+    "follow": true,
+    "top": 1628
+  },
+  "compact": {
+    "height": 708,
+    "last": 699.5,
+    "prompt": 721.5,
+    "follow": true,
+    "top": 1742
+  },
+  "history": {
+    "before": {
+      "height": 708,
+      "last": 956.5,
+      "prompt": 721.5,
+      "follow": false,
+      "top": 1485
+    },
+    "after": {
+      "height": 708,
+      "last": 956.5,
+      "prompt": 721.5,
+      "follow": false,
+      "top": 1485
+    }
+  },
+  "fixture": "Actual HTTP catalog and web renderer; synthetic conversation/skill events; no model submissions"
+}

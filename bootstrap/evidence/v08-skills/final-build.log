@@ -1,0 +1,49 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/boid-8ac60b5a20cbcb92)
+
+running 11 tests
+test files::tests::read_reports_truncation_and_rejects_directories ... ok
+test guard::tests::bounds_wrapper_recursion ... ok
+test files::tests::edits_preserve_surrounding_text_and_permissions ... ok
+test guard::tests::distinguishes_command_syntax_from_quoted_text ... ok
+test files::tests::failed_edit_preconditions_preserve_the_file ... ok
+test guard::tests::rejects_force_options_through_literal_shell_forms ... ok
+test process::tests::guard_prevents_the_entire_script_from_starting ... ok
+test process::tests::keeps_exit_status_and_bounded_output ... ok
+test files::tests::searches_respect_ignore_rules_and_literal_option_boundaries ... ok
+test process::tests::timeout_stops_background_work ... ok
+test process::tests::cancellation_stops_background_work ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running unittests src/main.rs (target/debug/deps/boid-ba0b96aef15c85e5)
+
+running 18 tests
+test api::tests::failures_and_incomplete_responses_keep_the_reason ... ok
+test api::tests::completed_items_retain_reasoning_and_function_calls ... ok
+test api::tests::access_program_selection_is_sent_without_changing_the_model ... ok
+test runtime::tests::control_remains_available_during_skill_discovery ... ok
+test runtime::tests::checkpoint_sequence_prevents_duplicate_stream_replay ... ok
+test runtime::tests::stop_bypasses_full_input_queue_and_peer_delivery_does_not_restart_it ... ok
+test runtime::tests::storage_failure_is_reported_once_and_end_remains_available ... ok
+test runtime::tests::queued_input_waits_for_a_boundary_and_escape_applies_it_in_order ... ok
+test session::tests::interruption_accounts_for_running_and_unstarted_calls ... ok
+test terminal::persistence_tests::failed_tail_rollback_blocks_appends_until_repaired ... ok
+test terminal::persistence_tests::partial_append_keeps_later_records_recoverable ... ok
+test runtime::tests::working_time_survives_updates_and_reconnect_until_status_changes ... ok
+test terminal::persistence_tests::terminal_recovery_keeps_replay_and_never_restarts_a_shell ... ok
+test tool_calls::tests::command_results_keep_status_and_output_metadata ... ok
+test tool_calls::tests::invalid_arguments_return_errors_without_side_effects ... ok
+test runtime::tests::local_skill_selection_refresh_and_recovery_reach_the_model ... ok
+test runtime::tests::crash_recovery_keeps_history_and_queue_without_replaying_tools ... ok
+test terminal::persistence_tests::shell_directory_changes_publish_and_survive_end ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+   Doc-tests boid
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s

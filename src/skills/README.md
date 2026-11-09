@@ -65,8 +65,14 @@ The browser picker scans for the next message and does not mutate active work.
 Files can change between selection and sending; the turn uses the send-time
 snapshot. Missing or disabled selections produce a trace entry and model-visible
 error. Earlier explicit selections and tool loads remain unchanged in history.
-Catalog changes have their own visible context entry. This is boundary refresh,
-not a filesystem watcher.
+Skill loads and catalog changes have compact disclosures with the exact saved
+body. Selection failures and discovery warnings stay visible. Opening or closing
+the picker preserves the elapsed working footer and Escape semantics; inserting
+a skill participates in the accepted prompt-clearance behavior. This is boundary refresh,
+not a filesystem watcher. A session keeps at most one discovery scan in flight.
+Stop, Escape and End remain available while it runs. Cancellation prevents its
+result from being applied; the blocking filesystem work checks cancellation
+between reads and may finish an already-started read before exiting.
 
 Supporting files remain live filesystem content. They are not captured or
 versioned with SKILL.md; reads and commands retain their normal tool traces and
@@ -79,6 +85,24 @@ selection and refresh. The original bundled-only draft pinned skill versions
 for the entire session; boundary refresh supersedes that behavior for newly
 created sessions.
 
+## Durable snapshots
+
+Available SKILL.md bodies are stored once under
+`BOID_STATE_DIR/skill-snapshots/<sha256>.json`. Each session checkpoint references
+its immutable snapshot instead of rewriting every available body. A new snapshot
+is committed and synced before the session can refer to it. Changed snapshots
+get different identities; earlier versions are retained without automatic cleanup.
+Recovery verifies the content hash and reports missing or corrupt files, retaining
+the original evidence. Loaded text still appears in saved conversation history.
+Supporting files remain live package files, as described above.
+
+Back up the whole state directory, including both sessions and skill-snapshots.
+New skill-aware records use format version 2. This binary also reads version 1,
+including the earlier inline skill snapshots, without installing new tools into
+old sessions. Older binaries reject version 2 rather than silently opening a
+conversation without its captured skills. Restore the corresponding pre-upgrade
+state backup for a binary rollback; do not point an older binary at v2 records.
+
 ## Modules and future changes
 
 - `parser.rs`: Codex frontmatter parsing, adapted from source at `a90c808`.
@@ -87,6 +111,8 @@ created sessions.
 - `catalog.rs` and `instructions.md`: metadata presentation, context budget and
   model guidance. Guidance is compiled into the binary; rebuild to change it.
 - `selection.rs`: operator mentions and source disambiguation.
+- `refresh.rs`: cancellable scan ownership; `session_store.rs`: immutable snapshot
+  storage and integrity checks alongside durable session checkpoints.
 - `skills.rs`: shared saved representation, bundle and complete-text loading.
 - `Session::operator`, `Session::refresh_skills` and the runtime worker: selection,
   history and operator-message boundaries. The server owns these behaviors.

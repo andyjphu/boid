@@ -2,7 +2,8 @@ Boid v0.8 implementation plan after v0.7.2
 
 Review by Agent Catastrophe, 2026-11-08. Scope: integrate the existing local-skills
 and case-bank work with the newly accepted v0.7.2 baseline. This is a review and
-implementation plan; the integration changes described below have not been made.
+implementation plan as originally written. Execution was subsequently assigned;
+see the [implementation notes](v08-integration-notes.md) for the completed work.
 
 The recommendation is to start the integration branch from PR7 head `b18db46`,
 which retains the v0.7.2 implementation and adds final documentation, and port
@@ -261,3 +262,11 @@ review triggers, peer-context editing, context compaction and durable background
 jobs remain separate open work. Prior truthfulness audit findings, including
 stale disconnected activity and hidden tool-result warnings, remain recorded;
 the present source review does not claim they were repaired by v0.7.2.
+
+
+Implementation update, 2026-11-08: Andy subsequently assigned execution from
+current main and consultation with Ursa. The integration baseline is merged
+PR7 at `eb35dfd`, including the later storage-failure End path and terminal
+partial-write repair. The plan above remains the pre-implementation review.
+Implementation evidence and the measured snapshot-storage decision are recorded
+in [v0.8 integration notes](v08-integration-notes.md).

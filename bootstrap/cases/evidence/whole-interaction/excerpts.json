@@ -230,6 +230,116 @@
       "source_line_sha256": "45fa8e8f8779c0a44aa4e7c58ba29b447d6902a99953b82bbfd5148929ce96d0",
       "text_sha256": "25923e1611c6dc7dc07c849e676c0c6d1ddfede7f3e47e19af4d1c74c5c85a96",
       "text": "yes, this is a crucial case study i want visible to boid agents when i start having boid work on itself; im considering having boid templates; 1. generic - default workers without a specific specialization 2. meta-review boids - review the case studies, and make suggestions to fix context of another agent (RLM style) or fix guidance documents for future agents based on a bank of well-curated case studies; these case studies (im not sure if they're started yet) should include quotes from me (i tend to express my taste densely these days, and i notice agents dont take all N meaning i want them to); as well as preliminary agent analysis and traces, and as we have more case studies we'll have more datapoints for these meta review agents to make better judgements about how to shift guidance docs etc, this is project marigold's true successor (im so proud we got to this point, nice job agents!)"
+    },
+    {
+      "id": "ursa-13748",
+      "role": "user",
+      "timestamp": "2026-11-08T23:51:37.937Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 13748,
+      "source_line_sha256": "510b1a650bdc8915d4b97d57ff5af008fc52955cdd4925429d66d695a36b12fb",
+      "text_sha256": "90e6ef68912e0ea0ad2c5ac9588dd70f870dad452dca3bee7c2efb121aaaee6b",
+      "text": "also i realized now that i actually dont want text to jump when im hovering over an agent's pane; therefore the behavior shall be: by default the prompt entry area is hidden, but on hover, it will appear, on top of the current stream; and we keep \"the bottom of the stream\" to be the last message as it is right now (there will be no padding to prevent text covering) its fine if text covering happens; only, when the user hovers over a pane, they can also scroll down to see the covered part, that is when padding appears, but as user leaves the pane, the padding uhh... actually wait maybe it would be best to always have padding, but like if a person is outside of a pane, and they are low enough, the agent messages get tracked such that the stream view doesnt follow the padding but rather the agent messages? like the bottom of an unfocused view should be the agent message stream, do you get what im saying"
+    },
+    {
+      "id": "ursa-13753",
+      "role": "assistant",
+      "timestamp": "2026-11-08T23:51:53.487Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 13753,
+      "source_line_sha256": "9493806886d26c05f93adf1c127541c562578b09de88c012659396f24a7a3741",
+      "text_sha256": "42f6359c8414b5f3ea759dd5773d56a08c8a7891151165a3b8319b34a04846e1",
+      "text": "Yes. The input should **overlay the stream**, so hovering never moves the messages.\n\nKeep extra scroll space beneath the messages so covered text can be scrolled above the input. But automatic following should track **the last message**, not the bottom of that extra space. Outside the pane, the latest message sits at the bottom without a blank gap.\n\nScrolling up to read history should still suspend automatic following.\n\nYou Asked: Reveal the prompt without shifting messages, while keeping covered text accessible.\n\nAnswer: Overlay the prompt and separate extra scroll space from the position automatic following targets."
+    },
+    {
+      "id": "ursa-13760",
+      "role": "user",
+      "timestamp": "2026-11-08T23:52:21.335Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 13760,
+      "source_line_sha256": "a7ad761cb39f595d900e41c650d5df07055c0923187c216d31754cbb252dab46",
+      "text_sha256": "6907af933b43b497045d065af35c62d08472c0b62ebd6525066e4a849822bd57",
+      "text": "yes good, do it this way"
+    },
+    {
+      "id": "ursa-14266",
+      "role": "user",
+      "timestamp": "2026-11-09T00:04:26.621Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14266,
+      "source_line_sha256": "128e73c9cb050a70eb2631744da1e6cd704bde30d6d339bea3af6b4b88ddfd6d",
+      "text_sha256": "ab331baa2d04ee4f3006f78259a971ee0bb840689767fe70c46b8892315d31db",
+      "text": "keep the space where the working text would appear, pre padded so there isnt too much jumping around"
+    },
+    {
+      "id": "ursa-14358",
+      "role": "user",
+      "timestamp": "2026-11-09T00:07:35.104Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14358,
+      "source_line_sha256": "61e97e9ce06b57dd90d6393d2e7bfdcec383ca9aa247c841c7d4defdd40ae4c9",
+      "text_sha256": "fc565e43f4a798583cab49ebab42dbe3ad60854d75a8d352bd80fdaa22152d40",
+      "text": "i have a problem right; state is default terminal window: 1. i click in, 2. no jumping: great! 3. i type my message, 4. my message is blocked by the prompt entry box (not great) or its scrolled further down; 5. we still scroll, but its always in a way that i cant see whats going on if the prompt entry box is still visible; what is your suggested fix?"
+    },
+    {
+      "id": "ursa-14365",
+      "role": "user",
+      "timestamp": "2026-11-09T00:07:45.023Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14365,
+      "source_line_sha256": "b504df0b251d3b8de1ecc248a40bacb651a078ac670b1e04cc912e4198363f4a",
+      "text_sha256": "e7ca0126e8d1054033ee2bf61a28d11ac52b452e8335395ea08ec0302214b54a",
+      "text": "(sorry default agent pane)"
+    },
+    {
+      "id": "ursa-14377",
+      "role": "assistant",
+      "timestamp": "2026-11-09T00:08:19.992Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14377,
+      "source_line_sha256": "a86e4ca866d74107c62bfcd6a9a1376494e66b656e9bd80d759e6c0f13e0b06e",
+      "text_sha256": "b19160dda8fb5f29607d2148facad85daf89a9627a0782f0cd2705966dbe6680",
+      "text": "The current behavior only makes room after a manual scroll. That’s insufficient once a conversation is active.\n\nI suggest:\n\n- **Hover or click:** reveal the prompt without moving messages.\n- **Start typing, submit, or receive new output while following:** scroll just enough to keep the latest message above the prompt.\n- **While the prompt remains visible:** follow that unobscured position.\n- **Reading older messages:** preserve the reading position.\n- **Prompt disappears:** follow the normal message endpoint again.\n\nYou Asked: Keep the active conversation visible without hover jumps.\n\nAnswer: Preserve the overlay on hover, but automatically make room when conversation activity begins."
+    },
+    {
+      "id": "ursa-14384",
+      "role": "user",
+      "timestamp": "2026-11-09T00:09:29.511Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14384,
+      "source_line_sha256": "677a5bc4f125da8120f736958ebfed409bb2e301df7b223f6d0b44d42ae0e1cd",
+      "text_sha256": "a6f42e7b59cbba8d694cd74cfa6d2dcf6611e467fcc201ffa6a30c1d3ff604bb",
+      "text": "sure lets try this but first checkpoint this as v0.7.1 (we're still on 0.7 right?) so that i can refer back to this if need be, its already at 95% satisfaction rn"
+    },
+    {
+      "id": "ursa-14514",
+      "role": "assistant",
+      "timestamp": "2026-11-09T00:12:52.501Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14514,
+      "source_line_sha256": "f2cb91edd944424f3483047f7f85b8c65c5e731d2033ed0572a7a4cf84e4634f",
+      "text_sha256": "6b9bf6bce7e31a186d9e0927c771f4b064c3dec0920f06326066194e66dbb33e",
+      "text": "Yes, still v0.7. Saved **v0.7.1** at `4fed21b` as the checkpoint.\n\nThe scroll trial is now live and browser-verified. Refresh [localhost:7737](http://localhost:7737): typing or incoming output makes room above the prompt; hover alone stays still.\n\nYou Asked: Checkpoint v0.7.1, then try automatic prompt clearance.\n\nAnswer: Both done; the checkpoint remains available to restore."
+    },
+    {
+      "id": "ursa-14522",
+      "role": "user",
+      "timestamp": "2026-11-09T00:14:18.226Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14522,
+      "source_line_sha256": "e4fa3dcb6caf8362a18a5749cc304b94b99f1574d06b66fce76b37dd79f517b5",
+      "text_sha256": "136618d03fba440c2c8eaa359c46f78801e1ef59adf6c119ed85f2b82e13b2a3",
+      "text": "mark this as an extremely good ux result, im not sure what lessojn there is to learn here but it was an amazing result, mark this 0.7.2"
+    },
+    {
+      "id": "ursa-14543",
+      "role": "assistant",
+      "timestamp": "2026-11-09T00:15:04.089Z",
+      "source_file": "/Users/andyphu/.codex/sessions/2026/11/04/rollout-2026-11-04T00-23-31-01a1a5a7-fa67-7b01-b37e-befb3dfa996d.jsonl",
+      "source_line": 14543,
+      "source_line_sha256": "00fcad13093d454034317c56d783755c5318d38bd5552a80f85d44279e081ed4",
+      "text_sha256": "35d654dd878f65dade8f6b862ac1ce5de3c7a19f3cbba740bb1b6e7e85e1dacc",
+      "text": "Marked **v0.7.2** at `1cf12a1` and recorded the exact praise as an explicit UX success. **v0.7.1** remains available.\n\nTentative lesson: keep passive interactions stable; adjust scrolling when activity requires visibility.\n\nYou Asked: Record the excellent UX result as v0.7.2.\n\nAnswer: Saved and marked approved."
     }
   ]
 }

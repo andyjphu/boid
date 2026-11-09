@@ -1,0 +1,71 @@
+{
+  "conditions": "Same debug test binary; two Tokio workers; Docker bind mount; gated local mock provider; synthetic retained turns of 1024 padding characters; one observation per condition, not percentiles. Empty condition clears skill snapshot and disables refresh, not a separate main binary.",
+  "samples": [
+    {
+      "enter_ms": 1.044295,
+      "history_entries": 0,
+      "interrupt_accept_ms": 1.077003,
+      "interrupt_stopped_ms": 4.816306,
+      "mode": "empty",
+      "record_bytes": 11148,
+      "scan_ms": 0.369751,
+      "skill_count": 0,
+      "snapshot_bytes": 2
+    },
+    {
+      "enter_ms": 6.486019,
+      "history_entries": 100,
+      "interrupt_accept_ms": 6.014727,
+      "interrupt_stopped_ms": 30.759801,
+      "mode": "empty",
+      "record_bytes": 231428,
+      "scan_ms": 0.194709,
+      "skill_count": 0,
+      "snapshot_bytes": 2
+    },
+    {
+      "enter_ms": 1.627463,
+      "history_entries": 0,
+      "interrupt_accept_ms": 1.616838,
+      "interrupt_stopped_ms": 8.904193,
+      "mode": "humanizer",
+      "record_bytes": 47391,
+      "scan_ms": 0.180125,
+      "skill_count": 1,
+      "snapshot_bytes": 33281
+    },
+    {
+      "enter_ms": 6.370394,
+      "history_entries": 100,
+      "interrupt_accept_ms": 6.558978,
+      "interrupt_stopped_ms": 34.748270999999995,
+      "mode": "humanizer",
+      "record_bytes": 267671,
+      "scan_ms": 0.150501,
+      "skill_count": 1,
+      "snapshot_bytes": 33281
+    },
+    {
+      "enter_ms": 13.412373,
+      "history_entries": 0,
+      "interrupt_accept_ms": 15.007212,
+      "interrupt_stopped_ms": 74.100306,
+      "mode": "bank",
+      "record_bytes": 605930,
+      "scan_ms": 18.110555,
+      "skill_count": 45,
+      "snapshot_bytes": 576155
+    },
+    {
+      "enter_ms": 18.75439,
+      "history_entries": 100,
+      "interrupt_accept_ms": 20.196227,
+      "interrupt_stopped_ms": 93.254905,
+      "mode": "bank",
+      "record_bytes": 826210,
+      "scan_ms": 11.899452,
+      "skill_count": 45,
+      "snapshot_bytes": 576155
+    }
+  ]
+}

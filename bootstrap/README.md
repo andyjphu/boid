@@ -26,6 +26,8 @@ successor. The template design remains a proposal.
 
 The [v0.8 integration plan](v08-implementation-plan.md) reviews the accepted
 v0.7.2 baseline and describes how local skills and case work should preserve it.
+The [implementation notes](v08-integration-notes.md) record the integration from
+merged main, verification, and the measured snapshot-storage repair.
 
 ## Maintaining this brief
 
