@@ -1651,6 +1651,7 @@ function renderDiagnostics(resetMissing = true) {
   if (!Number.isFinite(summary.estimated_cost_usd) && summary.priced_requests > 0) {
     diagnosticRow(totals, "Priced subtotal", diagnosticCost(summary.priced_cost_usd), `${summary.priced_requests} of ${summary.recorded_requests} recorded requests`);
   }
+  diagnosticRow(totals, "Rates updated", diagnosticsData.pricing?.as_of || "—");
   diagnosticsContent.append(totals);
   const coverage = [];
   if (summary.in_flight_requests) coverage.push(`${diagnosticNumber(summary.in_flight_requests)} in flight`);

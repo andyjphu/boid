@@ -24,18 +24,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 .workspace-actions {
   position: fixed;
-  top: 2px;
+  top: 0;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(-24px);
   z-index: 10;
   display: flex;
+  height: 24px;
   overflow: hidden;
-  border: 1px solid #424242;
-  border-radius: 999px;
   background: #292929;
 }
-.workspace-actions button { display: flex; align-items: center; justify-content: center; gap: 3px; border: 0; border-radius: 0; padding: 1px 6px; line-height: 16px; white-space: nowrap; }
-.workspace-actions button + button { border-left: 1px solid #424242; }
+.workspace-actions button { display: flex; align-items: center; justify-content: center; gap: 1px; flex: 0 0 24px; width: 24px; height: 24px; border: 1px solid #424242; border-bottom: 0; border-radius: 0; padding: 0; line-height: 16px; white-space: nowrap; }
+.workspace-actions button + button { border-left: 0; }
 .workspace-actions button:focus-visible { outline-offset: -3px; }
 body.disconnected #workspace,
 body.disconnected .workspace-actions,
@@ -292,7 +291,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 
 .context-usage { position: absolute; top: 9px; right: 8px; color: #777; font-size: 10px; line-height: 16px; white-space: nowrap; pointer-events: none; }
 
-#open-diagnostics { display: flex; align-items: center; justify-content: center; padding-inline: 5px; }
+#open-diagnostics { display: flex; align-items: center; justify-content: center; padding: 0; }
 #diagnostics-dialog { width: min(360px, calc(100vw - 20px)); max-height: calc(100dvh - 32px); padding: 8px; overflow: auto; color: inherit; background: #222; border: 1px solid #555; border-radius: 0; }
 #diagnostics-dialog::backdrop { background: #0005; }
 .diagnostics-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }

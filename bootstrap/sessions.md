@@ -46,7 +46,9 @@ does not reset that counter.
 ## Usage diagnostics
 
 The compact top-bar controls retain agent and terminal creation and add a small
-usage diagnostics popup. Its cumulative request usage is separate from the
+usage diagnostics popup. The first divider between the three square controls
+aligns with the viewport midpoint; the controls meet the workspace edge below.
+Its cumulative request usage is separate from the
 latest-response context measurement in agent tabs and prompts. The popup can
 show all retained agents or one selected agent, including archived sessions.
 The popup omits the separate last-context measurement and pricing footer;
@@ -59,7 +61,8 @@ cached input divided by input tokens. Uncached input alone does not establish
 a cache failure. Provider-reported comparison diagnostics are retained when
 present; opening the popup does not send model requests or change cache settings.
 
-Dollar amounts are estimates from dated published model rates, not invoices.
+Token cost uses a dated table of published model rates. The popup shows the
+table's last update date; rate refresh is currently a source update.
 Unsupported models, unknown service tiers or incomplete billing components do
 not receive a guessed price. Reasoning tokens are already included in output.
 The source rates and cache-write accounting are documented in the
