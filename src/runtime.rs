@@ -88,6 +88,8 @@ struct Input {
     id: String,
     text: String,
     order: u64,
+    #[serde(default)]
+    compact: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Peer {
@@ -676,6 +678,11 @@ impl Hub {
             Ok(())
         })
     }
+    pub fn archive_context(&self, id: &str, attempt: u64) -> Result<()> {
+        let data = self.0.data.lock().unwrap();
+        let record = &data.sessions.get(id).context("Unknown session.")?.record;
+        self.0.store.archive_context(id, attempt, record)
+    }
     pub fn checkpoint_entries(
         &self,
         id: &str,
@@ -870,6 +877,7 @@ impl Hub {
             r.order += 1;
             r.inputs.push_back(Input {
                 id: message_id.clone(),
+                compact: text.trim() == "/compact",
                 text,
                 order: r.order,
             });
@@ -1274,7 +1282,7 @@ impl Hub {
         })
         .unwrap()
     }
-    fn next_input(&self, id: &str, session: &mut Session) -> Result<bool> {
+    fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<bool> {
         let event = self.update(id, |r| {
             let Some(input) = r.inputs.front() else {
                 return Ok(None);
@@ -1285,7 +1293,12 @@ impl Hub {
             let input = r.inputs.pop_front().unwrap();
             let cancelled = input.order <= r.stop_through;
             if !cancelled {
-                let selected = session.operator(input.text);
+                let selected = if input.compact {
+                    session.request_compaction(active);
+                    vec![]
+                } else {
+                    session.operator(input.text)
+                };
                 for text in selected {
                     r.view
                         .entries
@@ -1380,10 +1393,9 @@ impl Hub {
                         let needs_refresh = {
                             let data = self.0.data.lock().unwrap();
                             let record = &data.sessions[&id].record;
-                            record
-                                .inputs
-                                .front()
-                                .is_some_and(|input| input.order > record.stop_through)
+                            record.inputs.front().is_some_and(|input| {
+                                input.order > record.stop_through && !input.compact
+                            })
                         };
                         if needs_refresh && session.skill_base.is_some() {
                             if scan.is_none() {
@@ -1403,7 +1415,7 @@ impl Hub {
                                     }));
                             }
                         } else {
-                            match self.next_input(&id, &mut session) {
+                            match self.next_input(&id, &mut session, active) {
                                 Ok(applied) => {
                                     if applied {
                                         active = true;
@@ -1475,7 +1487,7 @@ impl Hub {
                             if let Some(event) = session.refresh_skills(snapshot) {
                                 self.entry(&id, "skill", event.to_string());
                             }
-                            match self.next_input(&id, &mut session) {
+                            match self.next_input(&id, &mut session, active) {
                                 Ok(applied) => {
                                     if applied {
                                         active = true;
@@ -2788,3 +2800,7 @@ mod tests {
 #[cfg(test)]
 #[path = "peer_tests.rs"]
 mod peer_tests;
+
+#[cfg(test)]
+#[path = "compaction_tests.rs"]
+mod compaction_tests;

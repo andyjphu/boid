@@ -45,6 +45,12 @@ pub struct Session {
     pub partial_text: String,
     #[serde(default)]
     model_requests: u64,
+    #[serde(default)]
+    compact_requested: bool,
+    #[serde(default)]
+    compact_resume: bool,
+    #[serde(default)]
+    compact_in_flight: bool,
 }
 
 #[cfg(test)]
@@ -133,6 +139,12 @@ impl Session {
     }
     pub fn recover(&mut self) -> Vec<(String, String)> {
         let mut entries = vec![];
+        if self.compact_requested || self.compact_in_flight {
+            self.compact_requested = false;
+            self.compact_in_flight = false;
+            self.compact_resume = false;
+            entries.push(("notice".into(), "Compaction interrupted; the previous context is retained. Request compaction again to retry.".into()));
+        }
         if !self.partial_text.is_empty() {
             self.history
                 .push(json!({"role":"assistant","content":std::mem::take(&mut self.partial_text)}));
@@ -167,6 +179,14 @@ impl Session {
         self.history.push(json!({"role":"user","content":text}));
     }
     pub fn operator(&mut self, text: String) -> Vec<Value> {
+        if self.compact_requested {
+            self.compact_resume = true;
+        }
+        if let Some(tools) = self.tools.as_array_mut() {
+            if !tools.iter().any(|tool| tool["name"] == "compact_context") {
+                tools.push(tool_calls::compaction_definition());
+            }
+        }
         let selected = if self.skill_base.is_some() {
             skills::selection::mentions(&text, &self.skills)
         } else {
@@ -228,6 +248,57 @@ impl Session {
     pub fn has_pending_tools(&self) -> bool {
         !self.pending.is_empty()
     }
+    pub fn request_compaction(&mut self, resume: bool) {
+        if !self.compact_requested {
+            self.compact_resume = resume;
+        }
+        self.compact_requested = true;
+    }
+    async fn compact(&mut self, client: &Client, hub: &Hub, id: &str) -> Result<bool> {
+        let resume = self.compact_resume;
+        self.compact_requested = false;
+        self.compact_resume = false;
+        self.compact_in_flight = true;
+        self.model_requests += 1;
+        hub.checkpoint_entries(
+            id,
+            self,
+            vec![("notice".into(), "Compacting context…".into())],
+        )?;
+        hub.archive_context(id, self.model_requests)?;
+        let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
+        let result = client
+            .compact(&self.history, &self.model, &instructions)
+            .await;
+        self.compact_in_flight = false;
+        let (kind, notice) = match result {
+            Ok(result) => {
+                if let Some(report) = crate::usage::Report::from_event(
+                    self.model_requests,
+                    &json!({"type":"response.completed","response":result}),
+                ) {
+                    hub.record_usage(id, report);
+                }
+                // The whole returned window is canonical, including retained messages.
+                self.history = result["output"].as_array().unwrap().clone();
+                self.context_usage = None;
+                (
+                    "notice",
+                    "Context compacted. The transcript is unchanged.".to_owned(),
+                )
+            }
+            Err(error) => (
+                "error",
+                format!("Compaction failed; previous context retained: {error:#}"),
+            ),
+        };
+        if resume {
+            self.history
+                .push(json!({"role":"developer","content":notice}));
+        }
+        hub.checkpoint_entries(id, self, vec![(kind.into(), notice)])?;
+        Ok(resume)
+    }
     // Returns whether another step is needed. Queued input is applied before
     // the next model request, after this response's tool calls have finished.
     pub async fn step(
@@ -237,6 +308,9 @@ impl Session {
         hub: &Hub,
         id: &str,
     ) -> Result<bool> {
+        if self.compact_requested && self.pending.is_empty() {
+            return self.compact(client, hub, id).await;
+        }
         let Some(call) = self.pending.pop_front() else {
             self.model_requests += 1;
             if !hub.apply_inbox(id, self)? {
@@ -333,6 +407,14 @@ impl Session {
         }
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
+            "compact_context" => match serde_json::from_str::<Value>(&call.arguments) {
+                Ok(value) if value == json!({}) => {
+                    self.compact_requested = true;
+                    self.compact_resume = true;
+                    json!({"queued":true,"message":"Compaction will run after the current tool batch."})
+                }
+                _ => json!({"error":"compact_context expects an empty JSON object."}),
+            },
             "list_skills" => {
                 json!({"skills":skills::catalog::list(&self.skills), "warnings":self.skill_warnings})
             }

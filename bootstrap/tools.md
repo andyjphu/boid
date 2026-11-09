@@ -148,6 +148,38 @@ original environment. See [local skills](../src/skills/README.md) for directory
 layout, configuration, supporting resources, refresh semantics and provenance.
 Loading alone does not establish compliance or improved writing.
 
+## Manual context compaction
+
+Send `/compact` in an agent pane to compact its model context. This queues an
+OpenAI compaction request after the current response and tool batch, without
+asking the model to interpret the command first. From idle, compaction finishes
+without starting another model turn. New messages accepted during compaction
+remain queued. Escape or Stop cancels the operation; failures retain the old
+context and can be retried explicitly. No automatic threshold is configured.
+
+The full visible transcript stays intact. Before compaction, Boid saves a
+private record under `sessions/compactions/` in the state directory. A successful
+response replaces only the model's working input with the complete canonical
+window returned by OpenAI, including opaque items and retained messages. The
+next ordinary response supplies a new context usage measurement. Compaction
+usage is retained in diagnostics; unreported pricing fields remain unknown.
+
+The `boid-compact` skill invokes the same operation with `compact_context`.
+Install the supplied package in the server account's user-level skill directory
+after updating Boid:
+
+```sh
+mkdir -p ~/.agents/skills
+cp -R skills/boid-compact ~/.agents/skills/
+```
+
+Select it through `/skills`, or send `$boid-compact`. Existing sessions refresh
+their skill catalog and gain the tool on the next operator message. The direct
+`/compact` command also works without installing the skill. The skill does not
+provide compaction in other agent harnesses.
+
+See [OpenAI's standalone compaction guide](https://developers.openai.com/api/docs/guides/compaction).
+
 ## Headless routes
 
 The browser and scripts use the same authenticated API:
