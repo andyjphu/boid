@@ -345,6 +345,10 @@ impl Hub {
     fn fault(&self, id: &str, error: anyhow::Error) {
         let mut data = self.0.data.lock().unwrap();
         if let Some(handle) = data.sessions.get_mut(id) {
+            // Halting also attempts a checkpoint. Preserve the original failure.
+            if handle.storage_error.is_some() {
+                return;
+            }
             let message = format!("Session persistence failed; execution stopped: {error:#}");
             handle.storage_error = Some(message.clone());
             handle.record.paused = true;
@@ -587,7 +591,7 @@ impl Hub {
         Ok(())
     }
     pub async fn close(&self, id: &str) -> Result<()> {
-        self.update(id, |r| {
+        let started = self.update(id, |r| {
             if r.view.archived {
                 bail!("Session has already ended.");
             }
@@ -606,7 +610,25 @@ impl Hub {
                 format!("Session ended. Cancelled {users} queued user messages and {peers} queued peer messages; received messages remain in the record."),
             ));
             Ok(())
-        })?;
+        });
+        if let Err(error) = started {
+            // This transition only rejects unknown/already-ended sessions or
+            // persistence failures. Preserve validation errors; storage trouble
+            // must not prevent stopping an otherwise open session.
+            let can_end = self
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .get(id)
+                .is_some_and(|h| !h.record.view.archived);
+            if !can_end {
+                return Err(error);
+            }
+            self.fault(id, error);
+            return self.close_without_storage(id, false).await;
+        }
         let task = {
             let mut data = self.0.data.lock().unwrap();
             let h = data.sessions.get_mut(id).unwrap();
@@ -614,18 +636,84 @@ impl Hub {
             h.task.take()
         };
         Self::wait_task(task).await;
-        self.update(id, |r| {
+        let finished = self.update(id, |r| {
             for (kind, text) in r.engine.recover() {
                 r.view.entries.push(Self::make_entry(&kind, text));
             }
             r.view.status = "archived".into();
             Ok(())
-        })?;
+        });
+        if let Err(error) = finished {
+            self.fault(id, error);
+            return self.close_without_storage(id, true).await;
+        }
         Ok(())
     }
+    async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<()> {
+        let (task, cancelled, users, peers) = {
+            let mut data = self.0.data.lock().unwrap();
+            let h = data.sessions.get_mut(id).context("Unknown session.")?;
+            if h.record.view.archived && !finishing {
+                bail!("Session has already ended.");
+            }
+            h.record.view.archived = true;
+            h.record.view.status = "ending".into();
+            h.record.view.working_since_ms = None;
+            h.record.paused = true;
+            h.record.order += 1;
+            h.record.stop_through = h.record.order;
+            let users = h.record.inputs.len();
+            let peers = h.record.inbox.len();
+            h.record.inputs.clear();
+            h.record.inbox.clear();
+            let cancelled = std::mem::take(&mut h.record.view.pending);
+            h.halt.send_replace(());
+            (h.task.take(), cancelled, users, peers)
+        };
+        Self::wait_task(task).await;
+        let mut data = self.0.data.lock().unwrap();
+        let h = data.sessions.get_mut(id).unwrap();
+        let mut entries: Vec<_> = h
+            .record
+            .engine
+            .recover()
+            .into_iter()
+            .map(|(kind, text)| Self::make_entry(&kind, text))
+            .collect();
+        entries.push(Self::make_entry("notice", format!(
+            "Session ended in memory. Storage is unavailable; this end and the latest changes were not saved. Cancelled {users} queued user messages and {peers} queued peer messages; received messages remain in this process's record."
+        )));
+        h.record.view.entries.extend(entries.iter().cloned());
+        h.record.view.status = "archived".into();
+        for entry in entries {
+            self.emit(
+                &mut data,
+                json!({"type":"entry","session_id":id,"entry":entry}),
+            );
+        }
+        for input in cancelled {
+            self.emit(
+                &mut data,
+                json!({"type":"input","session_id":id,"id":input,"state":"cancelled"}),
+            );
+        }
+        self.emit(
+            &mut data,
+            json!({"type":"status","session_id":id,"status":"archived","working_since_ms":null}),
+        );
+        self.emit(
+            &mut data,
+            json!({"type":"closed","session_id":id,"persisted":false}),
+        );
+        Ok(())
+    }
+
     pub fn reopen(&self, id: &str) -> Result<View> {
         let mut data = self.0.data.lock().unwrap();
         let h = data.sessions.get(id).context("Unknown session.")?;
+        if let Some(error) = &h.storage_error {
+            bail!("Cannot reopen a session with an unresolved storage failure: {error}");
+        }
         if !h.record.view.archived {
             bail!("Session is already open.");
         }
@@ -1464,6 +1552,126 @@ mod tests {
         assert!(hub.view(&view.id).unwrap().working_since_ms.unwrap() > started);
         hub.close(&view.id).await.unwrap();
         assert_eq!(hub.view(&view.id).unwrap().working_since_ms, None);
+        hub.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn storage_failure_is_reported_once_and_end_remains_available() {
+        use std::time::Duration;
+        let state = tempfile::tempdir().unwrap();
+        let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+        let target = hub
+            .create(Create {
+                name: "faulted".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        let sender = hub
+            .create(Create {
+                name: "sender".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        let first_failure_on_end = hub
+            .create(Create {
+                name: "end-time fault".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        let queued = hub
+            .message(&target.id, "Retain this received input".into())
+            .unwrap();
+        hub.send_peer(&sender.id, &target.id, "Retain this peer input")
+            .unwrap();
+        let stored = state.path().join("sessions");
+        let backup = state.path().join("sessions-before-failure");
+        std::fs::rename(&stored, &backup).unwrap();
+        std::fs::write(&stored, b"not a directory").unwrap();
+        let original = std::fs::read(backup.join(format!("{}.json", target.id))).unwrap();
+        let (_, mut events) = hub.subscribe();
+        hub.entry(&target.id, "notice", "This save must fail");
+        let first_error = hub.0.data.lock().unwrap().sessions[&target.id]
+            .storage_error
+            .clone();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if hub.0.data.lock().unwrap().sessions[&target.id]
+                    .task
+                    .as_ref()
+                    .unwrap()
+                    .is_finished()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let errors = hub
+            .view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == "error")
+            .count();
+        let ended = hub.close(&target.id).await;
+        eprintln!("storage-failure reproduction: errors={errors}, end={ended:?}");
+        assert!(ended.is_ok());
+        assert_eq!(errors, 1);
+        let mut unsaved_close = false;
+        while let Ok(event) = events.try_recv() {
+            if event["type"] == "closed" && event["session_id"] == target.id {
+                unsaved_close = event["persisted"] == false;
+            }
+        }
+        assert!(unsaved_close);
+        hub.close(&first_failure_on_end.id).await.unwrap();
+        assert!(hub.view(&first_failure_on_end.id).unwrap().archived);
+        let view = hub.view(&target.id).unwrap();
+        assert!(view.archived);
+        assert!(view.pending.is_empty());
+        assert!(view.entries.iter().any(|e| e.id == queued));
+        assert!(view.entries.iter().any(|e| e.text.contains("not saved")));
+        {
+            let data = hub.0.data.lock().unwrap();
+            let h = &data.sessions[&target.id];
+            assert_eq!(h.storage_error, first_error);
+            assert!(h.task.is_none());
+            assert!(h.record.inputs.is_empty() && h.record.inbox.is_empty());
+        }
+        assert_eq!(
+            std::fs::read(backup.join(format!("{}.json", target.id))).unwrap(),
+            original
+        );
+        std::fs::remove_file(&stored).unwrap();
+        std::fs::rename(&backup, &stored).unwrap();
+        assert!(hub.reopen(&target.id).is_err());
+        let during_join = hub
+            .create(Create {
+                name: "join-time fault".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        let (ended, ()) = tokio::join!(hub.close(&during_join.id), async {
+            std::fs::rename(&stored, &backup).unwrap();
+            std::fs::write(&stored, b"not a directory").unwrap();
+        });
+        ended.unwrap();
+        assert!(hub.view(&during_join.id).unwrap().archived);
+        assert!(
+            hub.view(&during_join.id)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.text.contains("not saved"))
+        );
+        assert!(hub.close("unknown").await.is_err());
+        assert!(hub.close(&target.id).await.is_err());
         hub.shutdown().await;
     }
 
