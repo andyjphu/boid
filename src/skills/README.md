@@ -17,8 +17,7 @@ working directory or its ancestors through the nearest Git root. Outside a
 Git repository, only the working directory's `.agents/skills` is searched.
 Boid also searches the runtime user's `~/.agents/skills`, `/etc/codex/skills`,
 and roots in `BOID_SKILL_PATHS` (the platform path-list separator, colon on
-Linux). Paths refer to the server/container filesystem. No host directories
-are mounted automatically. Symlinked packages are followed and canonical paths
+macOS and Linux). Paths refer to the native server filesystem and account home. Symlinked packages are followed and canonical paths
 supply identities; aliases to the same file are deduplicated.
 
 Use ordinary YAML frontmatter with a name and description. An omitted name

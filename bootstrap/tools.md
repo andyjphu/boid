@@ -1,6 +1,6 @@
 # Server, web interface, and tools
 
-Run `boid serve` (or `boid` with no arguments) inside the task container. The
+Run `boid serve` (or `boid` with no arguments) natively from the working directory. The
 shared server listens on `127.0.0.1:7734` by default and prints a browser URL.
 A second server cannot bind the same address. `BOID_LISTEN` changes the listener;
 no system service is installed. Set `OPENAI_API_KEY`; `BOID_MODEL` defaults to
@@ -102,7 +102,7 @@ events; slow event consumers receive a fresh snapshot. Private session records l
 accepted input, and tool execution state. Restart restores conversations stopped,
 without issuing model requests or replaying uncertain actions. Terminal records
 retain bounded output and return without a running shell. Keep the state directory
-on persistent storage when replacing the container. Context compaction and
+on persistent storage when replacing the server. Context compaction and
 long-running-job continuity remain follow-up work; see [sessions](sessions.md).
 
 The Responses client streams with `store: false`, explicit conversation input,
@@ -178,37 +178,15 @@ Views share the PTY dimensions; focusing or clicking a terminal transfers input
 and resize control to that view. Other views follow its dimensions.
 Terminal input is an explicit operator shell action and bypasses the model's
 command heuristic. Both terminal and model command children omit API/server
-credentials from their environments. Deliberately detached processes still
-require container cleanup.
+credentials from their environments. The login shell can still load its own
+settings and credentials through startup files, just as an ordinary terminal does.
 
 Terminals use `SHELL` when executable, otherwise the account's configured login
-shell, and load its startup files. The development image includes zsh and Git.
-Install personal themes/plugins and portable shell settings in the container's
-home; host-specific paths and credential loaders do not belong in that copy.
-The browser terminal prefers locally installed MesloLGS NF, with monospace
-fallbacks. Andy's preview uses his Powerlevel10k settings, Oh My Zsh, Git,
-autosuggestions, and syntax highlighting. These are operator-provided container
-settings, not assets bundled with Boid.
-
-Keep configured shell settings in a persistent container-home volume so replacing
-the server container does not remove the theme. For an existing configured
-container, copy only the portable theme files into that volume before first use:
-
-```sh
-BOID_THEME_SOURCE=existing-configured-container
-set -o pipefail
-docker exec "$BOID_THEME_SOURCE" tar \
-  --exclude=.git --exclude=cache --exclude=log \
-  -C /root -cf - .zshrc .p10k.zsh .oh-my-zsh | \
-  docker run --rm -i --network none -v boid-shell-home:/root \
-    boid-dev tar -C /root -xf -
-```
-
-Use a new volume for that initial copy, then reuse it when replacing containers.
-The source must already have the desired theme and portable settings; this does
-not install Powerlevel10k from scratch. The named paths deliberately omit shell
-history and unrelated home files. Keep personal settings out of Git. The launch
-example below mounts both durable session state and this separate shell home.
+shell, and load its startup files. Native execution uses that account's existing
+shell configuration, including themes and plugins. The browser terminal prefers
+locally installed MesloLGS NF, with monospace fallbacks. Personal Powerlevel10k
+and Oh My Zsh settings are operator configuration, not bundled Boid assets.
+Keep those settings out of Git.
 
 ## File and command behavior
 
@@ -216,8 +194,8 @@ The server calls the v3 library through six function tools: `read_file`,
 `write_file`, `edit_file`, `glob`, `search`, and `exec_command`.
 
 `Tools::new` sets the working directory. Absolute paths and parent paths use
-the process's ordinary permissions. Run the process inside the task container.
-The library does not create a container or confine paths itself.
+the server account's ordinary permissions. The library does not confine paths
+or create a sandbox.
 
 Reads and command output retain the first 32 KiB of each stream and report
 truncation. Invalid UTF-8 is displayed with replacement characters. Glob and
@@ -236,7 +214,10 @@ model tool defaults to a 30-second timeout and accepts 1 to 300,000 milliseconds
 Child commands do not inherit `OPENAI_API_KEY` or `BOID_TOKEN`; the server
 process still holds its credentials. A command owns its process group. Its background
 children end when it finishes, times out, or the caller drops the future.
-Processes that deliberately leave the group require container-level cleanup.
+Processes that deliberately leave the owned group or session can outlive this
+cleanup. Abrupt server death, including SIGKILL, has no universal child-cleanup
+guarantee. Graceful SIGINT/SIGTERM shutdown stops owned execution and preserves
+session records.
 
 The guard adapts the POSIX literal-command detector from Codex at `a90c808`.
 It rejects recognized forced `rm` commands and excessive wrapper nesting.
@@ -246,46 +227,43 @@ interactive approvals, policy-rule store, or Codex App Server dependency.
 
 ## Build and run
 
-Develop locally. Build and execute on `mm-west-2` under Colima Docker. Stage
-`Cargo.toml`, `Cargo.lock`, and `src/` in a disposable build directory; keep
-the recovery snapshot separate. If the unqualified hostname fails, use
-`-o HostName=mm-west-2.local -o HostKeyAlias=mm-west-2` and retain host-key checking.
-
-Build `boid-dev` from `bootstrap/Dockerfile` on stdin. Run `cargo fetch --locked`
-with registry access, then `cargo fmt --check`, `cargo test --locked --offline`,
-and `cargo build --locked --offline` without network. Share dependency downloads;
-keep build artifacts separate for each source workspace. The frontend has no
-build step. Pinned terminal/Markdown assets and licenses are under `src/web/vendor/`.
-
-On the Docker host, set `BOID_WORKSPACE` to the task directory. This uses the
-existing compiled binary volume and publishes only on host loopback:
+Build and run natively on `mm-west-2`. Install Rust (at least the `rust-version`
+in Cargo.toml), the platform C compiler/SDK, and ripgrep (`rg`) on the server's
+PATH. macOS uses Apple's Command Line Tools; Homebrew can supply ripgrep.
+The frontend has no build step. Pinned terminal/Markdown assets and licenses
+are under `src/web/vendor/`.
 
 ```sh
-docker run --rm --init \
-  --cap-drop=ALL --security-opt no-new-privileges \
-  --pids-limit=256 --memory=4g --cpus=4 \
-  -p 127.0.0.1:7734:7734 \
-  -e OPENAI_API_KEY -e BOID_MODEL -e BOID_LISTEN=0.0.0.0:7734 \
-  -e BOID_STATE_DIR=/state -v boid-state:/state \
-  -v boid-shell-home:/root \
-  -v "$BOID_WORKSPACE:/work" -v boid-v3-target:/opt/boid:ro \
-  boid-dev /opt/boid/debug/boid serve
+cargo fetch --locked
+cargo fmt --check
+cargo test --locked --offline
+cargo build --release --locked --offline
 ```
 
-Use SSH forwarding to reach the remote host. Run the server under a supervisor
-or persistent terminal to survive an SSH logout; browser independence does not
-make it survive host shutdown. Bind-mounted fixtures must use Colima's shared
-home paths, not Mac `/tmp`. Docker `--env-file` is read by the host client and
-does not require a bind mount. Keep credentials out of evidence artifacts.
+Provide `OPENAI_API_KEY` through the server's environment, then start the binary
+from the desired working directory:
 
-For self-development, expose a source copy and relevant guidance with the
-[bootstrap caution](README.md). Keep the canonical checkout, host home, Docker
-socket, and unrelated credentials outside the task mount. Keep Git history out
-unless needed and explicitly scoped. Review the resulting diff through a PR.
-The container launch supplies the boundary; the binary does not create it.
+```sh
+/path/to/boid/target/release/boid serve
+```
 
-For development incident recording and Andy's personal task routing, see the
-development brief. Boid has no required Codex handoff.
+Open the printed authenticated URL. For a remote server, forward its loopback
+port over SSH. Run it under a persistent terminal or an existing supervisor if
+it must survive an SSH logout. No system service is installed. Browser
+independence does not make execution survive server or host shutdown.
+
+Native execution replaces the earlier Docker product workflow. No container
+runtime mode is provided. Existing container-backed deployments and backups
+are not automatically migrated: `/work` paths and local skill source paths
+may not exist on the native host. Preserve the entire old state directory,
+including skill snapshots, and validate a separate native workspace before
+cutover. Do not silently rewrite saved histories or skill references.
+
+For self-development, use a separate checkout and relevant guidance with the
+[bootstrap caution](README.md), keep private state and credentials out of Git,
+and review the resulting diff through a PR. For development incident recording
+and Andy's personal task routing, see the development brief. Boid has no
+required Codex handoff.
 
 Debug builds read index.html, app.js and style.css from src/web on each request,
 so a browser refresh loads UI edits without a Rust rebuild or session restart.

@@ -1,4 +1,4 @@
-//! File and command tools for Boid. Run them inside the operator's container.
+//! Native file and command tools for Boid, using the server account's permissions.
 //! The working directory supplies context, not filesystem confinement.
 
 #[cfg(not(unix))]

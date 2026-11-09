@@ -470,7 +470,7 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
     server.abort();
 }
 
-// Run explicitly in an isolated test container. The browser drives the real
+// Run explicitly with isolated development state. The browser drives the real
 // authenticated routes, worker, persistence, and SSE stream with a mock provider.
 #[tokio::test]
 #[ignore]

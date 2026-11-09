@@ -1678,7 +1678,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output["text"], original);
-        assert_eq!(output["directory"], package.to_string_lossy().as_ref());
+        assert_eq!(
+            output["directory"],
+            package.canonicalize().unwrap().to_string_lossy().as_ref()
+        );
         assert!(outputs.iter().any(|v| {
             v["call_id"] == "reference"
                 && v["type"] == "function_call_output"

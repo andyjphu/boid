@@ -1344,7 +1344,7 @@ function attachTerminal(info) {
 }
 
 const agentDefaults = {
-  name: "canary", cwd: "/work", message: "Inspect the working directory and summarize what is here.",
+  name: "canary", cwd: "", message: "Inspect the working directory and summarize what is here.",
 };
 let choicesVersion = 0;
 let choicesTimer;
@@ -1533,6 +1533,8 @@ async function connect(token) {
   const config = await request("/api/config");
   login.hidden = true;
   workspaceError.hidden = true;
+  agentDefaults.cwd = config.cwd;
+  for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = config.cwd;
   loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;

@@ -246,8 +246,8 @@ of taste, not a complete specification to reproduce.
 The workspace must support ordinary interactive terminal use, with at least
 one real or substantially equivalent terminal among an M-by-N arrangement of
 views. File editing and artifact inspection need not live inside an agent
-session. The web interface uses locally vendored xterm.js connected to a shell PTY inside
-the task container.
+session. The web interface uses locally vendored xterm.js connected to a native
+login-shell PTY.
 
 Andy clarified the basis for UX judgment after using v4 (2026-11-08):
 
@@ -296,9 +296,9 @@ agent panes and queued input. Version numbers follow
 PR numbers. Andy's 2026-11-08 correction explicitly required implementation to
 follow the agreed direction; the earlier pause on premature interface selection
 no longer blocks this scope. Advanced view/context manipulation remains open.
-Session state lasts for the server process; persistence across server restarts
-is not yet implemented. Validation must distinguish server behavior, agent work,
-and the actual browser interface.
+Sessions retain their records across server restarts and recover paused.
+Running processes do not resume automatically. Validation must distinguish
+server behavior, agent work, and the actual browser interface.
 
 Use the reusable glob, search, read, write, edit, and command tools from v3.
 Avoid temporary tool-runner subcommands.
@@ -307,19 +307,20 @@ run the relevant check, and show the diff. Show tool results, support steering
 during work, and make stops take effect. Every substantive change needs a PR
 that Andy approves, including changes made by Boid itself.
 
-Andy accepted ordinary process permissions inside Docker, with a small POSIX
-command guard. Docker supplies the execution boundary. The guard detects
-selected literal forced-deletion commands; it cannot establish that a command
-is safe. Do not introduce Codex App Server or a full permission framework for
-this scope. Earlier capability-handle and Codex-executor proposals are superseded.
+For v0.10, Andy selected native execution and retired Docker product support
+(2026-11-08). This supersedes the earlier container-only development and
+execution instructions. Build and run natively on mm-west-2. Commands use the
+server account's ordinary permissions; cwd supplies context, not confinement.
+Keep credentials out of source, logs and public artifacts. The command guard
+still detects selected literal forced-deletion commands; passing it does not
+establish safety. No Codex App Server, container runtime mode, or general
+executor framework is part of this scope.
 
-Develop locally. Build and run in Colima Docker on mm-west-2. Give the container
-only the task's files and services. Keep host credentials and the Docker socket
-outside Boid's runtime workspace; provide only credentials needed for the task.
-Bootstrap material may be supplied for development under the caution above.
-Keep Git history outside the runtime workspace unless needed and explicitly
-scoped for the task. The emergency transfer is a recovery snapshot, not a
-second active checkout.
+The approved cleanup scope covers owned processes, ordinary background work,
+Stop, End, and graceful server shutdown. Arbitrary daemonization and abrupt
+server death do not have a universal cleanup guarantee. Preserve existing
+records and deployments when validating native execution separately. Project
+initialization, discovery and start-or-attach behavior belong to v0.11.
 
 Andy personally assigns dangerous host or system work to Codex and intends
 to give Boid work that does not require that access. He clarified this on
@@ -327,15 +328,15 @@ to give Boid work that does not require that access. He clarified this on
 operator workflow for developers to understand, not a Boid delegation rule
 or integration. Do not put that routing policy into runtime guidance.
 
-During development, record actions that could cause unintended damage without
-Docker, including their command, target, and result. A command-form rejection
+During development, record actions that could cause unintended host damage,
+including their command, target, and result. A command-form rejection
 does not establish an attempted boundary violation or prohibit the underlying
 task. Andy requested fewer runtime restrictions on 2026-11-08 after this
 distinction was lost in the deletion trial. Existing scope instructions remain;
 do not add a blanket stop-on-tool-rejection rule. Use the trace or task record;
 no automatic collector is needed.
 
-See [the server, tools, and container workflow](tools.md) for current behavior.
+See [the server, tools, and native workflow](tools.md) for current behavior.
 
 Use [Codex](https://github.com/openai/codex) as a reference. Favor familiar
 model-facing patterns where they help, explain useful departures, and choose

@@ -19,8 +19,9 @@ its pane in every window, and refresh does not restore an exited terminal.
 
 + terminal starts immediately in the server's repository working directory.
 The tab follows the observed shell working directory, with the full path in its
-tooltip. The Linux runtime reads the shell process directory; when observation
-is unavailable, the tooltip identifies the path as last known.
+tooltip. The native runtime reads the shell process directory through macOS libproc
+or Linux procfs; when observation is unavailable, the tooltip identifies the
+path as last known.
 
 Each browser tab retains a mixed order of agent, terminal, and setup pane IDs
 plus unfinished setup fields in sessionStorage. Refresh/reconnect restores the
