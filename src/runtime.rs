@@ -24,6 +24,10 @@ pub struct Entry {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct View {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<crate::session::ContextUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub communications: Vec<Communication>,
     pub id: String,
@@ -294,6 +298,9 @@ impl Hub {
     }
     fn project_view(data: &Data, source: &View) -> View {
         let mut view = source.clone();
+        let engine = &data.sessions[&source.id].record.engine;
+        view.context_usage = engine.context_usage.clone();
+        view.context_window = crate::api::context_window(&engine.model);
         view.communications = data
             .messages
             .values()
@@ -407,6 +414,11 @@ impl Hub {
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         let mut events = vec![];
+        if current.engine.context_usage != previous.engine.context_usage {
+            events.push(json!({"type":"context_usage", "session_id":id,
+                "context_usage":current.engine.context_usage,
+                "context_window":crate::api::context_window(&current.engine.model)}));
+        }
         for entry in current
             .view
             .entries
@@ -625,6 +637,8 @@ impl Hub {
         engine.skill_warnings = snapshot.warnings;
         engine.profile = self.0.client.config();
         let view = View {
+            context_usage: None,
+            context_window: crate::api::context_window(&engine.model),
             communications: vec![],
             id: id.clone(),
             name,

@@ -136,7 +136,8 @@ function makePane(name, cwd, kind, id) {
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  const close = element("button", "pane-close", "×");
+  const close = element("button", "pane-close");
+  close.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
@@ -370,6 +371,41 @@ async function openSkillPicker(ui) {
   } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
 }
 
+const tokenFormat = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 2 });
+const usageCanvas = document.createElement("canvas").getContext("2d");
+
+function updateContextUsage(ui) {
+  const usage = ui.view.context_usage;
+  const used = usage && Number.isSafeInteger(usage.input_tokens) && Number.isSafeInteger(usage.output_tokens)
+    ? usage.input_tokens + usage.output_tokens : null;
+  const limit = ui.view.context_window;
+  const knownLimit = Number.isSafeInteger(limit) && limit > 0;
+  const percent = used !== null && knownLimit ? 100 * used / limit : null;
+  ui.tab.style.setProperty("--context-fill", `${Math.min(100, Math.max(0, percent || 0))}%`);
+  const amount = used === null ? "Context —" : knownLimit
+    ? `${tokenFormat.format(used)} / ${tokenFormat.format(limit)} · ${percent.toFixed(1)}%`
+    : `${tokenFormat.format(used)} tokens`;
+  ui.contextLabel.textContent = amount;
+  const detail = used === null ? "Context usage available after the next model response."
+    : `Last response: ${usage.input_tokens.toLocaleString("en")} input + ${usage.output_tokens.toLocaleString("en")} output tokens. Drafts and subsequent input are not included.`;
+  ui.contextLabel.title = detail;
+  ui.tab.title = detail;
+  updateContextVisibility(ui);
+}
+
+function updateContextVisibility(ui) {
+  if (!ui.contextLabel || !usageCanvas) return;
+  const style = getComputedStyle(ui.input);
+  usageCanvas.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const firstLine = (ui.input.value || ui.input.placeholder).split("\n", 1)[0]
+    .replace(/\t/g, " ".repeat(parseInt(style.tabSize, 10) || 8));
+  const width = usageCanvas.measureText(firstLine).width
+    + Math.max(0, firstLine.length - 1) * (parseFloat(style.letterSpacing) || 0);
+  const textStart = ui.input.getBoundingClientRect().left + parseFloat(style.paddingLeft);
+  const available = ui.contextLabel.getBoundingClientRect().left - textStart - 12;
+  ui.contextLabel.style.visibility = ui.input.scrollTop > 0 || width >= available ? "hidden" : "visible";
+}
+
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
@@ -445,7 +481,9 @@ function addSession(view) {
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
-  ui.composer.append(ui.input);
+  ui.contextLabel = element("span", "context-usage");
+  ui.composer.append(ui.input, ui.contextLabel);
+  ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
   ui.overlay = overlay;
@@ -461,6 +499,7 @@ function addSession(view) {
     ui.overlayHeight = height;
     followTarget(ui);
     if (ui.autoClearance || ui.retainedPromptEnd) restorePosition(ui);
+    updateContextVisibility(ui);
   });
   overlayResize.observe(overlay);
   ui.overlayResize = overlayResize;
@@ -476,6 +515,7 @@ function addSession(view) {
     ui.slashSuggestion.textContent = ui.slashCommand === "/skills" ? "/skills  Select a skill" : "/model  Select model and effort";
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
     clearPromptSpaceWhenHidden(ui);
+    updateContextVisibility(ui);
   }
   let historyIndex = null;
   let savedDraft = "";
@@ -484,6 +524,7 @@ function addSession(view) {
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
     restorePosition(ui);
+    updateContextVisibility(ui);
   });
   traceResize.observe(ui.trace);
   ui.traceResize = traceResize;
@@ -553,6 +594,7 @@ function addSession(view) {
     finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
+  updateContextUsage(ui);
   setStatus(ui, view.status);
   for (const entry of view.entries || []) putEntry(ui, entry);
   setPending(ui, view.pending || []);
@@ -1028,6 +1070,7 @@ function snapshot(views, terminalViews = []) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
     ui.view = view;
+    updateContextUsage(ui);
     const follow = ui.follow;
     rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
@@ -1097,6 +1140,12 @@ function startEvents() {
         return;
       }
       if (!ui) return;
+      if (message.type === "context_usage") {
+        ui.view.context_usage = message.context_usage;
+        ui.view.context_window = message.context_window;
+        updateContextUsage(ui);
+        return;
+      }
       if (message.type === "input") {
         const item = ui.entries.get(String(message.id));
         if (item) item.inputBatch = message.input_batch;

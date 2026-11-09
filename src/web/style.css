@@ -90,7 +90,9 @@ body.disconnected .workspace-actions,
 .pane-status { font-size: 11px; color: #aaa; margin-left: auto; padding: 4px; white-space: nowrap; }
 .pane[data-status="error"] .pane-status { color: #f0a29c; }
 .pane-header button { padding: 1px 5px; font-size: 11px; }
-.pane-header .pane-close { margin-left: auto; flex-shrink: 0; border: 0; background: transparent; color: #999; padding: 0 2px; font-size: 17px; line-height: 1; }
+.pane-header .pane-close { display: flex; align-items: center; justify-content: center; margin-left: auto; flex-shrink: 0; border: 0; background: transparent; color: #999; padding: 0 2px; height: 16px; }
+.pane-close svg { display: block; width: 12px; height: 12px; }
+.agent-pane .pane-tab { background-image: linear-gradient(#a6bed81a, #a6bed81a); background-repeat: no-repeat; background-size: var(--context-fill, 0%) 100%; }
 .pane-header .pane-close:hover { color: #ddd; }
 .pane-cwd {
   margin: 0;
@@ -211,7 +213,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   .agent-pane[data-status="working"] .pane-title, .working-label { animation: none; background: none; color: #eee; }
 }
-.composer { display: flex; gap: .5ch; min-height: 0; overflow: hidden; border-top: 1px solid #383838; padding: 6px 4px; background: #1e1e1e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 0; pointer-events: none; }
+.composer { position: relative; display: flex; gap: .5ch; min-height: 0; overflow: hidden; border-top: 1px solid #383838; padding: 6px 4px; background: #1e1e1e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 0; pointer-events: none; }
 .pane:hover .composer,
 .composer:focus-within,
 .composer:has(textarea:not(:placeholder-shown)) { opacity: 1; pointer-events: auto; }
@@ -288,3 +290,5 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .entry[data-communication-id] { color: inherit; margin-bottom: 12px; padding: 5px 0; }
 .entry[data-communication-direction="outgoing"] { background: #253344; }
 .entry[data-communication-direction="incoming"] { background: #263A32; }
+
+.context-usage { position: absolute; top: 9px; right: 8px; color: #777; font-size: 10px; line-height: 16px; white-space: nowrap; pointer-events: none; }

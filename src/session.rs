@@ -5,8 +5,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl ContextUsage {
+    fn from_event(event: &Value) -> Option<Self> {
+        let usage = &event["response"]["usage"];
+        Some(Self {
+            input_tokens: usage["input_tokens"].as_u64()?,
+            output_tokens: usage["output_tokens"].as_u64()?,
+        })
+    }
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
     pub model: String,
     pub instructions: String,
     pub tools: Value,
@@ -224,6 +242,7 @@ impl Session {
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
+            let context_usage = &mut self.context_usage;
             let output = client
                 .respond_with(
                     &self.history,
@@ -233,6 +252,9 @@ impl Session {
                     &self.profile,
                     |event| {
                         let event_type = event["type"].as_str().unwrap_or("");
+                        if matches!(event_type, "response.completed" | "response.incomplete") {
+                            *context_usage = ContextUsage::from_event(event);
+                        }
                         let kind = match event_type {
                             "response.output_text.delta" | "response.refusal.delta" => "assistant",
                             "response.reasoning_summary_text.delta" => "reasoning",
