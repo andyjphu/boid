@@ -180,12 +180,26 @@ function promptVisible(ui) {
 function followTarget(ui) {
   const clearance = ui.autoClearance && promptVisible(ui)
     ? ui.overlay.getBoundingClientRect().height : 0;
-  return messageBottom(ui) + Math.max(ui.followClearance, clearance);
+  const bottom = messageBottom(ui);
+  const target = Math.max(bottom + Math.max(ui.followClearance, clearance),
+    ui.retainedPromptEnd - ui.trace.clientHeight);
+  if (bottom + ui.trace.clientHeight >= ui.retainedPromptEnd) ui.retainedPromptEnd = 0;
+  // Keep enough scrollable space while new content fills the vacated prompt area.
+  const reserve = Math.max(ui.overlay.getBoundingClientRect().height, target - bottom);
+  ui.trace.style.setProperty("--composer-space", `${Math.ceil(reserve) + 8}px`);
+  return target;
+}
+
+function retainPromptSpace(ui) {
+  if (!ui.follow || selectedWithin(ui.trace) || ui.trace.scrollTop <= messageBottom(ui)) return;
+  ui.retainedPromptEnd = Math.max(ui.retainedPromptEnd,
+    ui.trace.scrollTop + ui.trace.clientHeight);
 }
 
 function clearPromptSpaceWhenHidden(ui) {
   if (promptVisible(ui)) return;
   const hadClearance = ui.autoClearance || ui.followClearance > 0;
+  retainPromptSpace(ui);
   ui.autoClearance = false;
   ui.followClearance = 0;
   if (hadClearance && ui.follow && !selectedWithin(ui.trace)) restorePosition(ui);
@@ -368,6 +382,8 @@ function addSession(view) {
   ui.follow = true;
   ui.followClearance = 0;
   ui.autoClearance = false;
+  ui.retainedPromptEnd = 0;
+  ui.overlayHeight = 0;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
@@ -422,7 +438,8 @@ function addSession(view) {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
     ui.followClearance = ui.follow && promptVisible(ui)
-      ? Math.max(0, ui.trace.scrollTop - messageBottom(ui)) : 0;
+      ? Math.min(ui.overlay.getBoundingClientRect().height,
+        Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
     rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
@@ -437,8 +454,13 @@ function addSession(view) {
   ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker, ui.skillPicker);
   const overlayResize = new ResizeObserver(() => {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
-    if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
-    if (ui.autoClearance) restorePosition(ui);
+    if (height < ui.overlayHeight) {
+      retainPromptSpace(ui);
+      ui.followClearance = Math.min(ui.followClearance, height);
+    }
+    ui.overlayHeight = height;
+    followTarget(ui);
+    if (ui.autoClearance || ui.retainedPromptEnd) restorePosition(ui);
   });
   overlayResize.observe(overlay);
   ui.overlayResize = overlayResize;
