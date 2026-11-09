@@ -7,8 +7,6 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 const communications = new Map();
 const communicationEntries = new Map();
-const transcriptEntries = 200;
-const transcriptCharacters = 100_000;
 const composerPadding = 8;
 let renderSelection;
 
@@ -511,8 +509,6 @@ function addSession(view) {
   ui.messageResults = new Map();
   ui.mounted = new Set();
   ui.dirty = new Set();
-  ui.historyLimit = transcriptEntries;
-  ui.historyCharacters = transcriptCharacters;
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.followClearance = 0;
@@ -524,28 +520,6 @@ function addSession(view) {
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.content = element("div", "trace-content");
   ui.trace.append(ui.content);
-  ui.historyControls = element("div", "transcript-history");
-  ui.historyOlder = element("button", "", "Show older entries");
-  ui.historyLatest = element("button", "", "Latest");
-  const fullRecord = element("a", "", "Full session record");
-  fullRecord.href = `/api/sessions/${encodeURIComponent(id)}`;
-  fullRecord.target = "_blank";
-  fullRecord.rel = "noopener";
-  ui.historyControls.append(ui.historyOlder, ui.historyLatest, fullRecord);
-  ui.historyControls.hidden = true;
-  ui.content.append(ui.historyControls);
-  ui.historyOlder.addEventListener("click", () => {
-    ui.follow = false;
-    ui.historyLimit += transcriptEntries;
-    ui.historyCharacters += transcriptCharacters;
-    scheduleTranscript(ui);
-  });
-  ui.historyLatest.addEventListener("click", () => {
-    ui.historyLimit = transcriptEntries;
-    ui.historyCharacters = transcriptCharacters;
-    ui.follow = true;
-    scheduleTranscript(ui);
-  });
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
@@ -979,15 +953,7 @@ async function locateCommunication(ui, message, otherId) {
     for (const entry of view.communications || []) rememberCommunication(entry);
     const target = acceptSessionResponse(view, startedAt);
     const entryId = String(otherId === message.recipient_id ? message.id : message.sender_entry);
-    const history = [...target.entries.values()];
-    const index = history.findIndex(item => item.id === entryId);
-    if (index >= 0) {
-      target.historyLimit = Math.max(target.historyLimit, history.length - index);
-      target.historyCharacters = Math.max(target.historyCharacters,
-        history.slice(index).reduce((total, item) => total + item.text.length, 0));
-      target.follow = false;
-      scheduleTranscript(target);
-    }
+    target.follow = false;
     await new Promise(resolve => requestAnimationFrame(resolve));
     const item = target.entries.get(entryId);
     if (!item) throw new Error("Message is unavailable in this session.");
@@ -1052,32 +1018,12 @@ function receiveCommunication(message) {
   }
 }
 
-// Temporary bounded view. Full history stays in memory and in the session record.
-// V2 can replace this with viewport virtualization and paged history retrieval.
-function updateTranscriptWindow(ui) {
+// Render the complete transcript; viewport virtualization remains v2 work.
+function mountTranscript(ui) {
   const history = [...ui.entries.values()].filter(item =>
     !item.suppressed && (!item.superseded || selectedWithin(item.node)));
-  const wanted = new Set();
-  let characters = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const item = history[i];
-    if (wanted.size && (wanted.size >= ui.historyLimit
-        || characters + item.text.length > ui.historyCharacters)) break;
-    wanted.add(item);
-    characters += item.text.length;
-  }
-  // A tool's output belongs to its call, including at the window boundary.
-  for (const item of [...wanted]) {
-    if (item.kind !== "tool_result") continue;
-    const call = ui.toolPairs.get(toolEntry(item.text).heading)?.tool_call;
-    if (call) wanted.add(call);
-  }
-  // Never remove the text being read or selected as new events arrive.
-  if (!ui.follow || selectedWithin(ui.trace)) {
-    const retained = new Set(history);
-    for (const item of ui.mounted) if (retained.has(item)) wanted.add(item);
-  }
-  const heightBeforeCulling = ui.retainedPromptEnd ? ui.content.offsetHeight : 0;
+  const wanted = new Set(history);
+  const heightBeforeRemoval = ui.retainedPromptEnd ? ui.content.offsetHeight : 0;
   for (const item of ui.mounted) {
     if (wanted.has(item)) continue;
     item.node.remove();
@@ -1085,9 +1031,9 @@ function updateTranscriptWindow(ui) {
     item.rendered = false;
     item.communicationSignature = undefined;
   }
-  if (heightBeforeCulling) {
+  if (heightBeforeRemoval) {
     ui.retainedPromptEnd = Math.max(0,
-      ui.retainedPromptEnd - (heightBeforeCulling - ui.content.offsetHeight));
+      ui.retainedPromptEnd - (heightBeforeRemoval - ui.content.offsetHeight));
   }
   let next = null;
   for (let i = history.length - 1; i >= 0; i--) {
@@ -1100,11 +1046,7 @@ function updateTranscriptWindow(ui) {
     next = item.node;
   }
   ui.mounted = new Set(history.filter(item => wanted.has(item)));
-  const older = history.length - ui.mounted.size;
-  ui.historyControls.hidden = !older && ui.historyLimit === transcriptEntries
-    && ui.historyCharacters === transcriptCharacters;
-  ui.historyOlder.hidden = !older;
-  ui.historyOlder.textContent = `Show older entries (${older})`;
+
 }
 
 function scheduleTranscript(ui) {
@@ -1115,7 +1057,7 @@ function scheduleTranscript(ui) {
     if (sessions.get(ui.id) !== ui) return;
     withRenderSelection(() => {
       rememberPosition(ui);
-      updateTranscriptWindow(ui);
+      mountTranscript(ui);
       for (const item of ui.dirty) {
         if (!ui.mounted.has(item)) { item.rendered = false; continue; }
         if (selectedWithin(item.node)) { item.deferred = true; continue; }

@@ -36,31 +36,14 @@ views.forEach(view => view.communications = [message]);
     assert.deepEqual(await page.evaluate(() => {
       const ui = sessions.get('sender');
       return [ui.entries.size, ui.mounted.size, ui.entries.get('0').node.isConnected, ui.entries.get('599').node.isConnected];
-    }), [600, 200, false, true]);
+    }), [600, 600, true, true]);
 
-    // Loading older history preserves the currently read line's screen position.
-    const offset = await page.evaluate(() => {
-      const ui = sessions.get('sender'); ui.follow = false; ui.trace.scrollTop = 0;
-      const item = [...ui.mounted][0]; window.testAnchor = item;
-      const top = item.node.getBoundingClientRect().top;
-      ui.historyOlder.click(); return top;
-    });
-    await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 400);
-    assert.ok(Math.abs(await page.evaluate(() => testAnchor.node.getBoundingClientRect().top) - offset) < 2);
-
-    // A peer link reveals a culled destination, and Latest restores the bounded view.
+    // Peer links still navigate to earlier messages in the full transcript.
     await page.locator('[data-pane-key="agent:recipient"] .peer-link').click();
-    await page.waitForFunction(() => sessions.get('sender').entries.get('10').node.isConnected);
+    await page.waitForFunction(() => document.activeElement === sessions.get('sender').entries.get('10').node);
+    assert.equal(await page.locator('.transcript-history').count(), 0);
+    await page.evaluate(() => { const ui = sessions.get('sender'); ui.follow = true; followLatest(ui); });
     await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('10').node.isConnected), true);
-    await page.evaluate(() => sessions.get('sender').historyOlder.click());
-    await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 600);
-    assert.equal(await page.locator('[data-pane-key="agent:sender"] .transcript-history').isVisible(), true);
-    await page.evaluate(() => sessions.get('sender').historyLatest.click());
-    await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 200);
 
     if (process.env.BOID_SCREENSHOT) await page.screenshot({ path: process.env.BOID_SCREENSHOT });
 
@@ -95,22 +78,22 @@ views.forEach(view => view.communications = [message]);
     await page.evaluate(() => getSelection().removeAllRanges());
     await frames();
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('598').body.textContent.endsWith('extra streaming text')), true);
-    await page.evaluate(() => sessions.get('sender').historyLatest.click());
+    await page.evaluate(() => { const ui = sessions.get('sender'); ui.follow = true; followLatest(ui); });
     await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 200);
+    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 853);
 
-    // The character budget can cull fewer than 200 entries; a single large entry stays whole.
+    // Large entries do not remove older transcript content.
     await page.evaluate(() => {
       const ui = sessions.get('sender');
       for (let i = 0; i < 6; i++) putEntry(ui, { id: 'large-' + i, kind: 'assistant', text: 'x'.repeat(30000) });
     });
     await frames();
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 3);
+    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 859);
     await page.evaluate(() => putEntry(sessions.get('sender'), { id: 'huge', kind: 'assistant', text: 'y'.repeat(120000) }));
     await frames();
     assert.deepEqual(await page.evaluate(() => {
       const ui = sessions.get('sender'); return [ui.mounted.size, ui.entries.get('huge').body.textContent.length];
-    }), [1, 120000]);
+    }), [860, 120000]);
 
     // Hidden reasoning cannot replace the visible tail; replay/reconnect retains all records.
     await page.evaluate(() => putEntry(sessions.get('sender'), { id: 'reasoning', kind: 'reasoning', text: 'z'.repeat(150000) }));
@@ -119,7 +102,7 @@ views.forEach(view => view.communications = [message]);
     await page.evaluate(views => snapshot(views, []), views);
     await frames();
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.size), 600);
-    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 200);
+    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 600);
     // Real wheel gestures at the bottom must not fight automatic following.
     const trace = page.locator('[data-pane-key="agent:sender"] .trace');
     await trace.hover();
@@ -151,13 +134,12 @@ views.forEach(view => view.communications = [message]);
       assert.equal(await page.evaluate(() => sessions.get('sender').follow), false);
     } finally { await page.evaluate(() => clearInterval(streamTimer)); }
 
-    // Removing a tall prefix must move retained composer space with the content.
+    // A tall prefix stays mounted when new entries arrive, preserving bottom spacing.
     await page.evaluate(() => {
       const history = Array.from({ length: 200 }, (_, i) => ({ id: String(i), kind: 'assistant',
         text: i === 0 ? 'tall line\n'.repeat(200) : 'short line' }));
       snapshot([{ id: 'sender', name: 'canary', cwd: '/tmp', status: 'idle', entries: history, pending: [] }], []);
       const ui = sessions.get('sender'); ui.follow = true;
-      ui.historyLimit = transcriptEntries; ui.historyCharacters = transcriptCharacters;
     });
     await frames();
     await page.evaluate(() => {
@@ -170,7 +152,9 @@ views.forEach(view => view.communications = [message]);
       const ui = sessions.get('sender');
       return ui.trace.scrollTop - messageBottom(ui) <= ui.overlay.getBoundingClientRect().height + composerPadding + 1;
     }));
+    assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('0').node.isConnected), true);
+    assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 201);
     assert.deepEqual(errors, []);
-    console.log('PASS: bounded history, older history/scroll anchor, peer navigation, targeted updates, expanded tools, selection/streaming, character budget, hidden reasoning, reconnect, bottom wheel/streaming, retained composer space');
+    console.log('PASS: full history, peer navigation, targeted updates, expanded tools, selection/streaming, large entries, hidden reasoning, reconnect, bottom wheel/streaming, retained composer space');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

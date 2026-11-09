@@ -111,10 +111,6 @@ body.disconnected .workspace-actions,
 }
 .agent-stream { position: relative; flex: 1; min-height: 0; display: flex; }
 .trace-content { display: flow-root; }
-.transcript-history { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; color: #999; }
-.transcript-history[hidden] { display: none; }
-.transcript-history button, .transcript-history a { color: inherit; font: inherit; }
-.transcript-history button { padding: 0; background: none; border: 0; text-decoration: underline; cursor: pointer; }
 .agent-stream > .trace { min-width: 0; }
 .agent-stream > .trace::after { content: ""; display: block; height: var(--composer-space, 45px); }
 .composer-overlay { position: absolute; bottom: 0; left: 0; right: 0; pointer-events: none; }
