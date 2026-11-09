@@ -5,6 +5,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const TTL_DETAILS: &str = "/input_tokens_details/cache_write_tokens_details";
+const DEFAULT_WRITE_BASIS: &str = "30-minute cache writes inferred from Boid requests omitting cache TTL settings; the API did not report a duration split.";
+
 pub fn pricing() -> Value {
     json!({"as_of":"2026-11-08","currency":"USD","sources":[
         "https://developers.openai.com/api/docs/models/gpt-6-sol",
@@ -92,7 +95,17 @@ impl Report {
         let estimate = self.estimate();
         value["estimated_cost_usd"] = json!(estimate.as_ref().ok());
         value["unknown_reason"] = json!(estimate.err());
+        value["cache_write_pricing_basis"] = json!(self.cache_write_pricing_basis());
         value
+    }
+    fn uses_default_write_lifetime(&self) -> bool {
+        self.count("/input_tokens_details/cache_write_tokens")
+            .is_some_and(|write| write > 0)
+            && self.usage.pointer(TTL_DETAILS).is_none_or(Value::is_null)
+    }
+    fn cache_write_pricing_basis(&self) -> Option<&'static str> {
+        (self.uses_default_write_lifetime() && self.estimate().is_ok())
+            .then_some(DEFAULT_WRITE_BASIS)
     }
     fn count(&self, path: &str) -> Option<u64> {
         self.usage.pointer(path)?.as_u64()
@@ -125,13 +138,18 @@ impl Report {
             _ => return Err("Missing or unsupported reported service tier".into()),
         };
         let (input, output, read, write) = self.tokens()?;
-        let ttl = "/input_tokens_details/cache_write_tokens_details";
-        let (short, long) = if write == 0 && self.usage.pointer(ttl).is_none_or(Value::is_null) {
-            (0, 0)
+        // api::Client::respond_with omits request and breakpoint TTL settings.
+        // The documented default for these Boid requests is 30m. This also holds
+        // for the existing ledger written by that same request path. If request
+        // TTL controls are added, capture their policy per report before extending
+        // this fallback. Never insert inferred fields into the raw usage object.
+        // Source: prompt-caching guide, "Cache lifetime", checked 2026-11-08.
+        let (short, long) = if self.usage.pointer(TTL_DETAILS).is_none_or(Value::is_null) {
+            (write, 0)
         } else {
             (
-                self.required(&format!("{ttl}/ttl_30m_tokens"))?,
-                self.required(&format!("{ttl}/ttl_12h_tokens"))?,
+                self.required(&format!("{TTL_DETAILS}/ttl_30m_tokens"))?,
+                self.required(&format!("{TTL_DETAILS}/ttl_12h_tokens"))?,
             )
         };
         if short.checked_add(long) != Some(write) {
@@ -186,11 +204,15 @@ pub fn summarize<'a>(sessions: impl IntoIterator<Item = (&'a Ledger, u64, bool)>
     }
     let mut priced = 0u64;
     let mut subtotal = 0.0;
+    let mut pricing_notes = BTreeSet::new();
     for r in &records {
         match r.estimate() {
             Ok(cost) => {
                 priced += 1;
-                subtotal += cost
+                subtotal += cost;
+                if let Some(basis) = r.cache_write_pricing_basis() {
+                    pricing_notes.insert(basis);
+                }
             }
             Err(reason) => {
                 reasons.insert(reason);
@@ -246,7 +268,7 @@ pub fn summarize<'a>(sessions: impl IntoIterator<Item = (&'a Ledger, u64, bool)>
         "priced_requests":priced,"history_complete":complete,
         "totals":{"input_tokens":input,"output_tokens":output,"cached_read_tokens":read,"cache_write_tokens":write,"reuse_pct":reuse},
         "estimated_cost_usd":if complete && priced==recorded {Some(subtotal)}else{None},
-        "priced_cost_usd":subtotal,"unknown_reasons":reasons})
+        "priced_cost_usd":subtotal,"unknown_reasons":reasons,"pricing_notes":pricing_notes})
 }
 #[cfg(test)]
 mod tests {
@@ -266,8 +288,38 @@ mod tests {
         r.service_tier = None;
         assert!(r.estimate().is_err());
         r.service_tier = Some("default".into());
-        r.usage["input_tokens_details"]["cache_write_tokens_details"] = Value::Null;
+        r.usage["input_tokens_details"]["cache_write_tokens_details"] =
+            json!({"ttl_30m_tokens":7000});
         assert!(r.estimate().is_err());
+        r.usage["input_tokens_details"]["cache_write_tokens_details"] =
+            json!({"ttl_30m_tokens":7000,"ttl_12h_tokens":1});
+        assert!(r.estimate().is_err());
+    }
+    #[test]
+    fn missing_lifetime_uses_documented_request_default_without_rewriting_usage() {
+        let mut r = report();
+        // Observed live API shape: write total is present, duration split is absent.
+        r.usage = json!({"input_tokens":558304,"output_tokens":467,"total_tokens":558771,
+            "input_tokens_details":{"cached_tokens":557158,"cache_write_tokens":1143}});
+        let raw = r.usage.clone();
+        assert!((r.estimate().unwrap() - 0.2355952).abs() < 1e-10);
+        let view = r.view("session", "agent");
+        assert_eq!(view["usage"], raw);
+        assert_eq!(view["cache_write_pricing_basis"], DEFAULT_WRITE_BASIS);
+        assert!(
+            view["usage"]["input_tokens_details"]
+                .get("cache_write_tokens_details")
+                .is_none()
+        );
+        let mut ledger = Ledger::default(); // Existing history predates the ledger.
+        ledger.record(r);
+        let summary = summarize([(&ledger, 152, false)]);
+        assert_eq!(summary["priced_requests"], 1);
+        assert_eq!(summary["unrecorded_requests"], 151);
+        assert!((summary["priced_cost_usd"].as_f64().unwrap() - 0.2355952).abs() < 1e-10);
+        assert!(summary["estimated_cost_usd"].is_null());
+        assert_eq!(summary["history_complete"], false);
+        assert_eq!(summary["pricing_notes"][0], DEFAULT_WRITE_BASIS);
     }
     #[test]
     fn long_context_full_request_boundary() {

@@ -47,7 +47,8 @@ does not reset that counter.
 
 The compact top-bar controls retain agent and terminal creation and add a small
 usage diagnostics popup. The first divider between the three square controls
-aligns with the viewport midpoint; the controls meet the workspace edge below.
+aligns with the middle pane divider, including the workspace border offset;
+the controls meet the workspace edge below.
 Its cumulative request usage is separate from the
 latest-response context measurement in agent tabs and prompts. The popup can
 show all retained agents or one selected agent, including archived sessions.
@@ -62,7 +63,11 @@ a cache failure. Provider-reported comparison diagnostics are retained when
 present; opening the popup does not send model requests or change cache settings.
 
 Token cost uses a dated table of published model rates. The popup shows the
-table's last update date; rate refresh is currently a source update.
+table's last update date; rate refresh is currently a source update. Token cost
+covers recorded requests, with missing historical usage reported separately.
+When the API omits the cache-write lifetime split, Boid uses the documented
+30-minute default because its requests set no lifetime overrides. Reported
+splits take precedence; raw provider usage is preserved.
 Unsupported models, unknown service tiers or incomplete billing components do
 not receive a guessed price. Reasoning tokens are already included in output.
 The source rates and cache-write accounting are documented in the

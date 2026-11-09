@@ -1647,10 +1647,11 @@ function renderDiagnostics(resetMissing = true) {
     diagnosticRow(totals, label, diagnosticNumber(value), Number.isFinite(value) ? null : missing);
   }
   diagnosticRow(totals, "Cache reuse", Number.isFinite(values.reuse_pct) ? `${values.reuse_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%` : "—", Number.isFinite(values.reuse_pct) ? null : "No known ratio");
-  diagnosticRow(totals, "Token cost", diagnosticCost(summary.estimated_cost_usd), Number.isFinite(summary.estimated_cost_usd) ? null : "Incomplete pricing coverage");
-  if (!Number.isFinite(summary.estimated_cost_usd) && summary.priced_requests > 0) {
-    diagnosticRow(totals, "Priced subtotal", diagnosticCost(summary.priced_cost_usd), `${summary.priced_requests} of ${summary.recorded_requests} recorded requests`);
-  }
+  const recordedCost = summary.priced_requests > 0 ? summary.priced_cost_usd : summary.estimated_cost_usd;
+  const costCoverage = summary.priced_requests < summary.recorded_requests
+    ? `${summary.priced_requests} of ${summary.recorded_requests} recorded requests priced`
+    : null;
+  diagnosticRow(totals, "Token cost", diagnosticCost(recordedCost), costCoverage);
   diagnosticRow(totals, "Rates updated", diagnosticsData.pricing?.as_of || "—");
   diagnosticsContent.append(totals);
   const coverage = [];
