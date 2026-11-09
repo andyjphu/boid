@@ -1647,7 +1647,7 @@ function renderDiagnostics(resetMissing = true) {
     diagnosticRow(totals, label, diagnosticNumber(value), Number.isFinite(value) ? null : missing);
   }
   diagnosticRow(totals, "Cache reuse", Number.isFinite(values.reuse_pct) ? `${values.reuse_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%` : "—", Number.isFinite(values.reuse_pct) ? null : "No known ratio");
-  diagnosticRow(totals, "Estimated USD", diagnosticCost(summary.estimated_cost_usd), Number.isFinite(summary.estimated_cost_usd) ? null : "Incomplete pricing coverage");
+  diagnosticRow(totals, "Token cost", diagnosticCost(summary.estimated_cost_usd), Number.isFinite(summary.estimated_cost_usd) ? null : "Incomplete pricing coverage");
   if (!Number.isFinite(summary.estimated_cost_usd) && summary.priced_requests > 0) {
     diagnosticRow(totals, "Priced subtotal", diagnosticCost(summary.priced_cost_usd), `${summary.priced_requests} of ${summary.recorded_requests} recorded requests`);
   }
@@ -1667,7 +1667,6 @@ function renderDiagnostics(resetMissing = true) {
   }
   if (selectedRecord) {
     const latest = selectedRecord.latest_response;
-    const context = selectedRecord.latest_context;
     if (latest) {
       diagnosticsContent.append(element("h2", null, "Latest response"));
       const details = element("dl", "diagnostics-values");
@@ -1675,26 +1674,9 @@ function renderDiagnostics(resetMissing = true) {
       diagnosticRow(details, "Service tier", latest.service_tier || "—", latest.service_tier ? null : "Not reported");
       diagnosticsContent.append(details);
     }
-    if (context) {
-      diagnosticsContent.append(element("h2", null, "Last context measurement"));
-      const details = element("dl", "diagnostics-values");
-      diagnosticRow(details, "Context input", diagnosticNumber(context.input_tokens), Number.isFinite(context.input_tokens) ? null : "Not recorded");
-      diagnosticRow(details, "Context window", diagnosticNumber(context.context_window), Number.isFinite(context.context_window) ? null : "Unknown for this model");
-      diagnosticRow(details, "Output tokens", diagnosticNumber(context.output_tokens), Number.isFinite(context.output_tokens) ? null : "Not recorded");
-      diagnosticsContent.append(details);
-    } else diagnosticsContent.append(element("p", "diagnostics-note", "No context measurement recorded."));
     if (!latest) diagnosticsContent.append(element("p", "diagnostics-note", "No recorded response yet."));
   }
-  const pricing = element("p", "diagnostics-note", "Estimates at public token rates, not the provider invoice.");
-  const source = diagnosticsData.pricing?.sources?.find(url => typeof url === "string" && url.startsWith("https://"));
-  if (source) {
-    const link = element("a", null, diagnosticsData.pricing.as_of || "Rates");
-    link.href = source;
-    link.target = "_blank";
-    link.rel = "noopener";
-    pricing.append(" ", link);
-  }
-  diagnosticsContent.append(pricing);
+
 }
 
 async function refreshDiagnostics() {

@@ -49,6 +49,8 @@ The compact top-bar controls retain agent and terminal creation and add a small
 usage diagnostics popup. Its cumulative request usage is separate from the
 latest-response context measurement in agent tabs and prompts. The popup can
 show all retained agents or one selected agent, including archived sessions.
+The popup omits the separate last-context measurement and pricing footer;
+context remains visible in the existing agent tab and prompt indicators.
 
 Diagnostics preserve provider-reported usage, response identity, model and
 service tier. Missing cache fields are unknown, not zero; missing historical
