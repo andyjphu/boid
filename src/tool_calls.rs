@@ -9,8 +9,13 @@ pub fn definitions() -> Value {
     let string = json!({"type": "string"});
     json!([
         definition(
+            "list_skills",
+            "List skills in the current turn snapshot, including source ids, invocation policies, disabled entries and discovery warnings.",
+            &[]
+        ),
+        definition(
             "read_skill",
-            "Read the complete guidance for a skill listed in this session's startup catalog. Returns the session's saved skill version without executing scripts.",
+            "Read complete skill guidance from the current turn snapshot. Pass its source id or an unambiguous name. Does not execute scripts.",
             &[("name", string.clone())],
         ),
         definition(

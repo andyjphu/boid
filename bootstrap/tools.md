@@ -108,13 +108,14 @@ Daybreak does not select a reasoning stream. See the
 
 ## Skills in v0.8
 
-New sessions list bundled skills in their startup instructions. `read_skill`
-loads the full text into the model conversation and visible tool trace.
-Humanizer is bundled for writing and editing prose. Existing saved sessions
-keep their captured instructions, tools, and skill versions through recovery;
-new skill availability applies to new sessions. See [bundled skills](../src/skills/README.md)
-for supported behavior and provenance. Skill loading is implemented; a recorded
-load alone does not establish better writing or compliance.
+New sessions discover local skill folders and include bundled Humanizer for
+prose work. `/skills` selects a package; `$name` explicitly requests an
+unambiguous skill. `read_skill` loads full text; `list_skills` exposes sources,
+policies and warnings. Packages refresh at operator-message boundaries while
+previously loaded text remains in the trace. Earlier saved sessions retain their
+original environment. See [local skills](../src/skills/README.md) for directory
+layout, configuration, supporting resources, refresh semantics and provenance.
+Loading alone does not establish compliance or improved writing.
 
 ## Headless routes
 
@@ -126,6 +127,7 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
+| `GET /api/sessions/{id}/skills` | Inspect skills available for the next operator message |
 | `DELETE /api/sessions/{id}` | End the worker and archive its retained record |
 | `GET /api/sessions/archived` | Discover ended agent records |
 | `POST /api/sessions/{id}/reopen` | Reopen a retained agent, stopped until new input |

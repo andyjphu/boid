@@ -108,6 +108,7 @@ pub async fn serve() -> Result<()> {
         .route("/api/sessions/{id}/reopen", post(reopen_session))
         .route("/api/sessions/{id}", get(session).delete(close_session))
         .route("/api/sessions/{id}/messages", post(message))
+        .route("/api/sessions/{id}/skills", get(skill_catalog))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
@@ -237,9 +238,17 @@ async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Js
             )
         })
 }
+async fn skill_catalog(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.skill_catalog(&id))
+        .await
+        .map_err(invalid)?
+        .map(Json)
+        .map_err(invalid)
+}
 async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<Json<Value>> {
-    app.hub
-        .create(input)
+    tokio::task::spawn_blocking(move || app.hub.create(input))
+        .await
+        .map_err(invalid)?
         .map(|view| Json(json!(view)))
         .map_err(invalid)
 }

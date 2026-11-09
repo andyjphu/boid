@@ -79,3 +79,19 @@ an unattended review or rewrite loop.
 These choices remain open. The authorized step here is preserving and making
 the case bank discoverable for self-development; implemented template behavior
 will need a separate product design.
+
+## Skill implementation as reviewable code
+
+Andy clarified on 2026-11-08 that meta-review agents should be able to suggest
+changes throughout skill behavior, down to the code. The [local skill modules](../src/skills/README.md#modules-and-future-changes)
+separate parsing, discovery, policy, catalog guidance, selection and session
+refresh. Those are possible repair targets alongside skill prose and case
+curation. The cause of an observed failure should determine which target changes;
+a guidance edit is not the default answer to a loader or interface defect.
+
+Full Codex ecosystem parity is distant backlog and may never be needed. The
+[current scope decision](../src/skills/README.md#scope-decision-andy-2026-11-08)
+preserves Andy's wording. Local package compatibility and selection/update
+behavior are the current implementation scope. This does not implement generic
+or meta-review templates, automatic review triggers, peer-context editing, or
+self-deployment. Those remain open design work.

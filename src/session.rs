@@ -13,6 +13,10 @@ pub struct Session {
     #[serde(default)]
     pub skills: skills::Skills,
     #[serde(default)]
+    pub skill_base: Option<String>,
+    #[serde(default)]
+    pub skill_warnings: Vec<String>,
+    #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
     history: Vec<Value>,
@@ -115,6 +119,49 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
+    pub fn operator(&mut self, text: String) -> Vec<String> {
+        let selected = if self.skill_base.is_some() {
+            skills::selection::mentions(&text, &self.skills)
+        } else {
+            vec![]
+        };
+        self.user(text);
+        let mut entries = vec![];
+        for selection in selected {
+            let content = match selection {
+                Ok(id) => format!(
+                    "Operator-selected skill:\n{}",
+                    skills::loaded(&id, &self.skills[&id])
+                ),
+                Err(error) => format!("Skill selection failed: {error}"),
+            };
+            self.history
+                .push(json!({"role":"developer","content":content}));
+            entries.push(content);
+        }
+        entries
+    }
+    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) -> Option<String> {
+        let base = self.skill_base.as_ref()?;
+        let prompt = skills::catalog::prompt(&snapshot.skills, snapshot.budget, &snapshot.warnings);
+        let instructions = format!("{base}\n{prompt}");
+        if self.skills == snapshot.skills
+            && self.skill_warnings == snapshot.warnings
+            && self.instructions == instructions
+        {
+            return None;
+        }
+        self.skills = snapshot.skills;
+        self.skill_warnings = snapshot.warnings;
+        self.instructions = instructions;
+        let notice = format!(
+            "Skill catalog refreshed for this operator message. This replaces earlier skill availability and policy; previously loaded text is historical.\n{prompt}\nDiscovery warnings: {}",
+            json!(self.skill_warnings)
+        );
+        self.history
+            .push(json!({"role":"developer","content":notice}));
+        Some(notice)
+    }
     pub fn next_input_batch(&self) -> u64 {
         self.model_requests + 1
     }
@@ -210,6 +257,9 @@ impl Session {
         hub.checkpoint(id, self)?;
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
+            "list_skills" => {
+                json!({"skills":skills::catalog::list(&self.skills), "warnings":self.skill_warnings})
+            }
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
             "send_message" => {
