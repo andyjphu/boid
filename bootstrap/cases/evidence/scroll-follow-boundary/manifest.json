@@ -1,0 +1,40 @@
+{
+  "files": [
+    {
+      "file": "peer-render-before.json",
+      "sha256": "d9a27c1f662e0562f41e37d8967256bf40d263b4627883b47229b417fb211f23"
+    },
+    {
+      "file": "peer-render-after.json",
+      "sha256": "f1d581ed0d1b518d2cc8f957ea0b3f5bb26ad223408bc2029d3feee1c9100003"
+    },
+    {
+      "file": "bottom-wheel-before.json",
+      "sha256": "e065c58e7e640cec3b39476793ab867ce00d6d24a2f9414a6301e7e59bcb0d5d"
+    },
+    {
+      "file": "bottom-wheel-after.json",
+      "sha256": "44666a1010315d9a26e149a7bbad4ae41c75f55d6c3ea26068c2fe0a84c69bdf"
+    },
+    {
+      "file": "retained-space-before.json",
+      "sha256": "64d50f87b3c98073ccba4ba85c337fbcd935b2f4b273a3ced49ec68f9339f337"
+    },
+    {
+      "file": "retained-space-after.json",
+      "sha256": "9ce5445515f82bc069c6836e52ab571803b566c9b9646fb64c47133f4f0f0901"
+    },
+    {
+      "file": "small-up-before.json",
+      "sha256": "1a552f8164161fe1c285c9cfd4911c4ff22648fd79afceb24c52789cd6aaaa69"
+    },
+    {
+      "file": "small-up-after.json",
+      "sha256": "853db288763080a4fcd8df39ba70483ab2d695233a72808b4a008bafe4805fc5"
+    },
+    {
+      "file": "excerpts.json",
+      "sha256": "1550dc3f61dc143519a2736f24a01f13d478f47ac67cc25bbf05f4f36dac0cb9"
+    }
+  ]
+}

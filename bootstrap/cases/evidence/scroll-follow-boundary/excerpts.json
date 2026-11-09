@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-09",
+  "source": "Visible conversation, Codex thread 01a1a450-8944-7370-93d7-c57a2a1ee5b6, Agent Cataclysm",
+  "selection": "Selected verbatim excerpts in conversation order; assistant entries are portions of longer replies. No hidden reasoning or unrelated task content.",
+  "excerpts": [
+    {
+      "sequence": 1,
+      "role": "user",
+      "excerpt": "mm-west-2 appears to be lagging or atleast the web view is when there is a lot of agent to agent communcation try to discern why"
+    },
+    {
+      "sequence": 2,
+      "role": "user",
+      "excerpt": "no like add culling now if its easy, but this is a hotfix, culling should not be the final solution, we'd address that fs in v2"
+    },
+    {
+      "sequence": 3,
+      "role": "assistant",
+      "excerpt": "- Fixed repeated peer-message rendering; full-history replay dropped from ~1.3 seconds to **23\u201334 ms**.\n- Added temporary culling at 200 entries or ~100,000 characters, with older history accessible.\n- Browser checks and 56 Rust tests passed. Full virtualization remains on the v2 backlog."
+    },
+    {
+      "sequence": 4,
+      "role": "user",
+      "excerpt": "currently experiencing scrolling rubberband jamming and strange behavior when scrolling while agents are working, thoughts?"
+    },
+    {
+      "sequence": 5,
+      "role": "user",
+      "excerpt": "occurs when scrolling past bottom"
+    },
+    {
+      "sequence": 6,
+      "role": "assistant",
+      "excerpt": "Found two bugs: scrolling past the bottom triggered an **8-pixel pullback**, and culling could leave stale spacing that created a large blank area.\n\nBoth are fixed in **v1.1.2**, now live on mm-west-2. Streaming browser checks passed, and repeated bottom scrolling stayed stable on the live page. Refresh the browser to load it."
+    },
+    {
+      "sequence": 7,
+      "role": "user",
+      "excerpt": "its still happening is the one hosted on 7734 on your updates"
+    },
+    {
+      "sequence": 8,
+      "role": "user",
+      "excerpt": "remove culling for now, hotfix"
+    },
+    {
+      "sequence": 9,
+      "role": "user",
+      "excerpt": "i scroll to bottom, and then i scroll up a little bit, and then it starts jamming again but if i scroll up a lot it can skip the jamming phase"
+    },
+    {
+      "sequence": 10,
+      "role": "assistant",
+      "excerpt": "Fixed in **v1.1.4**, now live on port **7734**. The restart is finished.\n\nSmall upward gestures now keep following off instead of snapping back. I verified 1-, 4-, and 10-pixel gestures on the live page, plus follow resumption at the bottom. Culling remains disabled."
+    },
+    {
+      "sequence": 11,
+      "role": "user",
+      "excerpt": "nice great job! what caused issue?"
+    },
+    {
+      "sequence": 12,
+      "role": "user",
+      "excerpt": "what a complex issue, document this as a case study"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "initial": {
+    "initial_ms": 104.30000001192093,
+    "entries": 584,
+    "dom_nodes": 3174,
+    "messages": 330
+  },
+  "peer_updates": [
+    {
+      "handler_ms": 0.2999999523162842,
+      "frame_ms": 2.199999988079071,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    },
+    {
+      "handler_ms": 0,
+      "frame_ms": 9.199999988079071,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    },
+    {
+      "handler_ms": 0,
+      "frame_ms": 15.699999988079071,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    }
+  ],
+  "full_history_updates": [
+    {
+      "update_to_paint_ms": 22.69999998807907,
+      "sender_mounted": 1030,
+      "recipient_mounted": 396
+    },
+    {
+      "update_to_paint_ms": 33.59999996423721,
+      "sender_mounted": 1030,
+      "recipient_mounted": 396
+    },
+    {
+      "update_to_paint_ms": 33.200000047683716,
+      "sender_mounted": 1030,
+      "recipient_mounted": 396
+    }
+  ],
+  "profile_top_self_ms": [
+    {
+      "name": "(program)",
+      "ms": 71
+    },
+    {
+      "name": "(idle)",
+      "ms": 15
+    },
+    {
+      "name": "messageBottom",
+      "ms": 3
+    },
+    {
+      "name": "(garbage collector)",
+      "ms": 2
+    },
+    {
+      "name": "communicationFor",
+      "ms": 1
+    },
+    {
+      "name": "(anonymous)",
+      "ms": 0
+    }
+  ],
+  "long_tasks_ms": [
+    176
+  ],
+  "errors": []
+}

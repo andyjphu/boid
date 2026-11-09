@@ -1,0 +1,234 @@
+{
+  "samples": [
+    {
+      "stage": "before_wheel",
+      "top": 14921,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 0,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 0,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_0",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_1",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_2",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_3",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_4",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "settled",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "stream_wheel_0",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 2
+    },
+    {
+      "stage": "stream_wheel_1",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 8
+    },
+    {
+      "stage": "stream_wheel_2",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 14
+    },
+    {
+      "stage": "stream_wheel_3",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 18
+    },
+    {
+      "stage": "stream_wheel_4",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 24
+    },
+    {
+      "stage": "stream_wheel_5",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 28
+    },
+    {
+      "stage": "stream_wheel_6",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 34
+    },
+    {
+      "stage": "stream_wheel_7",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 38
+    },
+    {
+      "stage": "stream_wheel_8",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 44
+    },
+    {
+      "stage": "stream_wheel_9",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 48
+    },
+    {
+      "stage": "stream_settled",
+      "top": 14965,
+      "bottom": 14921,
+      "max": 14966,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 48
+    }
+  ],
+  "retainedCase": {
+    "before": {
+      "retained": 9044,
+      "bottom": 8276,
+      "top": 8316
+    },
+    "after": {
+      "retained": 0,
+      "bottom": 5021,
+      "top": 5061,
+      "excess": 40
+    }
+  },
+  "errors": []
+}

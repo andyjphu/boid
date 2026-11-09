@@ -1,0 +1,337 @@
+{
+  "samples": [
+    {
+      "stage": "before_wheel",
+      "top": 46069,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 0,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 0,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_0",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_1",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_2",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_3",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "wheel_4",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "settled",
+      "top": 46114,
+      "bottom": 46069,
+      "max": 46114,
+      "clearance": 45,
+      "auto": false,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 1,
+      "writes": 0
+    },
+    {
+      "stage": "stream_bottom",
+      "top": 46064,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 3,
+      "writes": 8
+    },
+    {
+      "stage": "small_up_0",
+      "top": 46060,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 40,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 4,
+      "writes": 12
+    },
+    {
+      "stage": "small_up_1",
+      "top": 46057,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 37,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 6,
+      "writes": 20
+    },
+    {
+      "stage": "small_up_2",
+      "top": 46057,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 37,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 8,
+      "writes": 24
+    },
+    {
+      "stage": "small_up_3",
+      "top": 46057,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 37,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 10,
+      "writes": 32
+    },
+    {
+      "stage": "small_up_4",
+      "top": 46057,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 37,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 12,
+      "writes": 36
+    },
+    {
+      "stage": "large_up",
+      "top": 45907,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 0,
+      "auto": true,
+      "retained": 0,
+      "follow": false,
+      "scrollEvents": 13,
+      "writes": 40
+    },
+    {
+      "stage": "return_bottom",
+      "top": 46064,
+      "bottom": 46020,
+      "max": 46065,
+      "clearance": 44,
+      "auto": true,
+      "retained": 0,
+      "follow": true,
+      "scrollEvents": 14,
+      "writes": 44
+    }
+  ],
+  "tail": [
+    {
+      "from": 46056,
+      "to": 46057,
+      "at": 1522.9000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1522.9000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1555.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1555.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1589.5
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1589.5
+    },
+    {
+      "from": 46053,
+      "to": 46057,
+      "at": 1623.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1623.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1672.800000011921
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1672.800000011921
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1705.5
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1705.5
+    },
+    {
+      "from": 46053,
+      "to": 46057,
+      "at": 1724.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1724.5
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1757.6000000238419
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1757.6000000238419
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1790.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1790.4000000357628
+    },
+    {
+      "from": 46053,
+      "to": 46057,
+      "at": 1823.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1823.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1872.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1872.4000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1905.9000000357628
+    },
+    {
+      "from": 46057,
+      "to": 46057,
+      "at": 1906
+    },
+    {
+      "from": 45907,
+      "to": 45907,
+      "at": 1955.5
+    },
+    {
+      "from": 45907,
+      "to": 45907,
+      "at": 1989.5
+    },
+    {
+      "from": 46064,
+      "to": 46064,
+      "at": 2023.1000000238419
+    },
+    {
+      "from": 46064,
+      "to": 46064,
+      "at": 2023.1000000238419
+    },
+    {
+      "from": 46064,
+      "to": 46064,
+      "at": 2072.800000011921
+    },
+    {
+      "from": 46064,
+      "to": 46064,
+      "at": 2072.800000011921
+    }
+  ],
+  "errors": []
+}

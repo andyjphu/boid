@@ -1,0 +1,112 @@
+{
+  "initial": {
+    "initial_ms": 5002.200000047684,
+    "entries": 4172,
+    "dom_nodes": 22792,
+    "messages": 330
+  },
+  "peer_updates": [
+    {
+      "handler_ms": 1276.3999999761581,
+      "frame_ms": 1276.6000000238419,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    },
+    {
+      "handler_ms": 1282.699999988079,
+      "frame_ms": 1294.3999999761581,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    },
+    {
+      "handler_ms": 1333.199999988079,
+      "frame_ms": 1344,
+      "sender_entries": 1557,
+      "recipient_entries": 613
+    }
+  ],
+  "selectionAudit": {
+    "baseline_ms": 1287.1000000238419,
+    "baseline_calls": 1354,
+    "selection_collapsed": true
+  },
+  "layoutMetrics": {
+    "LayoutCount": 393,
+    "LayoutDuration": 0.23960800000000002,
+    "RecalcStyleCount": 565,
+    "RecalcStyleDuration": 0.9096690000000001,
+    "TaskDuration": 1.309993
+  },
+  "cachedSelection": {
+    "handler_ms": 114.59999996423721,
+    "selection_was_active": false
+  },
+  "profile_top_self_ms": [
+    {
+      "name": "selectedWithin",
+      "ms": 3505
+    },
+    {
+      "name": "(anonymous)",
+      "ms": 118
+    },
+    {
+      "name": "(program)",
+      "ms": 107
+    },
+    {
+      "name": "toolEntry",
+      "ms": 66
+    },
+    {
+      "name": "renderToolEntry",
+      "ms": 45
+    },
+    {
+      "name": "communicationFor",
+      "ms": 40
+    },
+    {
+      "name": "replaceChildren",
+      "ms": 28
+    },
+    {
+      "name": "append",
+      "ms": 28
+    },
+    {
+      "name": "createElement",
+      "ms": 15
+    },
+    {
+      "name": "(garbage collector)",
+      "ms": 13
+    },
+    {
+      "name": "renderEntry",
+      "ms": 11
+    },
+    {
+      "name": "receiveCommunication",
+      "ms": 9
+    },
+    {
+      "name": "element",
+      "ms": 7
+    },
+    {
+      "name": "getSelection",
+      "ms": 3
+    },
+    {
+      "name": "evaluate",
+      "ms": 1
+    }
+  ],
+  "long_tasks_ms": [
+    4793,
+    1293,
+    1343
+  ],
+  "errors": []
+}
