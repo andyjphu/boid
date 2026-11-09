@@ -548,10 +548,19 @@ function addSession(view) {
       else ui.modelPicker.querySelector(".model-option")?.focus({ preventScroll: true });
     }
   });
-  ui.slashSuggestion = element("div", "slash-suggestion", "/model  Select model and effort");
+  ui.slashSuggestion = element("div", "slash-suggestion");
+  ui.slashSuggestion.id = `slash-${id}`;
+  ui.slashSuggestion.setAttribute("role", "listbox");
+  ui.slashSuggestion.setAttribute("aria-label", "Slash commands");
   ui.slashSuggestion.hidden = true;
   ui.slashSuggestion.addEventListener("mousedown", event => event.preventDefault());
-  ui.slashSuggestion.addEventListener("click", () => { ui.input.value = ui.slashCommand || "/model"; ui.composer.requestSubmit(); });
+  ui.slashSuggestion.addEventListener("click", event => {
+    const option = event.target.closest(".slash-option");
+    if (!option) return;
+    ui.input.value = option.dataset.command;
+    resizeInput();
+    ui.composer.requestSubmit();
+  });
   ui.skillPicker = element("div", "skill-picker");
   ui.skillPicker.hidden = true;
   ui.skillPicker.tabIndex = -1;
@@ -637,19 +646,33 @@ function addSession(view) {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
-    ui.slashCommand = ["/model", "/skills", "/oai-compact"].find(command => command.startsWith(text));
-    ui.slashSuggestion.textContent = {
+    const commands = {
       "/model": "/model  Select model and effort",
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
-    }[ui.slashCommand] || "";
+      "/clear": "/clear  Start fresh model context",
+    };
+    ui.slashMatches = Object.keys(commands).filter(command => command.startsWith(text));
+    if (!ui.slashMatches.includes(ui.slashCommand)) ui.slashCommand = ui.slashMatches[0];
+    ui.slashSuggestion.replaceChildren(...ui.slashMatches.map(command => {
+      const option = element("div", "slash-option", commands[command]);
+      option.id = `slash-${id}-${command.slice(1)}`;
+      option.dataset.command = command;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(command === ui.slashCommand));
+      return option;
+    }));
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
+    ui.input.setAttribute("aria-controls", ui.slashSuggestion.id);
+    ui.input.setAttribute("aria-expanded", String(!ui.slashSuggestion.hidden));
+    if (!ui.slashSuggestion.hidden) ui.input.setAttribute("aria-activedescendant", `slash-${id}-${ui.slashCommand.slice(1)}`);
+    else ui.input.removeAttribute("aria-activedescendant");
     clearPromptSpaceWhenHidden(ui);
     updateContextVisibility(ui);
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); activatePromptSpace(ui); });
+  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -670,8 +693,13 @@ function addSession(view) {
     if (!event.isComposing && !ui.slashSuggestion.hidden && !event.ctrlKey && !event.metaKey && !event.altKey) {
       if (["Escape", "Tab", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
-        if (event.key === "Escape") { ui.slashDismissed = true; ui.slashSuggestion.hidden = true; }
+        if (event.key === "Escape") { ui.slashDismissed = true; resizeInput(); }
         if (event.key === "Tab") { ui.input.value = ui.slashCommand; resizeInput(); }
+        if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+          const index = ui.slashMatches.indexOf(ui.slashCommand);
+          ui.slashCommand = ui.slashMatches[(index + (event.key === "ArrowDown" ? 1 : -1) + ui.slashMatches.length) % ui.slashMatches.length];
+          resizeInput();
+        }
         return;
       }
     }
@@ -707,7 +735,7 @@ function addSession(view) {
       await openSkillPicker(ui);
       return;
     }
-    if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
+    if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/model")) {
       ui.input.value = "";
       historyIndex = null;
       resizeInput();
@@ -717,7 +745,7 @@ function addSession(view) {
     ui.sending = true;
     ui.error.hidden = true;
     try {
-      const submitted = !ui.slashSuggestion.hidden && ui.slashCommand === "/oai-compact" ? "/oai-compact" : text;
+      const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
       ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted });
       await ui.submission;
       if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }

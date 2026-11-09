@@ -159,13 +159,26 @@ impl SessionStore {
         Ok(())
     }
     pub fn archive_context<T: Serialize>(&self, id: &str, attempt: u64, record: &T) -> Result<()> {
+        self.archive_record(id, "compactions", &attempt.to_string(), record)
+    }
+    pub fn archive_clear<T: Serialize>(&self, id: &str, command: &str, record: &T) -> Result<()> {
+        uuid::Uuid::parse_str(command).context("Invalid clear command ID.")?;
+        self.archive_record(id, "clears", command, record)
+    }
+    fn archive_record<T: Serialize>(
+        &self,
+        id: &str,
+        kind: &str,
+        suffix: &str,
+        record: &T,
+    ) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
         };
         if uuid::Uuid::parse_str(id).is_err() {
             bail!("Invalid session ID.");
         }
-        let archive = directory.join("compactions");
+        let archive = directory.join(kind);
         fs::create_dir_all(&archive)?;
         fs::set_permissions(&archive, fs::Permissions::from_mode(0o700))?;
         File::open(directory)?.sync_all()?;
@@ -173,7 +186,7 @@ impl SessionStore {
         temporary.write_all(&serde_json::to_vec(record)?)?;
         temporary.as_file().sync_all()?;
         temporary
-            .persist_noclobber(archive.join(format!("{id}-{attempt}.json")))
+            .persist_noclobber(archive.join(format!("{id}-{suffix}.json")))
             .map_err(|e| e.error)?;
         File::open(archive)?.sync_all()?;
         Ok(())

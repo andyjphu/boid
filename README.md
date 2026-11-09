@@ -42,3 +42,10 @@ culling is disabled; full transcript virtualization remains v2 work.
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 
 v0.5 preview · [PR #5](https://github.com/andyjphu/boid/pull/5).
+
+In an agent composer, type `/` to select a slash command with the arrow keys and
+Enter. `/clear` starts fresh model context while keeping the transcript, agent
+identity, and configuration. `/oai-compact` directly runs OpenAI compaction,
+using the same operation as the `oai_compact` tool. Both wait for the current
+response and tool batch. Clearing makes no model request; queued messages then
+use the fresh context. Previous context is saved privately in `sessions/clears/`.
