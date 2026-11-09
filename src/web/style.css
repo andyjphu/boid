@@ -277,3 +277,6 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .skill-option span { display: block; overflow-wrap: anywhere; }
 .skill-source, .skill-description { color: #aaa; }
 .skill-warning { color: #e8b675; padding: 3px 0; }
+
+.skill-event summary { cursor: pointer; color: #aaa; }
+.skill-text { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }

@@ -153,6 +153,7 @@ function reportUnsavedEnd(result) {
 }
 
 function removeSession(ui) {
+  ui.skillRequest = (ui.skillRequest || 0) + 1;
   ui.traceResize.disconnect();
   ui.overlayResize.disconnect();
   if (selected === ui.pane) selected = null;
@@ -293,24 +294,32 @@ async function openModelPicker(ui) {
   }
 }
 
+function pickerOpen(ui) {
+  return !ui.modelPicker.hidden || !ui.skillPicker.hidden;
+}
+
+function closeSkillPicker(ui) {
+  ui.skillRequest = (ui.skillRequest || 0) + 1;
+  ui.skillPicker.hidden = true;
+  ui.composer.hidden = false;
+  updateActivity(ui);
+  ui.input.focus({ preventScroll: true });
+}
+
 async function openSkillPicker(ui) {
+  const generation = ui.skillRequest = (ui.skillRequest || 0) + 1;
+  const current = () => sessions.get(ui.id) === ui && ui.skillRequest === generation && !ui.skillPicker.hidden;
   ui.slashSuggestion.hidden = true;
   ui.composer.hidden = true;
   ui.modelPicker.hidden = true;
   ui.skillPicker.hidden = false;
-  ui.activity.lastChild.textContent = "";
+  clearPromptSpaceWhenHidden(ui);
+  updateActivity(ui);
   ui.skillPicker.replaceChildren(element("div", "model-hint", "Loading skills…"));
   ui.skillPicker.focus({ preventScroll: true });
-  const close = () => {
-    ui.skillPicker.hidden = true;
-    ui.activity.lastChild.textContent = "Esc to interrupt";
-    ui.composer.hidden = false;
-    ui.input.focus({ preventScroll: true });
-  };
-  ui.closeSkillPicker = close;
   try {
     const catalog = await request(`/api/sessions/${encodeURIComponent(ui.id)}/skills`);
-    if (ui.skillPicker.hidden) return;
+    if (!current()) return;
     ui.skillPicker.replaceChildren();
     const filter = element("input", "skill-filter");
     filter.placeholder = "Find a skill…";
@@ -327,11 +336,10 @@ async function openSkillPicker(ui) {
           element("span", "skill-source", skill.source), element("span", "skill-description", skill.description));
         for (const warning of skill.warnings) option.append(element("span", "skill-warning", warning));
         option.addEventListener("click", () => {
-          // JSON escaping is unnecessary: ids are plain textarea content, never HTML.
           const mention = `$[${skill.id}] `;
           ui.input.setRangeText(mention, ui.input.selectionStart, ui.input.selectionEnd, "end");
+          closeSkillPicker(ui);
           ui.input.dispatchEvent(new Event("input", { bubbles: true }));
-          close();
         });
         choices.append(option);
       }
@@ -344,7 +352,7 @@ async function openSkillPicker(ui) {
     ui.skillPicker.append(element("div", "model-hint", "Enter select · Esc back"));
     render();
     filter.focus({ preventScroll: true });
-  } catch (error) { close(); showError(ui.error, error); }
+  } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
 }
 
 function addSession(view) {
@@ -393,11 +401,14 @@ function addSession(view) {
     if (event.isComposing || !["Escape", "Enter", "ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
     event.stopPropagation();
-    if (event.key === "Escape") { ui.closeSkillPicker?.(); return; }
+    if (event.key === "Escape") { closeSkillPicker(ui); return; }
     const options = [...ui.skillPicker.querySelectorAll(".skill-option:not(:disabled)")];
     const index = options.indexOf(document.activeElement);
     if (event.key === "Enter") (options[index < 0 ? 0 : index])?.click();
-    else if (options.length) options[(index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length].focus();
+    else if (options.length) {
+      const next = index < 0 ? (event.key === "ArrowDown" ? 0 : options.length - 1) : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[next].focus();
+    }
   });
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
@@ -530,7 +541,7 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const hint = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  const hint = pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
 }
 
@@ -730,11 +741,50 @@ function renderToolEntry(ui, item) {
   }
 }
 
+function renderSkillEntry(ui, item) {
+  const { body, text } = item;
+  let event;
+  try { event = JSON.parse(text); } catch { body.textContent = text; return; }
+  body.replaceChildren();
+  if (event.event === "error") {
+    body.append(element("div", "skill-warning", `Skill selection failed: ${event.error}`));
+    return;
+  }
+  const skill = event.skill;
+  if (event.event !== "catalog" && (event.event !== "loaded" || typeof skill?.text !== "string")) {
+    body.textContent = text;
+    return;
+  }
+  const details = element("details", "skill-event");
+  details.open = Boolean(item.expandedSkill);
+  details.append(element("summary", null, skill ? `Loaded ${skill.name || skill.id}` : "Skills refreshed"));
+  if (skill) {
+    details.append(element("div", "skill-source", skill.source));
+    if (skill.version) details.append(element("div", "skill-source", skill.version));
+  }
+  details.append(element("pre", "skill-text", skill ? skill.text : event.text));
+  body.append(details);
+  for (const warning of (skill?.warnings || event.warnings || [])) body.append(element("div", "skill-warning", warning));
+  details.querySelector("summary").addEventListener("click", e => {
+    e.preventDefault();
+    rememberPosition(ui);
+    item.expandedSkill = details.open = !details.open;
+    restorePosition(ui);
+  });
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected || Boolean(item.expandedSkill) === details.open) return;
+    item.expandedSkill = details.open;
+    restorePosition(ui);
+  });
+}
+
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
-  if (kind === "assistant") {
+  if (kind === "skill") {
+    renderSkillEntry(ui, item);
+  } else if (kind === "assistant") {
     body.textContent = text;
   } else if (kind === "tool_call" || kind === "tool_result") {
     renderToolEntry(ui, item);
@@ -1392,7 +1442,7 @@ document.addEventListener("focusin", event => {
 document.addEventListener("keydown", async event => {
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
-    event.preventDefault(); skillPicker.closeSkillPicker?.(); return;
+    event.preventDefault(); closeSkillPicker(skillPicker); return;
   }
   const picker = [...sessions.values()].find(ui => ui.pane === selected && !ui.modelPicker.hidden);
   if (picker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
