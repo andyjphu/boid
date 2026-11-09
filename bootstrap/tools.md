@@ -22,12 +22,12 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Each has a compact tab header with an icon and a left
-close control. Pane titles do not change the layout.
+and real terminal panes. Each has a compact tab header beginning with an icon and ending
+with a close control. Tabs grow with their title and path, truncating at the
+available pane width.
 Traces show selected instructions and tools, user and peer messages, text,
 tool calls and results, and control events. Provider-exposed reasoning summaries
-are hidden in every pane pending the v0.6 presentation work; events remain in
-the full session record.
+are hidden in every pane; events remain in the full session record.
 Models may return no summary; hidden reasoning is unavailable. Responses are displayed as plain text. Startup context is expandable;
 its full-session link retains the original event record, including transport
 receipts omitted from the reading view. The view adds no tool-result truncation.
@@ -41,8 +41,12 @@ arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.
 
 An empty message box appears on pane hover or keyboard focus; a draft keeps it
-visible. The hidden empty box collapses completely; Working retains its own slot below
-the stream. Browser text assistance is disabled on text inputs.
+visible. The box overlays the stream, so revealing it does not resize the
+transcript. Typing, submission, or followed output makes room above the visible
+box; manual history reading keeps its position. Extra scroll space permits
+uncovering messages, but following targets the message end when the box is
+hidden. Working retains a reserved line below the stream even when idle.
+Browser text assistance is disabled on text inputs.
 Disconnection mutes the view. Each pane has an × control that ends execution and archives its record; there is no separate
 Latest control or title gesture that enlarges a pane.
 
@@ -61,13 +65,14 @@ normal behavior.
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
 the current model response and all its tool calls to finish, then enters the
 next model request without cancelling work. Escape in the selected
-agent pane interrupts immediately and applies queued input. Without queued
+agent pane requests interruption and applies queued input. Without queued
 input, it leaves execution stopped. Draft text is preserved. Completed results
 stay in context; interrupted actions are marked potentially partial. The
 headless Stop route retains its separate priority path and cancels older queued
 requests. Later user input can resume work. While an agent is working, a bottom
-indicator shows Working and Esc to interrupt; it remains visible when the
-message box is hidden.
+indicator shows Working, elapsed time, and Esc to interrupt; it remains visible
+when the message box is hidden. The elapsed time uses the server timestamp and
+survives browser refresh.
 
 `list_agents` exposes session identities and status. `send_message` queues an
 attributed message for the recipient's next model request. It does not interrupt
@@ -89,9 +94,9 @@ and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
 context. API failures are reported without automatic retries. Runtime guidance
 is compiled from `src/PRINCIPLES.md`; parent/bootstrap discovery is not automatic.
 
-The active v0.6 profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
+The default profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
 local keyboard picker for that single profile; Enter confirms and Escape closes
-it. The command is not sent to an agent. The picker reads server configuration,
+it. The command is not sent to an agent. The picker reads the session's retained profile,
 so it does not imply an unavailable model was activated.
 
 Requests send `reasoning.effort: medium` and `access_programs.cyber: daybreak_blue`
@@ -152,7 +157,28 @@ Install personal themes/plugins and portable shell settings in the container's
 home; host-specific paths and credential loaders do not belong in that copy.
 The browser terminal prefers locally installed MesloLGS NF, with monospace
 fallbacks. Andy's preview uses his Powerlevel10k settings, Oh My Zsh, Git,
-autosuggestions, and syntax highlighting.
+autosuggestions, and syntax highlighting. These are operator-provided container
+settings, not assets bundled with Boid.
+
+Keep configured shell settings in a persistent container-home volume so replacing
+the server container does not remove the theme. For an existing configured
+container, copy only the portable theme files into that volume before first use:
+
+```sh
+BOID_THEME_SOURCE=existing-configured-container
+set -o pipefail
+docker exec "$BOID_THEME_SOURCE" tar \
+  --exclude=.git --exclude=cache --exclude=log \
+  -C /root -cf - .zshrc .p10k.zsh .oh-my-zsh | \
+  docker run --rm -i --network none -v boid-shell-home:/root \
+    boid-dev tar -C /root -xf -
+```
+
+Use a new volume for that initial copy, then reuse it when replacing containers.
+The source must already have the desired theme and portable settings; this does
+not install Powerlevel10k from scratch. The named paths deliberately omit shell
+history and unrelated home files. Keep personal settings out of Git. The launch
+example below mounts both durable session state and this separate shell home.
 
 ## File and command behavior
 
@@ -210,6 +236,8 @@ docker run --rm --init \
   --pids-limit=256 --memory=4g --cpus=4 \
   -p 127.0.0.1:7734:7734 \
   -e OPENAI_API_KEY -e BOID_MODEL -e BOID_LISTEN=0.0.0.0:7734 \
+  -e BOID_STATE_DIR=/state -v boid-state:/state \
+  -v boid-shell-home:/root \
   -v "$BOID_WORKSPACE:/work" -v boid-v3-target:/opt/boid:ro \
   boid-dev /opt/boid/debug/boid serve
 ```

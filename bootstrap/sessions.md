@@ -8,12 +8,14 @@ The server sends one sequenced catalog snapshot containing agents and terminals,
 then lifecycle updates. PTY bytes use their specialized WebSocket.
 
 An agent or live terminal pane's × ends execution and preserves history.
-+ agent opens a local setup pane with editable defaults and active/inactive
-session choices. It can stay open while other panes are used. Creating or
++ agent opens a local setup pane with native placeholder defaults and Active sessions /
+Inactive sessions choices. Blank fields use the displayed defaults on creation.
+It can stay open while other panes are used. Creating or
 reopening an agent replaces that setup in its position. Reopening leaves the
 agent stopped until new input. A setup pane's × only discards the local draft.
 The agent chooser contains only agent sessions. Terminal records remain
-retained separately; existing replay panes never start a replacement shell.
+retained separately. Only running terminals have panes; ending a shell removes
+its pane in every window, and refresh does not restore an exited terminal.
 
 + terminal starts immediately in the server's repository working directory.
 The tab follows the observed shell working directory, with the full path in its
@@ -25,6 +27,19 @@ plus unfinished setup fields in sessionStorage. Refresh/reconnect restores the
 order; new sessions append. This storage contains browser layout and drafts,
 not the server's authoritative agent record. Another window can have a different
 layout. Clearing browser storage discards that view state without ending work.
+
+## Prompt and activity layout
+
+The prompt overlays the transcript. Hovering or focusing it does not move
+messages. Typing, submission, or new output while following keeps the latest
+message above a visible prompt. This clearance remains while hover, focus, or a
+draft keeps the prompt visible. Once hidden, following targets the message end
+rather than the extra scroll space. Reading history preserves its position.
+
+A reserved footer line prevents working/idle transitions from resizing the
+stream. Working titles shimmer; the footer shows elapsed time and the Escape
+hint. The server retains the start time of each working period, so reconnecting
+does not reset that counter.
 
 ## Continuity follow-up
 
