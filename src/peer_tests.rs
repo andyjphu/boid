@@ -743,7 +743,13 @@ async fn restart_restores_listening_without_greetings_and_preserves_stop() {
     assert_eq!(hub.view(&stopped.id).unwrap().status, "stopped");
     hub.message(&stopped.id, "Resume explicitly".into())
         .unwrap();
-    let (_, release) = next(&mut rx).await;
+    let (urgent, release) = next(&mut rx).await;
+    assert!(urgent["input"].to_string().contains("(emergency)"));
+    assert!(!urgent["input"].to_string().contains("Resume explicitly"));
+    release.send(json!([])).unwrap();
+    let (regular, release) = next(&mut rx).await;
+    assert!(regular["input"].to_string().contains("(regular)"));
+    assert!(regular["input"].to_string().contains("Resume explicitly"));
     release.send(json!([])).unwrap();
     wait_status(&hub, &stopped.id, "idle").await;
     assert_eq!(
