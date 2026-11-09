@@ -29,7 +29,7 @@ function loadPaneOrder(cwd) {
     const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
     for (const draft of saved?.drafts || []) {
-      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) {
+      if (draft && typeof draft.id === "string" && ["name", "cwd"].every(key => typeof draft[key] === "string")) {
         const restored = { ...draft };
         if (saved.version !== 2) {
           for (const [key, value] of Object.entries(agentDefaults)) if (restored[key] === value) restored[key] = "";
@@ -1393,7 +1393,7 @@ function attachTerminal(info) {
 }
 
 const agentDefaults = {
-  name: "canary", cwd: "", message: "Inspect the working directory and summarize what is here.",
+  name: "canary", cwd: "",
 };
 let choicesVersion = 0;
 let choicesTimer;
@@ -1420,7 +1420,7 @@ function discardSetup(ui, replacement) {
 function addSetup(saved) {
   const values = saved || {
     id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
-    name: "", cwd: "", message: "",
+    name: "", cwd: "",
   };
   if (drafts.has(values.id)) return drafts.get(values.id);
   const ui = makePane("New agent", "", "draft", values.id);
@@ -1432,12 +1432,11 @@ function addSetup(saved) {
   ui.close.setAttribute("aria-label", "Discard agent draft");
   const body = element("div", "session-setup-grid");
   ui.form = element("form", "setup-form");
-  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"], ["message", "Task"]]) {
+  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"]]) {
     const wrapper = element("label", null, label);
-    const input = element(key === "message" ? "textarea" : "input");
+    const input = element("input");
     input.name = key;
     input.value = values[key];
-    if (key === "message") input.rows = 4;
     input.placeholder = agentDefaults[key];
     input.addEventListener("input", rememberPaneOrder);
     wrapper.append(input);
