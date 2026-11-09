@@ -51,6 +51,7 @@ views.forEach(view => view.communications = [message]);
 
     // A peer link reveals a culled destination, and Latest restores the bounded view.
     await page.locator('[data-pane-key="agent:recipient"] .peer-link').click();
+    await page.waitForFunction(() => sessions.get('sender').entries.get('10').node.isConnected);
     await frames();
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('10').node.isConnected), true);
     await page.evaluate(() => sessions.get('sender').historyOlder.click());
@@ -119,7 +120,57 @@ views.forEach(view => view.communications = [message]);
     await frames();
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.size), 600);
     assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 200);
+    // Real wheel gestures at the bottom must not fight automatic following.
+    const trace = page.locator('[data-pane-key="agent:sender"] .trace');
+    await trace.hover();
+    for (let i = 0; i < 4; i++) {
+      await page.mouse.wheel(0, 150);
+      await page.waitForTimeout(80);
+      assert.ok(await page.evaluate(() => {
+        const ui = sessions.get('sender');
+        return ui.trace.scrollHeight - ui.trace.clientHeight - ui.trace.scrollTop <= 1.1;
+      }));
+    }
+    await page.evaluate(() => {
+      let n = 0;
+      window.streamTimer = setInterval(() => putEntry(sessions.get('sender'), {
+        id: 'wheel-' + n++, kind: 'assistant', text: 'stream '.repeat(40),
+      }), 40);
+    });
+    try {
+      for (let i = 0; i < 5; i++) {
+        await page.mouse.wheel(0, 150);
+        await page.waitForTimeout(80);
+        assert.ok(await page.evaluate(() => {
+          const ui = sessions.get('sender');
+          return ui.trace.scrollHeight - ui.trace.clientHeight - ui.trace.scrollTop <= 1.1;
+        }));
+      }
+      await page.mouse.wheel(0, -250);
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => sessions.get('sender').follow), false);
+    } finally { await page.evaluate(() => clearInterval(streamTimer)); }
+
+    // Removing a tall prefix must move retained composer space with the content.
+    await page.evaluate(() => {
+      const history = Array.from({ length: 200 }, (_, i) => ({ id: String(i), kind: 'assistant',
+        text: i === 0 ? 'tall line\n'.repeat(200) : 'short line' }));
+      snapshot([{ id: 'sender', name: 'canary', cwd: '/tmp', status: 'idle', entries: history, pending: [] }], []);
+      const ui = sessions.get('sender'); ui.follow = true;
+      ui.historyLimit = transcriptEntries; ui.historyCharacters = transcriptCharacters;
+    });
+    await frames();
+    await page.evaluate(() => {
+      const ui = sessions.get('sender'); ui.trace.scrollTop = messageBottom(ui) + 40;
+      retainPromptSpace(ui); ui.autoClearance = false; ui.followClearance = 0;
+      putEntry(ui, { id: '200', kind: 'assistant', text: 'new short line' });
+    });
+    await frames();
+    assert.ok(await page.evaluate(() => {
+      const ui = sessions.get('sender');
+      return ui.trace.scrollTop - messageBottom(ui) <= ui.overlay.getBoundingClientRect().height + composerPadding + 1;
+    }));
     assert.deepEqual(errors, []);
-    console.log('PASS: bounded history, older history/scroll anchor, peer navigation, targeted updates, expanded tools, selection/streaming, character budget, hidden reasoning, reconnect');
+    console.log('PASS: bounded history, older history/scroll anchor, peer navigation, targeted updates, expanded tools, selection/streaming, character budget, hidden reasoning, reconnect, bottom wheel/streaming, retained composer space');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -9,6 +9,7 @@ const communications = new Map();
 const communicationEntries = new Map();
 const transcriptEntries = 200;
 const transcriptCharacters = 100_000;
+const composerPadding = 8;
 let renderSelection;
 
 function rememberCommunication(message) {
@@ -264,8 +265,9 @@ function followTarget(ui) {
     ui.retainedPromptEnd - ui.trace.clientHeight);
   if (bottom + ui.trace.clientHeight >= ui.retainedPromptEnd) ui.retainedPromptEnd = 0;
   // Keep enough scrollable space while new content fills the vacated prompt area.
-  const reserve = Math.max(ui.overlay.getBoundingClientRect().height, target - bottom);
-  ui.trace.style.setProperty("--composer-space", `${Math.ceil(reserve) + 8}px`);
+  const reserve = Math.max(ui.overlay.getBoundingClientRect().height,
+    target - bottom - composerPadding);
+  ui.trace.style.setProperty("--composer-space", `${Math.ceil(reserve) + composerPadding}px`);
   return target;
 }
 
@@ -591,12 +593,13 @@ function addSession(view) {
   ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
+    const wasFollowing = ui.follow;
     ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
     ui.followClearance = ui.follow && promptVisible(ui)
-      ? Math.min(ui.overlay.getBoundingClientRect().height,
+      ? Math.min(ui.overlay.getBoundingClientRect().height + composerPadding,
         Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
     rememberPosition(ui);
-    if (ui.follow) scheduleTranscript(ui);
+    if (ui.follow && !wasFollowing) scheduleTranscript(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
@@ -614,7 +617,7 @@ function addSession(view) {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
     if (height < ui.overlayHeight) {
       retainPromptSpace(ui);
-      ui.followClearance = Math.min(ui.followClearance, height);
+      ui.followClearance = Math.min(ui.followClearance, height + composerPadding);
     }
     ui.overlayHeight = height;
     followTarget(ui);
@@ -1074,12 +1077,17 @@ function updateTranscriptWindow(ui) {
     const retained = new Set(history);
     for (const item of ui.mounted) if (retained.has(item)) wanted.add(item);
   }
+  const heightBeforeCulling = ui.retainedPromptEnd ? ui.content.offsetHeight : 0;
   for (const item of ui.mounted) {
     if (wanted.has(item)) continue;
     item.node.remove();
     item.body.replaceChildren();
     item.rendered = false;
     item.communicationSignature = undefined;
+  }
+  if (heightBeforeCulling) {
+    ui.retainedPromptEnd = Math.max(0,
+      ui.retainedPromptEnd - (heightBeforeCulling - ui.content.offsetHeight));
   }
   let next = null;
   for (let i = history.length - 1; i >= 0; i--) {
