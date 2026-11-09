@@ -145,7 +145,11 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .entry[data-kind="user"][data-pending="Queued"] { background: #303030; }
 .entry[data-kind="user"].user-joined-after { margin-bottom: 0; padding-bottom: 1px; }
 .entry[data-kind="user"].user-joined-before { padding-top: 1px; }
-.entry[data-kind="peer"] { border-left: 2px solid #777; padding-left: 4px; }
+.peer-header { white-space: pre-wrap; }
+.peer-text { white-space: pre-wrap; }
+.peer-link { font: inherit; color: inherit; border: 0; padding: 0; background: none; cursor: pointer; }
+.peer-link:hover { background: none; text-decoration: underline; }
+.peer-link:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 .entry[data-kind="reasoning"] { display: none !important; }
 .entry[data-kind="error"], .stderr { color: #f0a29c; }
 .entry[data-kind="notice"] { color: #999;  }
@@ -280,3 +284,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 
 .skill-event summary { cursor: pointer; color: #aaa; }
 .skill-text { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
+
+.entry[data-communication-id] { color: inherit; margin-bottom: 12px; padding: 5px 0; }
+.entry[data-communication-direction="outgoing"] { background: #253344; }
+.entry[data-communication-direction="incoming"] { background: #263A32; }

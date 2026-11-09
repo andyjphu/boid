@@ -136,6 +136,28 @@ impl SessionStore {
         serde_json::from_slice(&bytes).context("Invalid skill snapshot; original retained")
     }
 
+    pub fn backup(&self, id: &str) -> Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            bail!("Invalid session ID.");
+        }
+        let source = directory.join(format!("{id}.json"));
+        if !source.exists() {
+            return Ok(());
+        }
+        let backup = directory.join(format!("{id}.before-v9"));
+        if backup.exists() {
+            return Ok(());
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(&fs::read(source)?)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist_noclobber(&backup).map_err(|e| e.error)?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    }
     pub fn save<T: Serialize>(&self, id: &str, record: &T) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
@@ -208,5 +230,35 @@ impl SessionStore {
             })?);
         }
         Ok(deltas)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_failure_does_not_publish_and_retry_preserves_original() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(root.path().into()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let source = root.path().join("sessions").join(format!("{id}.json"));
+        let backup = source.with_extension("before-v9");
+        // A source read failure used to leave an empty, apparently valid backup.
+        fs::create_dir(&source).unwrap();
+        assert!(store.backup(&id).is_err());
+        assert!(!backup.exists());
+        fs::remove_dir(&source).unwrap();
+        let original = b"{\"version\":2}";
+        fs::write(&source, original).unwrap();
+        store.backup(&id).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::write(&source, b"{\"version\":3}").unwrap();
+        store.backup(&id).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), original);
     }
 }

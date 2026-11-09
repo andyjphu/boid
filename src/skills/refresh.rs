@@ -21,6 +21,9 @@ impl Scan {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }

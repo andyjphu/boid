@@ -68,8 +68,15 @@ pub fn definitions() -> Value {
         ),
         definition(
             "send_message",
-            "Send an attributed message to another session. Queued delivery is not acceptance. Messages enter at the next model request; explicitly stopped agents wait for user input.",
-            &[("to", string.clone()), ("text", string)]
+            "Send an attributed peer message. Regular (or null) waits for the current response and tool batch; emergency interrupts foreground work. Paused recipients wait for operator input. Delivery does not mean task acceptance.",
+            &[
+                ("to", string.clone()),
+                ("text", string),
+                (
+                    "urgency",
+                    json!({"type":["string","null"],"enum":["regular","emergency",null]})
+                )
+            ]
         ),
     ])
 }

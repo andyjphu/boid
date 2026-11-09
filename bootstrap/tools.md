@@ -74,11 +74,27 @@ indicator shows Working, elapsed time, and Esc to interrupt; it remains visible
 when the message box is hidden. The elapsed time uses the server timestamp and
 survives browser refresh.
 
-`list_agents` exposes session identities and status. `send_message` queues an
-attributed message for the recipient's next model request. It does not interrupt
-an active request. Idle recipients wake; stopped or errored recipients wait for
-new user input. Queueing is not acceptance, and peer input does not expand the
-operator's permissions.
+`list_agents` exposes session identities and status. `send_message` accepts
+`to`, `text`, and `urgency`. Regular or null urgency waits for the current model
+response and its tool batch. Emergency interrupts foreground work and takes
+priority over queued regular peers. Idle recipients wake. Paused, stopped or
+errored recipients retain messages until operator input; ended recipients reject
+new messages. Peer input keeps its attribution and current skill snapshot. It
+does not invoke operator-selected skills or expand permissions.
+
+Both transcripts show `sender -> recipient`, or `sender ->> recipient` for an
+emergency, followed by the message. The other name locates the same message in
+that open agent's pane. Navigation preserves drafts and pane order and never
+reopens an ended agent. Delivery metadata stays in the full record; paused
+recipients, cancellations and failures have visible explanations. Receipt and
+context application do not establish task acceptance.
+
+Retries of the same originating tool call retain one message identity. A new
+call is a new message. Incoming messages and delivery state are stored in the
+recipient's record; the sender's view uses that record too. Interrupted sends
+with a saved receipt recover their result without resending. End cancels pending
+messages while preserving their history. Interrupted tools retain completed
+results and disclose partial effects; they are not replayed automatically.
 
 The server owns execution. Closing a browser, event subscription, or submitting
 command leaves work running. Reconnection receives a snapshot followed by live

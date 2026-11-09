@@ -86,6 +86,33 @@ impl Session {
         session.user(identity);
         session
     }
+    pub fn recover_sends(
+        &mut self,
+        sender: &str,
+        messages: &BTreeMap<(String, String), crate::runtime::Communication>,
+    ) -> Vec<(String, String)> {
+        let Some(call) = &self.running else {
+            return vec![];
+        };
+        if call.name != "send_message" {
+            return vec![];
+        }
+        let Some(message) = messages.get(&(sender.into(), call.id.clone())) else {
+            return vec![];
+        };
+        let result = message.receipt();
+        let call = self.running.take().unwrap();
+        self.history.push(
+            json!({"type":"function_call_output","call_id":call.id,"output":result.to_string()}),
+        );
+        vec![(
+            "tool_result".into(),
+            format!("{} ({})\n{}", call.name, call.id, result),
+        )]
+    }
+    pub fn current_input_batch(&self) -> u64 {
+        self.model_requests
+    }
     pub fn recover(&mut self) -> Vec<(String, String)> {
         let mut entries = vec![];
         if !self.partial_text.is_empty() {
@@ -188,7 +215,10 @@ impl Session {
     ) -> Result<bool> {
         let Some(call) = self.pending.pop_front() else {
             self.model_requests += 1;
-            hub.apply_inbox(id, self)?;
+            if !hub.apply_inbox(id, self)? {
+                self.model_requests -= 1;
+                return Ok(false);
+            }
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
@@ -256,14 +286,17 @@ impl Session {
             hub.checkpoint(id, self)?;
             return Ok(!self.pending.is_empty());
         };
-        hub.entry_replacing(
+        let sender_entry = hub.entry_replacing(
             id,
             "tool_call",
             format!("{} ({})\n{}", call.name, call.id, call.arguments),
             call.argument_entry.clone(),
         );
         self.running = Some(call);
-        hub.checkpoint(id, self)?;
+        if !hub.claim_tool(id, self)? {
+            self.pending.push_front(self.running.take().unwrap());
+            return Ok(true);
+        }
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
             "list_skills" => {
@@ -277,10 +310,19 @@ impl Session {
                 struct Message {
                     to: String,
                     text: String,
+                    #[serde(default)]
+                    urgency: Option<crate::runtime::Urgency>,
                 }
                 match serde_json::from_str::<Message>(&call.arguments) {
                     Ok(message) => hub
-                        .send_peer(id, &message.to, &message.text)
+                        .send_communication(
+                            id,
+                            &message.to,
+                            &message.text,
+                            message.urgency.unwrap_or_default(),
+                            &call.id,
+                            &sender_entry,
+                        )
                         .unwrap_or_else(|e| json!({"error":e.to_string()})),
                     Err(error) => json!({"error":error.to_string()}),
                 }

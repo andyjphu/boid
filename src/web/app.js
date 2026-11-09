@@ -5,6 +5,7 @@ const empty = document.querySelector("#empty");
 const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
+const communications = new Map();
 const terminals = new Map();
 const terminalCatalog = new Map();
 let selected = null;
@@ -179,12 +180,26 @@ function promptVisible(ui) {
 function followTarget(ui) {
   const clearance = ui.autoClearance && promptVisible(ui)
     ? ui.overlay.getBoundingClientRect().height : 0;
-  return messageBottom(ui) + Math.max(ui.followClearance, clearance);
+  const bottom = messageBottom(ui);
+  const target = Math.max(bottom + Math.max(ui.followClearance, clearance),
+    ui.retainedPromptEnd - ui.trace.clientHeight);
+  if (bottom + ui.trace.clientHeight >= ui.retainedPromptEnd) ui.retainedPromptEnd = 0;
+  // Keep enough scrollable space while new content fills the vacated prompt area.
+  const reserve = Math.max(ui.overlay.getBoundingClientRect().height, target - bottom);
+  ui.trace.style.setProperty("--composer-space", `${Math.ceil(reserve) + 8}px`);
+  return target;
+}
+
+function retainPromptSpace(ui) {
+  if (!ui.follow || selectedWithin(ui.trace) || ui.trace.scrollTop <= messageBottom(ui)) return;
+  ui.retainedPromptEnd = Math.max(ui.retainedPromptEnd,
+    ui.trace.scrollTop + ui.trace.clientHeight);
 }
 
 function clearPromptSpaceWhenHidden(ui) {
   if (promptVisible(ui)) return;
   const hadClearance = ui.autoClearance || ui.followClearance > 0;
+  retainPromptSpace(ui);
   ui.autoClearance = false;
   ui.followClearance = 0;
   if (hadClearance && ui.follow && !selectedWithin(ui.trace)) restorePosition(ui);
@@ -360,12 +375,15 @@ function addSession(view) {
   if (sessions.has(id)) return sessions.get(id);
   const ui = makePane(view.name || id, view.cwd, "agent", id);
   ui.view = view;
+  for (const message of view.communications || []) communications.set(message.id, message);
   ui.id = id;
   ui.entries = new Map();
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.followClearance = 0;
   ui.autoClearance = false;
+  ui.retainedPromptEnd = 0;
+  ui.overlayHeight = 0;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
@@ -420,7 +438,8 @@ function addSession(view) {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
     ui.followClearance = ui.follow && promptVisible(ui)
-      ? Math.max(0, ui.trace.scrollTop - messageBottom(ui)) : 0;
+      ? Math.min(ui.overlay.getBoundingClientRect().height,
+        Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
     rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
@@ -435,8 +454,13 @@ function addSession(view) {
   ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker, ui.skillPicker);
   const overlayResize = new ResizeObserver(() => {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
-    if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
-    if (ui.autoClearance) restorePosition(ui);
+    if (height < ui.overlayHeight) {
+      retainPromptSpace(ui);
+      ui.followClearance = Math.min(ui.followClearance, height);
+    }
+    ui.overlayHeight = height;
+    followTarget(ui);
+    if (ui.autoClearance || ui.retainedPromptEnd) restorePosition(ui);
   });
   overlayResize.observe(overlay);
   ui.overlayResize = overlayResize;
@@ -778,10 +802,98 @@ function renderSkillEntry(ui, item) {
   });
 }
 
+function communicationFor(ui, item) {
+  return [...communications.values()].find(message =>
+    (message.recipient_id === ui.id && message.id === item.id)
+    || (message.sender_id === ui.id && message.sender_entry === item.id));
+}
+
+async function locateCommunication(ui, message, otherId) {
+  try {
+    const startedAt = catalogRevision;
+    const view = await request(`/api/sessions/${encodeURIComponent(otherId)}`);
+    for (const entry of view.communications || []) communications.set(entry.id, entry);
+    const target = acceptSessionResponse(view, startedAt);
+    const entryId = otherId === message.recipient_id ? message.id : message.sender_entry;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const item = target.entries.get(entryId);
+    if (!item) throw new Error("Message is unavailable in this session.");
+    selected = target.pane;
+    target.follow = false;
+    target.autoClearance = false;
+    target.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
+    target.trace.scrollTop += item.node.getBoundingClientRect().top - target.trace.getBoundingClientRect().top;
+    item.node.tabIndex = -1;
+    item.node.focus({ preventScroll: true });
+    rememberPosition(target);
+  } catch (error) { showError(ui.error, error); }
+}
+
+function renderCommunication(ui, item, message) {
+  const otherId = message.sender_id === ui.id ? message.recipient_id : message.sender_id;
+  const ended = sessionLifecycle.get(otherId)?.open === false;
+  const signature = JSON.stringify([message, ended]);
+  if (item.communicationSignature === signature) return;
+  const refocus = item.body.contains(document.activeElement);
+  const header = element("div", "peer-header");
+  for (const [id, name, arrow] of [
+    [message.sender_id, message.sender_name, message.urgency === "emergency" ? " ->> " : " -> "],
+    [message.recipient_id, message.recipient_name, ""],
+  ]) {
+    const link = id === otherId && !ended;
+    const node = element(link ? "button" : "span", link ? "peer-link" : "", name);
+    if (link) {
+      node.type = "button";
+      node.setAttribute("aria-label", `Find this message in ${name}`);
+      node.addEventListener("click", () => locateCommunication(ui, message, id));
+    } else if (id === otherId && ended) node.title = "Session ended";
+    header.append(node, document.createTextNode(arrow));
+  }
+  item.body.replaceChildren(header, element("div", "peer-text", message.text));
+  const note = message.state === "cancelled" ? (message.persisted ? "Cancelled when the recipient ended." : "Cancelled in memory; storage unavailable.")
+    : message.blocked ? "Recipient paused; waiting for operator input." : "";
+  if (note) item.body.append(element("div", "tool-note", note));
+  item.node.dataset.communicationId = message.id;
+  item.node.dataset.communicationDirection = message.sender_id === ui.id ? "outgoing" : "incoming";
+  item.communicationSignature = signature;
+  if (refocus) item.body.querySelector("button")?.focus({ preventScroll: true });
+}
+
+function refreshPeerEntries(sessionId) {
+  for (const peer of communications.values()) {
+    if (peer.sender_id === sessionId || peer.recipient_id === sessionId) receiveCommunication(peer);
+  }
+}
+
+function receiveCommunication(message) {
+  communications.set(message.id, message);
+  for (const id of [message.sender_id, message.recipient_id]) {
+    const ui = sessions.get(id);
+    if (!ui) continue;
+    rememberPosition(ui);
+    for (const item of ui.entries.values()) {
+      if (communicationFor(ui, item)?.id !== message.id && item.kind !== "tool_result") continue;
+      if (selectedWithin(item.node)) { item.deferred = true; continue; }
+      renderEntry(ui, item);
+    }
+    groupUserEntries(ui);
+    restorePosition(ui);
+  }
+}
+
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
+  const communication = communicationFor(ui, item);
+  if (communication) { renderCommunication(ui, item, communication); return; }
+  if (kind === "tool_result") {
+    const result = toolEntry(text);
+    if (result.name === "send_message" && communications.has(result.value?.message_id) && !result.value?.error) {
+      node.hidden = true;
+      return;
+    }
+  }
   if (kind === "skill") {
     renderSkillEntry(ui, item);
   } else if (kind === "assistant") {
@@ -834,7 +946,7 @@ function putEntry(ui, entry, delta = false) {
       node.append(body);
     }
     // Transport receipts remain in the full record; they are not model output.
-    node.hidden = kind === "reasoning" || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
+    node.hidden = kind === "reasoning" || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message (?:[^ ]+ )?from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
     if (entry.replaces) {
       const replaced = ui.entries.get(String(entry.replaces));
       if (replaced) {
@@ -887,10 +999,15 @@ function acceptSessionResponse(view, startedAt) {
   if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
     throw new Error("This agent has ended. Choose it from Inactive sessions to reopen.");
   }
-  return addSession(view);
+  sessionLifecycle.set(String(view.id), { open: true, revision: ++catalogRevision });
+  const ui = addSession(view);
+  refreshPeerEntries(String(view.id));
+  return ui;
 }
 
 function snapshot(views, terminalViews = []) {
+  communications.clear();
+  for (const view of views) for (const message of view.communications || []) communications.set(message.id, message);
   const revision = ++catalogRevision;
   const active = new Set(views.map(view => String(view.id)));
   for (const [id, lifecycle] of sessionLifecycle) {
@@ -919,6 +1036,8 @@ function snapshot(views, terminalViews = []) {
     const present = new Set();
     for (const entry of view.entries || []) {
       present.add(String(entry.id));
+      const item = ui.entries.get(String(entry.id));
+      if (item && (communicationFor(ui, item) || item.kind === "tool_result")) item.rendered = false;
       putEntry(ui, entry);
     }
     for (const [id, entry] of ui.entries) {
@@ -959,16 +1078,22 @@ function startEvents() {
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
       if (["session", "closed", "status"].includes(message.type)) refreshChoices();
-      if (message.type === "session") { addSession(message.session); return; }
+      if (message.type === "session") {
+        addSession(message.session);
+        refreshPeerEntries(String(message.session.id));
+        return;
+      }
       if (message.type === "terminal") {
         terminalCatalog.set(String(message.terminal.id), message.terminal);
         reconcileTerminals([...terminalCatalog.values()]);
         return;
       }
+      if (message.type === "communication") { receiveCommunication(message.message); return; }
       const ui = sessions.get(String(message.session_id));
       if (message.type === "closed") {
         reportUnsavedEnd(message);
         if (ui) removeSession(ui);
+        refreshPeerEntries(String(message.session_id));
         return;
       }
       if (!ui) return;
