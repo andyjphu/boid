@@ -1,0 +1,210 @@
+{
+  "checks": [
+    "Local setup uses native empty placeholders and agent-only Active/Inactive choices, without backend creation or cross-window draft",
+    "+Terminal immediately creates a terminal at server root without a cwd field",
+    "Terminal tab follows shell cd; long directory clips with ellipsis and keeps full tooltip",
+    "Half-width scrollbar aligns track/divider, has no vertical inset, no overscroll, immediate scroll, 900ms fade and access to oldest retained output",
+    "Undecided setup permits terminal interaction and retains editable draft plus mixed pane position after refresh",
+    "Untouched empty fields submit documented fallback values and replace setup in the same slot (fixture suppresses task only)",
+    "Mixed terminal-agent-terminal order survives refresh",
+    "Windows in one browser keep independent mixed orders through refresh",
+    "Setup × discards local draft only, without ending real sessions",
+    "Active card focuses existing session without duplicate agent or pane",
+    "Inactive card replaces setup slot with same retained conversation stopped",
+    "Reopened model picker uses retained exact session profile and does not query global model config",
+    "Cross-window End and actual SSE reconnect preserve surviving pane order",
+    "Ended terminal records stay out of live workspace and agent chooser, including legacy saved history",
+    "Invalid stored layout falls back without blocking sessions",
+    "Refresh/reconnect/reopen preserve one execution identity per created session",
+    "Footer stays reserved across status; hover overlay preserves trace geometry; typing adds clearance and hidden empty composer releases it",
+    "No browser page errors"
+  ],
+  "pageErrors": [],
+  "suppressedDefaultTask": {
+    "name": "canary",
+    "cwd": "/work",
+    "message": "Inspect the working directory and summarize what is here."
+  },
+  "defaultAppearance": [
+    {
+      "name": "name",
+      "value": "",
+      "placeholder": "canary",
+      "color": "rgb(187, 187, 187)",
+      "fontSize": "11px",
+      "classes": ""
+    },
+    {
+      "name": "cwd",
+      "value": "",
+      "placeholder": "/work",
+      "color": "rgb(187, 187, 187)",
+      "fontSize": "11px",
+      "classes": ""
+    },
+    {
+      "name": "message",
+      "value": "",
+      "placeholder": "Inspect the working directory and summarize what is here.",
+      "color": "rgb(187, 187, 187)",
+      "fontSize": "11px",
+      "classes": ""
+    }
+  ],
+  "setupBounds": {
+    "x": 660.5,
+    "y": 25,
+    "width": 659.5,
+    "height": 775
+  },
+  "testCwd": "/tmp/ursa-ui-cwd-1794189436977/long-directory-for-terminal-path-overflow-verification",
+  "scrollbarPartial": {
+    "metrics": {
+      "hostPaddingTop": "0px",
+      "hostPaddingBottom": "0px",
+      "viewportOverscroll": "none",
+      "scrollBehavior": "auto",
+      "fadeProperty": "--terminal-thumb-color",
+      "fadeDuration": "0.9s",
+      "fadeDelay": "0s",
+      "scrollbarWidth": "7.5px",
+      "actualGutter": 7,
+      "viewportWidth": 436.65625,
+      "screenWidth": 422,
+      "thumbBorder": "0px",
+      "thumbRadius": "0px",
+      "dividerLeft": 431,
+      "expectedDividerLeft": 431,
+      "topInset": 0,
+      "bottomInset": 0,
+      "scrollTop": 60000,
+      "scrollHeight": 60748,
+      "clientHeight": 748
+    }
+  },
+  "scrollbar": {
+    "metrics": {
+      "hostPaddingTop": "0px",
+      "hostPaddingBottom": "0px",
+      "viewportOverscroll": "none",
+      "scrollBehavior": "auto",
+      "fadeProperty": "--terminal-thumb-color",
+      "fadeDuration": "0.9s",
+      "fadeDelay": "0s",
+      "scrollbarWidth": "7.5px",
+      "actualGutter": 7,
+      "viewportWidth": 436.65625,
+      "screenWidth": 422,
+      "thumbBorder": "0px",
+      "thumbRadius": "0px",
+      "dividerLeft": 431,
+      "expectedDividerLeft": 431,
+      "topInset": 0,
+      "bottomInset": 0,
+      "scrollTop": 60000,
+      "scrollHeight": 60748,
+      "clientHeight": 748
+    },
+    "immediate": {
+      "before": 60000,
+      "after": 59760
+    },
+    "firstRetainedVisibleLine": "URSA_SCROLL_0140",
+    "fade": {
+      "visible": "rgb(102, 102, 102)",
+      "fading": "rgba(102, 102, 102, 0.392)",
+      "hidden": "rgba(0, 0, 0, 0)"
+    }
+  },
+  "layoutKey": "boid:pane-order:v1:http://127.0.0.1:7734:/work",
+  "overlay": {
+    "idle": {
+      "traceHeight": 728,
+      "scrollTop": 648,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "hidden",
+      "composerOpacity": "0",
+      "overlayTop": 741.5,
+      "lastBottom": 757,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "working": {
+      "traceHeight": 728,
+      "scrollTop": 648,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "visible",
+      "composerOpacity": "0",
+      "overlayTop": 741.5,
+      "lastBottom": 757,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "hover": {
+      "traceHeight": 728,
+      "scrollTop": 648,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "visible",
+      "composerOpacity": "1",
+      "overlayTop": 741.5,
+      "lastBottom": 757,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "typed": {
+      "traceHeight": 728,
+      "scrollTop": 725,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "visible",
+      "composerOpacity": "1",
+      "overlayTop": 701.5,
+      "lastBottom": 680,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "hidden": {
+      "traceHeight": 728,
+      "scrollTop": 648,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "visible",
+      "composerOpacity": "0",
+      "overlayTop": 741.5,
+      "lastBottom": 757,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "stopped": {
+      "traceHeight": 728,
+      "scrollTop": 648,
+      "footerHeight": 20.5,
+      "footerTop": 778.5,
+      "footerVisibility": "hidden",
+      "composerOpacity": "0",
+      "overlayTop": 741.5,
+      "lastBottom": 757,
+      "messageBottom": 648,
+      "overlayPosition": "absolute"
+    },
+    "fixture": "Browser-only synthetic entries/status; real renderer, no backend/model mutation"
+  },
+  "finalOrders": {
+    "a": [
+      "terminal:term-2e64f485-fcaf-4c76-9d06-2f9d9ed4408c",
+      "agent:86ec9f95-0941-46fc-8307-031d72210f9e"
+    ],
+    "b": [
+      "terminal:term-2e64f485-fcaf-4c76-9d06-2f9d9ed4408c",
+      "agent:86ec9f95-0941-46fc-8307-031d72210f9e"
+    ]
+  },
+  "ids": {
+    "agent": "86ec9f95-0941-46fc-8307-031d72210f9e",
+    "terminal": "term-640ea4dc-9c1f-46f2-8ef2-163f76573519",
+    "activeTerminal": "term-2e64f485-fcaf-4c76-9d06-2f9d9ed4408c"
+  }
+}

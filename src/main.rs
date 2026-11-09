@@ -3,6 +3,7 @@ mod runtime;
 mod server;
 mod session;
 mod session_store;
+mod skills;
 mod terminal;
 mod tool_calls;
 

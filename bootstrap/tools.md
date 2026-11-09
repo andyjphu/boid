@@ -106,6 +106,19 @@ selection returns its API error without switching models or falling back.
 Daybreak does not select a reasoning stream. See the
 [OpenAI Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak).
 
+## Skills in v0.8
+
+New sessions discover local skill folders and include bundled Humanizer for
+prose work. `/skills` selects a package; `$name` explicitly requests an
+unambiguous skill. `read_skill` loads full text; `list_skills` exposes sources,
+policies and warnings. Skill loads have expandable saved bodies; errors stay
+visible. Immutable skill snapshots live in the same state directory as sessions.
+Packages refresh at operator-message boundaries while
+previously loaded text remains in the trace. Earlier saved sessions retain their
+original environment. See [local skills](../src/skills/README.md) for directory
+layout, configuration, supporting resources, refresh semantics and provenance.
+Loading alone does not establish compliance or improved writing.
+
 ## Headless routes
 
 The browser and scripts use the same authenticated API:
@@ -116,6 +129,7 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
+| `GET /api/sessions/{id}/skills` | Inspect skills available for the next operator message |
 | `DELETE /api/sessions/{id}` | End the worker and archive its retained record |
 | `GET /api/sessions/archived` | Discover ended agent records |
 | `POST /api/sessions/{id}/reopen` | Reopen a retained agent, stopped until new input |

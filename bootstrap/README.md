@@ -14,9 +14,20 @@ Temporary guidance for the agents building the first working Boid. Read this
 alongside [Boid's principles](../src/PRINCIPLES.md). Developers need the full
 project context to decide what Boid should eventually see.
 
-[Cases](cases/) preserve the exchanges behind judgments, with trajectory
+[Cases](cases/README.md) preserve the exchanges behind judgments, with trajectory
 summaries and interpretations kept distinct. Use relevant cases when making
 similar decisions; topical similarity alone does not establish applicability.
+
+The [whole-interaction case](cases/whole-interaction.md) follows v0.7's default
+fields, terminal theme, and directory-update latency through repeated feedback
+and a measured repair. Andy requested its availability for Boid self-development
+and described [case-informed meta-review](meta-review.md) as Project Marigold's
+successor. The template design remains a proposal.
+
+The [v0.8 integration plan](v08-implementation-plan.md) reviews the accepted
+v0.7.2 baseline and describes how local skills and case work should preserve it.
+The [implementation notes](v08-integration-notes.md) record the integration from
+merged main, verification, and the measured snapshot-storage repair.
 
 ## Maintaining this brief
 

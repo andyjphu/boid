@@ -11,3 +11,8 @@ codex-rs/shell-command/src/command_safety/is_dangerous_command.rs
 
 Boid combines their literal-word parsing and POSIX command checks in one module.
 Windows checks and Codex's policy/session dependencies are omitted.
+
+Skill frontmatter parsing in src/skills/parser.rs is adapted from OpenAI Codex
+codex-rs/skills/src/parser.rs at a90c80840869a8cfb313ef181d7721997b86c8e5.
+Copyright 2025 OpenAI. Apache License 2.0, included at src/skills/codex-LICENSE.
+The adaptation omits the upstream test-module declaration.

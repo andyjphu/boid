@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -65,6 +66,74 @@ impl SessionStore {
             records.push(record);
         }
         Ok(records)
+    }
+
+    fn skill_snapshot_path(&self, id: &str) -> Result<PathBuf> {
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            bail!("Invalid skill snapshot identity");
+        }
+        let sessions = self
+            .directory
+            .as_ref()
+            .context("Skill snapshot requires durable storage")?;
+        Ok(sessions
+            .parent()
+            .context("State directory has no parent")?
+            .join("skill-snapshots")
+            .join(format!("{id}.json")))
+    }
+
+    pub fn save_skills(&self, skills: &crate::skills::Skills) -> Result<Option<String>> {
+        if self.directory.is_none() {
+            return Ok(None);
+        }
+        let bytes = serde_json::to_vec(skills)?;
+        let id = format!("{:x}", Sha256::digest(&bytes));
+        let path = self.skill_snapshot_path(&id)?;
+        let directory = path.parent().unwrap();
+        fs::create_dir_all(directory)?;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+        // Persist the new directory before any session can refer to its contents.
+        File::open(directory.parent().unwrap())?.sync_all()?;
+        if path.exists() {
+            if fs::read(&path)? != bytes {
+                bail!("Skill snapshot {id} is corrupt; original retained");
+            }
+            File::open(directory)?.sync_all()?;
+            return Ok(Some(id));
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        match temporary.persist_noclobber(&path) {
+            Ok(_) => (),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::read(&path)? != bytes {
+                    bail!("Skill snapshot {id} is corrupt; original retained");
+                }
+            }
+            Err(error) => return Err(error.error.into()),
+        }
+        File::open(directory)?.sync_all()?;
+        Ok(Some(id))
+    }
+
+    pub fn load_skills(&self, id: &str) -> Result<crate::skills::Skills> {
+        let path = self.skill_snapshot_path(id)?;
+        let bytes = fs::read(&path).with_context(|| {
+            format!(
+                "Cannot read skill snapshot {}; session retained",
+                path.display()
+            )
+        })?;
+        if format!("{:x}", Sha256::digest(&bytes)) != id {
+            bail!("Skill snapshot {id} is corrupt; original retained");
+        }
+        serde_json::from_slice(&bytes).context("Invalid skill snapshot; original retained")
     }
 
     pub fn save<T: Serialize>(&self, id: &str, record: &T) -> Result<()> {

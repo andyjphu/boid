@@ -153,6 +153,7 @@ function reportUnsavedEnd(result) {
 }
 
 function removeSession(ui) {
+  ui.skillRequest = (ui.skillRequest || 0) + 1;
   ui.traceResize.disconnect();
   ui.overlayResize.disconnect();
   if (selected === ui.pane) selected = null;
@@ -293,6 +294,67 @@ async function openModelPicker(ui) {
   }
 }
 
+function pickerOpen(ui) {
+  return !ui.modelPicker.hidden || !ui.skillPicker.hidden;
+}
+
+function closeSkillPicker(ui) {
+  ui.skillRequest = (ui.skillRequest || 0) + 1;
+  ui.skillPicker.hidden = true;
+  ui.composer.hidden = false;
+  updateActivity(ui);
+  ui.input.focus({ preventScroll: true });
+}
+
+async function openSkillPicker(ui) {
+  const generation = ui.skillRequest = (ui.skillRequest || 0) + 1;
+  const current = () => sessions.get(ui.id) === ui && ui.skillRequest === generation && !ui.skillPicker.hidden;
+  ui.slashSuggestion.hidden = true;
+  ui.composer.hidden = true;
+  ui.modelPicker.hidden = true;
+  ui.skillPicker.hidden = false;
+  clearPromptSpaceWhenHidden(ui);
+  updateActivity(ui);
+  ui.skillPicker.replaceChildren(element("div", "model-hint", "Loading skills…"));
+  ui.skillPicker.focus({ preventScroll: true });
+  try {
+    const catalog = await request(`/api/sessions/${encodeURIComponent(ui.id)}/skills`);
+    if (!current()) return;
+    ui.skillPicker.replaceChildren();
+    const filter = element("input", "skill-filter");
+    filter.placeholder = "Find a skill…";
+    filter.setAttribute("aria-label", "Find a skill");
+    const choices = element("div", "skill-options");
+    const render = () => {
+      choices.replaceChildren();
+      const query = filter.value.toLowerCase();
+      for (const skill of catalog.skills.filter(s => `${s.name} ${s.description} ${s.source}`.toLowerCase().includes(query))) {
+        const option = element("button", "skill-option");
+        option.type = "button";
+        option.disabled = !skill.enabled || !catalog.refresh_on_message;
+        option.append(element("span", "skill-name", skill.name + (!skill.enabled ? " · disabled" : !skill.allow_implicit_invocation ? " · explicit only" : "")),
+          element("span", "skill-source", skill.source), element("span", "skill-description", skill.description));
+        for (const warning of skill.warnings) option.append(element("span", "skill-warning", warning));
+        option.addEventListener("click", () => {
+          const mention = `$[${skill.id}] `;
+          ui.input.setRangeText(mention, ui.input.selectionStart, ui.input.selectionEnd, "end");
+          closeSkillPicker(ui);
+          ui.input.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+        choices.append(option);
+      }
+      if (!choices.children.length) choices.append(element("div", "model-hint", "No matching skills."));
+    };
+    filter.addEventListener("input", render);
+    ui.skillPicker.append(filter, choices);
+    for (const warning of catalog.warnings) ui.skillPicker.append(element("div", "skill-warning", warning));
+    if (!catalog.refresh_on_message) ui.skillPicker.append(element("div", "model-hint", "This older session retains its original skill environment. Create a new session to select local skills."));
+    ui.skillPicker.append(element("div", "model-hint", "Enter select · Esc back"));
+    render();
+    filter.focus({ preventScroll: true });
+  } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
+}
+
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
@@ -329,7 +391,25 @@ function addSession(view) {
   ui.slashSuggestion = element("div", "slash-suggestion", "/model  Select model and effort");
   ui.slashSuggestion.hidden = true;
   ui.slashSuggestion.addEventListener("mousedown", event => event.preventDefault());
-  ui.slashSuggestion.addEventListener("click", () => { ui.input.value = "/model"; ui.composer.requestSubmit(); });
+  ui.slashSuggestion.addEventListener("click", () => { ui.input.value = ui.slashCommand || "/model"; ui.composer.requestSubmit(); });
+  ui.skillPicker = element("div", "skill-picker");
+  ui.skillPicker.hidden = true;
+  ui.skillPicker.tabIndex = -1;
+  ui.skillPicker.setAttribute("role", "dialog");
+  ui.skillPicker.setAttribute("aria-label", "Select skill");
+  ui.skillPicker.addEventListener("keydown", event => {
+    if (event.isComposing || !["Escape", "Enter", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") { closeSkillPicker(ui); return; }
+    const options = [...ui.skillPicker.querySelectorAll(".skill-option:not(:disabled)")];
+    const index = options.indexOf(document.activeElement);
+    if (event.key === "Enter") (options[index < 0 ? 0 : index])?.click();
+    else if (options.length) {
+      const next = index < 0 ? (event.key === "ArrowDown" ? 0 : options.length - 1) : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[next].focus();
+    }
+  });
   ui.composer = element("form", "composer");
   ui.input = element("textarea");
   ui.input.rows = 1;
@@ -352,7 +432,7 @@ function addSession(view) {
   ui.overlay = overlay;
   overlay.append(ui.slashSuggestion, ui.composer);
   stream.append(ui.trace, overlay);
-  ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker);
+  ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker, ui.skillPicker);
   const overlayResize = new ResizeObserver(() => {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
     if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
@@ -368,7 +448,9 @@ function addSession(view) {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
-    ui.slashSuggestion.hidden = ui.slashDismissed || !text || !"/model".startsWith(text) || ui.input.value.includes("\n");
+    ui.slashCommand = ["/model", "/skills"].find(command => command.startsWith(text));
+    ui.slashSuggestion.textContent = ui.slashCommand === "/skills" ? "/skills  Select a skill" : "/model  Select model and effort";
+    ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
     clearPromptSpaceWhenHidden(ui);
   }
   let historyIndex = null;
@@ -394,7 +476,7 @@ function addSession(view) {
       if (["Escape", "Tab", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
         if (event.key === "Escape") { ui.slashDismissed = true; ui.slashSuggestion.hidden = true; }
-        if (event.key === "Tab") { ui.input.value = "/model"; resizeInput(); }
+        if (event.key === "Tab") { ui.input.value = ui.slashCommand; resizeInput(); }
         return;
       }
     }
@@ -423,6 +505,13 @@ function addSession(view) {
     if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
     activatePromptSpace(ui);
+    if (text.trim() === "/skills" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/skills")) {
+      ui.input.value = "";
+      historyIndex = null;
+      resizeInput();
+      await openSkillPicker(ui);
+      return;
+    }
     if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
       ui.input.value = "";
       historyIndex = null;
@@ -452,7 +541,7 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const hint = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  const hint = pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
 }
 
@@ -652,11 +741,50 @@ function renderToolEntry(ui, item) {
   }
 }
 
+function renderSkillEntry(ui, item) {
+  const { body, text } = item;
+  let event;
+  try { event = JSON.parse(text); } catch { body.textContent = text; return; }
+  body.replaceChildren();
+  if (event.event === "error") {
+    body.append(element("div", "skill-warning", `Skill selection failed: ${event.error}`));
+    return;
+  }
+  const skill = event.skill;
+  if (event.event !== "catalog" && (event.event !== "loaded" || typeof skill?.text !== "string")) {
+    body.textContent = text;
+    return;
+  }
+  const details = element("details", "skill-event");
+  details.open = Boolean(item.expandedSkill);
+  details.append(element("summary", null, skill ? `Loaded ${skill.name || skill.id}` : "Skills refreshed"));
+  if (skill) {
+    details.append(element("div", "skill-source", skill.source));
+    if (skill.version) details.append(element("div", "skill-source", skill.version));
+  }
+  details.append(element("pre", "skill-text", skill ? skill.text : event.text));
+  body.append(details);
+  for (const warning of (skill?.warnings || event.warnings || [])) body.append(element("div", "skill-warning", warning));
+  details.querySelector("summary").addEventListener("click", e => {
+    e.preventDefault();
+    rememberPosition(ui);
+    item.expandedSkill = details.open = !details.open;
+    restorePosition(ui);
+  });
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected || Boolean(item.expandedSkill) === details.open) return;
+    item.expandedSkill = details.open;
+    restorePosition(ui);
+  });
+}
+
 function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
-  if (kind === "assistant") {
+  if (kind === "skill") {
+    renderSkillEntry(ui, item);
+  } else if (kind === "assistant") {
     body.textContent = text;
   } else if (kind === "tool_call" || kind === "tool_result") {
     renderToolEntry(ui, item);
@@ -1312,6 +1440,10 @@ document.addEventListener("focusin", event => {
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
+  const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
+  if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
+    event.preventDefault(); closeSkillPicker(skillPicker); return;
+  }
   const picker = [...sessions.values()].find(ui => ui.pane === selected && !ui.modelPicker.hidden);
   if (picker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault();
@@ -1320,7 +1452,7 @@ document.addEventListener("keydown", async event => {
   }
   if (!event.defaultPrevented && !event.isComposing && !picker
       && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
-      && !event.target.closest("input, textarea, [contenteditable], .model-picker")) {
+      && !event.target.closest("input, textarea, [contenteditable], .model-picker, .skill-picker")) {
     const selection = window.getSelection();
     const reader = selection && !selection.isCollapsed && [...sessions.values()].find(ui =>
       ui.trace.contains(selection.anchorNode) && ui.trace.contains(selection.focusNode));

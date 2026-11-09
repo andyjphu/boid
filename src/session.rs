@@ -1,4 +1,4 @@
-use crate::{api::Client, runtime::Hub, tool_calls};
+use crate::{api::Client, runtime::Hub, skills, tool_calls};
 use anyhow::{Context, Result};
 use boid::Tools;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,14 @@ pub struct Session {
     pub model: String,
     pub instructions: String,
     pub tools: Value,
+    #[serde(default, skip_serializing)]
+    pub skills: skills::Skills,
+    #[serde(default)]
+    pub skill_snapshot: Option<String>,
+    #[serde(default)]
+    pub skill_base: Option<String>,
+    #[serde(default)]
+    pub skill_warnings: Vec<String>,
     #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
@@ -113,6 +121,56 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
+    pub fn operator(&mut self, text: String) -> Vec<Value> {
+        let selected = if self.skill_base.is_some() {
+            skills::selection::mentions(&text, &self.skills)
+        } else {
+            vec![]
+        };
+        self.user(text);
+        let mut entries = vec![];
+        for selection in selected {
+            let (content, event) = match selection {
+                Ok(id) => {
+                    let loaded = skills::loaded(&id, &self.skills[&id]);
+                    (
+                        format!("Operator-selected skill:\n{loaded}"),
+                        json!({"event":"loaded", "skill":loaded}),
+                    )
+                }
+                Err(error) => (
+                    format!("Skill selection failed: {error}"),
+                    json!({"event":"error", "error":error}),
+                ),
+            };
+            self.history
+                .push(json!({"role":"developer","content":content}));
+            entries.push(event);
+        }
+        entries
+    }
+    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) -> Option<Value> {
+        let base = self.skill_base.as_ref()?;
+        let prompt = skills::catalog::prompt(&snapshot.skills, snapshot.budget, &snapshot.warnings);
+        let instructions = format!("{base}\n{prompt}");
+        if self.skills == snapshot.skills
+            && self.skill_warnings == snapshot.warnings
+            && self.instructions == instructions
+        {
+            return None;
+        }
+        self.skills = snapshot.skills;
+        self.skill_snapshot = None;
+        self.skill_warnings = snapshot.warnings;
+        self.instructions = instructions;
+        let notice = format!(
+            "Skill catalog refreshed for this operator message. This replaces earlier skill availability and policy; previously loaded text is historical.\n{prompt}\nDiscovery warnings: {}",
+            json!(self.skill_warnings)
+        );
+        self.history
+            .push(json!({"role":"developer","content":notice}));
+        Some(json!({"event":"catalog", "text":notice, "warnings":self.skill_warnings}))
+    }
     pub fn next_input_batch(&self) -> u64 {
         self.model_requests + 1
     }
@@ -208,6 +266,10 @@ impl Session {
         hub.checkpoint(id, self)?;
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
+            "list_skills" => {
+                json!({"skills":skills::catalog::list(&self.skills), "warnings":self.skill_warnings})
+            }
+            "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
             "send_message" => {
                 #[derive(serde::Deserialize)]

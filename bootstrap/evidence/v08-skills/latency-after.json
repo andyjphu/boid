@@ -1,0 +1,71 @@
+{
+  "conditions": "Same debug test binary; two Tokio workers; Docker bind mount; gated local mock provider; synthetic retained turns of 1024 padding characters; one observation per condition, not percentiles. Empty condition clears skill snapshot and disables refresh, not a separate main binary.",
+  "samples": [
+    {
+      "enter_ms": 1.11357,
+      "history_entries": 0,
+      "interrupt_accept_ms": 1.007192,
+      "interrupt_stopped_ms": 4.280277,
+      "mode": "empty",
+      "record_bytes": 11158,
+      "scan_ms": 1.045236,
+      "skill_count": 0,
+      "snapshot_bytes": 2
+    },
+    {
+      "enter_ms": 5.932360999999999,
+      "history_entries": 100,
+      "interrupt_accept_ms": 6.044365,
+      "interrupt_stopped_ms": 31.221639,
+      "mode": "empty",
+      "record_bytes": 231438,
+      "scan_ms": 0.229923,
+      "skill_count": 0,
+      "snapshot_bytes": 2
+    },
+    {
+      "enter_ms": 1.125404,
+      "history_entries": 0,
+      "interrupt_accept_ms": 1.078486,
+      "interrupt_stopped_ms": 5.499975,
+      "mode": "humanizer",
+      "record_bytes": 14122,
+      "scan_ms": 0.239464,
+      "skill_count": 1,
+      "snapshot_bytes": 33281
+    },
+    {
+      "enter_ms": 5.870235,
+      "history_entries": 100,
+      "interrupt_accept_ms": 5.964945999999999,
+      "interrupt_stopped_ms": 31.6929,
+      "mode": "humanizer",
+      "record_bytes": 234402,
+      "scan_ms": 0.259215,
+      "skill_count": 1,
+      "snapshot_bytes": 33281
+    },
+    {
+      "enter_ms": 1.491455,
+      "history_entries": 0,
+      "interrupt_accept_ms": 1.447621,
+      "interrupt_stopped_ms": 7.999040000000001,
+      "mode": "bank",
+      "record_bytes": 29787,
+      "scan_ms": 12.708952,
+      "skill_count": 45,
+      "snapshot_bytes": 576155
+    },
+    {
+      "enter_ms": 5.8644430000000005,
+      "history_entries": 100,
+      "interrupt_accept_ms": 6.653796,
+      "interrupt_stopped_ms": 32.683841,
+      "mode": "bank",
+      "record_bytes": 250067,
+      "scan_ms": 13.139463000000001,
+      "skill_count": 45,
+      "snapshot_bytes": 576155
+    }
+  ]
+}
