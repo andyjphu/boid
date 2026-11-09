@@ -25,7 +25,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .workspace-actions {
   position: fixed;
   top: 0;
-  left: 50%;
+  left: calc(50% + .5px); /* Match the grid midpoint after its 1px left border. */
   transform: translateX(-24px);
   z-index: 10;
   display: flex;
