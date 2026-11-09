@@ -305,7 +305,9 @@ Avoid temporary tool-runner subcommands.
 The first working agent should read its own code, make a requested change,
 run the relevant check, and show the diff. Show tool results, support steering
 during work, and make stops take effect. Every substantive change needs a PR
-that Andy approves, including changes made by Boid itself.
+that Andy approves, including changes made by Boid itself. Andy gave standing
+authorization to publish PRs in this repository on 2026-11-08. Do not ask for
+publication approval for each PR; merge approval remains separate.
 
 For v0.10, Andy selected native execution and retired Docker product support
 (2026-11-08). This supersedes the earlier container-only development and

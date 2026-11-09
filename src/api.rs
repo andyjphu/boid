@@ -155,6 +155,50 @@ impl Client {
         bail!("API stream ended before the response completed.")
     }
 
+    pub async fn compact(&self, input: &[Value], model: &str, instructions: &str) -> Result<Value> {
+        let endpoint = "https://api.openai.com/v1/responses/compact".to_owned();
+        #[cfg(test)]
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .map(|url| format!("{}/compact", url.trim_end_matches('/')))
+            .unwrap_or(endpoint);
+        let response = self
+            .http
+            .post(endpoint)
+            .bearer_auth(&self.key)
+            .json(&json!({"model":model,"input":input,"instructions":instructions}))
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+            .context("Cannot reach OpenAI compaction.")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("Cannot read OpenAI compaction response.")?;
+        if !status.is_success() {
+            bail!("OpenAI compaction {status}: {}", self.redact(&body));
+        }
+        let result: Value =
+            serde_json::from_str(&body).context("Invalid compaction response JSON.")?;
+        let output = result["output"]
+            .as_array()
+            .context("Compaction response has no output window.")?;
+        if result["object"] != "response.compaction"
+            || output.is_empty()
+            || !output.iter().any(|item| {
+                item["type"] == "compaction"
+                    && item["encrypted_content"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+            })
+        {
+            bail!("Compaction response has no valid compacted context.");
+        }
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub async fn respond(
         &self,

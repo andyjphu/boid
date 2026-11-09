@@ -579,8 +579,12 @@ function addSession(view) {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
-    ui.slashCommand = ["/model", "/skills"].find(command => command.startsWith(text));
-    ui.slashSuggestion.textContent = ui.slashCommand === "/skills" ? "/skills  Select a skill" : "/model  Select model and effort";
+    ui.slashCommand = ["/model", "/skills", "/oai-compact"].find(command => command.startsWith(text));
+    ui.slashSuggestion.textContent = {
+      "/model": "/model  Select model and effort",
+      "/skills": "/skills  Select a skill",
+      "/oai-compact": "/oai-compact  Compact OpenAI context",
+    }[ui.slashCommand] || "";
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
     clearPromptSpaceWhenHidden(ui);
     updateContextVisibility(ui);
@@ -655,7 +659,8 @@ function addSession(view) {
     ui.sending = true;
     ui.error.hidden = true;
     try {
-      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text });
+      const submitted = !ui.slashSuggestion.hidden && ui.slashCommand === "/oai-compact" ? "/oai-compact" : text;
+      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted });
       await ui.submission;
       if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
     } catch (error) { showError(ui.error, error); }
