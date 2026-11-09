@@ -19,6 +19,7 @@ let paneOrder = [];
 let orderKey = "";
 let catalogReady = false;
 let reconcilingCatalog = false;
+let launchCwd = "";
 
 function loadPaneOrder(cwd) {
   const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
@@ -1595,7 +1596,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   button.disabled = true;
   workspaceError.hidden = true;
   try {
-    const info = await request("/api/terminals", "POST", { cols: 80, rows: 24 });
+    const info = await request("/api/terminals", "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
     attachTerminal(info);
   } catch (error) { showError(workspaceError, error); }
   finally { button.disabled = false; }
@@ -1783,11 +1784,11 @@ async function connect(token) {
   const config = await request("/api/config");
   login.hidden = true;
   workspaceError.hidden = true;
-  agentDefaults.cwd = config.cwd;
+  agentDefaults.cwd = launchCwd || config.cwd;
   agentDefaults.name = config.next_agent_name;
   agentNames = config.agent_names;
-  for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = config.cwd;
-  loadPaneOrder(config.cwd);
+  for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = agentDefaults.cwd;
+  loadPaneOrder(agentDefaults.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
   diagnosticsButton.disabled = false;
@@ -1805,7 +1806,13 @@ login.addEventListener("submit", async event => {
 });
 
 async function initialize() {
-  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  const parameters = new URLSearchParams(location.hash.slice(1));
+  const token = parameters.get("token");
+  try {
+    launchCwd = parameters.has("cwd") ? parameters.get("cwd")
+      : token ? "" : sessionStorage.getItem("boid:launch-cwd") || "";
+    sessionStorage.setItem("boid:launch-cwd", launchCwd);
+  } catch { launchCwd = parameters.get("cwd") || ""; }
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
   try { await connect(token); }
   catch (error) {

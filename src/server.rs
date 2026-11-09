@@ -26,13 +26,14 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
 #[derive(Clone)]
 struct App {
     hub: Hub,
     token: Arc<String>,
+    shutdown: Arc<Notify>,
 }
 type ApiResult<T> = std::result::Result<T, (StatusCode, Json<Value>)>;
 fn invalid(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -99,12 +100,16 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .to_path_buf();
     let hub = Hub::open(client, state_dir.clone())?;
     let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
+    let shutdown = Arc::new(Notify::new());
     let app = App {
         hub: hub.clone(),
         token: Arc::new(token.clone()),
+        shutdown: shutdown.clone(),
     };
     let protected = Router::new()
         .route("/api/login", post(login))
+        .route("/api/server", get(server_info))
+        .route("/api/shutdown", post(shutdown_server))
         .route("/api/config", get(config))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/sessions", get(sessions).post(create))
@@ -140,12 +145,25 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         result = axum::serve(listener, router) => result,
         signal = tokio::signal::ctrl_c() => signal,
         _ = terminate() => Ok(()),
+        _ = shutdown.notified() => Ok(()),
     };
     hub.shutdown().await;
     let terminal_result = terminals.shutdown().await;
     result?;
     terminal_result?;
     Ok(())
+}
+async fn server_info() -> Json<Value> {
+    Json(json!({"application":"boid", "protocol":1,
+        "version":env!("CARGO_PKG_VERSION"), "pid":std::process::id()}))
+}
+async fn shutdown_server(State(app): State<App>) -> impl IntoResponse {
+    tokio::spawn(async move {
+        // Allow the acknowledgement to leave before closing the HTTP listener.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        app.shutdown.notify_one();
+    });
+    (StatusCode::ACCEPTED, Json(json!({"status":"stopping"})))
 }
 async fn terminate() {
     if let Ok(mut signal) =

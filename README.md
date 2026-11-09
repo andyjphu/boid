@@ -20,7 +20,15 @@ cd ~/boid
 `build.sh` builds the release binary and links `~/.local/bin/boid` to it.
 Keep `~/.local/bin` on `PATH`. `run.sh` simply executes `boid`, forwarding any
 arguments; `boid --help` lists the options. Set `OPENAI_API_KEY` in the server's
-environment before starting it. The server prints its browser URL on startup.
+environment before the first launch. `boid` starts one background server or
+reuses the running server, opens its web workspace, and returns to the shell.
+Use `boid --no-open` to print the URL without opening a browser; SSH sessions
+also print the URL only. Closing the shell or browser leaves agents running.
+
+`boid stop` shuts down the server and active work while preserving saved
+conversations. `boid serve` runs in the foreground for debugging. New panes use
+the directory where `boid` was invoked; existing agents keep their directories.
+State and background server logs live under `~/.local/share/boid` by default.
 
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 
