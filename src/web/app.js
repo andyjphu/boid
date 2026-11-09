@@ -301,7 +301,6 @@ function addSession(view) {
   ui.input = element("textarea");
   ui.input.rows = 1;
   ui.input.placeholder = "Message…";
-  ui.input.title = "Enter to send · Shift+Enter for a new line · Esc to interrupt";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
   ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
