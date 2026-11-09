@@ -401,7 +401,11 @@ impl Terminal {
         let journal = match Journal::open(path) {
             Ok(journal) => journal,
             Err(error) => {
-                let _ = child.kill();
+                if let Some(pid) = child.process_id() {
+                    kill_session_groups(pid as i32, pair.master.process_group_leader());
+                } else {
+                    let _ = child.kill();
+                }
                 let _ = child.wait();
                 return Err(error.into());
             }
@@ -468,7 +472,9 @@ impl Terminal {
     fn observe_cwd(&self, pid: Option<u32>) {
         #[cfg(target_os = "linux")]
         let observed = pid.and_then(|pid| fs::read_link(format!("/proc/{pid}/cwd")).ok());
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let observed = pid.and_then(macos_cwd);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let observed: Option<PathBuf> = {
             let _ = pid;
             None
@@ -580,14 +586,20 @@ impl Terminal {
         let was_running = self.running.load(Ordering::SeqCst);
         if let Some(live) = self.live() {
             let mut child = live.child.lock().unwrap();
-            if child.try_wait()?.is_none() {
-                self.observe_cwd(child.process_id());
+            if self.running.load(Ordering::SeqCst) {
                 if let Some(pid) = child.process_id() {
+                    if !shell_exited(pid)? {
+                        self.observe_cwd(Some(pid));
+                    }
                     let foreground = live.master.lock().unwrap().process_group_leader();
                     kill_session_groups(pid as i32, foreground);
+                } else {
+                    child.kill()?;
                 }
-                child.kill()?;
                 child.wait()?;
+                // Publish this while the child lock is held: a waiting monitor
+                // must not inspect the PID after wait has released its identity.
+                self.running.store(false, Ordering::SeqCst);
             }
         }
         self.running.store(false, Ordering::SeqCst);
@@ -725,9 +737,86 @@ impl Terminal {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn macos_cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as i32;
+    // The typed buffer and exact returned size match the native libproc ABI.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let path: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .into_iter()
+        .flatten()
+        .map(|byte| byte as u8)
+        .take_while(|byte| *byte != 0)
+        .collect();
+    (!path.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_vec(path)))
+}
+
+// Observe exit without reaping the session leader. Its PID pins the session
+// identity until all ordinary job groups have received their termination signal.
+fn shell_exited(pid: u32) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pids() -> Vec<i32> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0i32; count as usize + 64];
+    loop {
+        let count = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * std::mem::size_of::<i32>()) as i32,
+            )
+        };
+        if count <= 0 {
+            return Vec::new();
+        }
+        if (count as usize) < pids.len() {
+            pids.truncate(count as usize);
+            return pids;
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+}
+
 // portable-pty creates a new Unix session for this child. Keep its unreaped
-// handle locked while identifying groups; deliberately detached sessions still
-// require container cleanup.
+// handle locked while identifying groups. Deliberately detached sessions are
+// outside this ordinary terminal-job ownership boundary.
 fn kill_session_groups(pid: i32, foreground: Option<i32>) {
     let mut groups = BTreeSet::new();
     if let Some(group) = foreground.filter(|group| *group > 1 && *group != pid) {
@@ -752,7 +841,26 @@ fn kill_session_groups(pid: i32, foreground: Option<i32>) {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    let mut members = BTreeMap::new();
+    #[cfg(target_os = "macos")]
+    for member in macos_pids().into_iter().filter(|member| *member > 1) {
+        let group = unsafe { libc::getpgid(member) };
+        if group > 1 && group != pid && unsafe { libc::getsid(member) } == pid {
+            groups.insert(group);
+            members.insert(group, member);
+        }
+    }
     for group in groups {
+        #[cfg(target_os = "macos")]
+        {
+            // Recheck the observed member rather than trusting a stale PGID.
+            // The session leader remains unreaped throughout this snapshot.
+            let member = members.get(&group).copied().unwrap_or(group);
+            if unsafe { libc::getpgid(member) } != group || unsafe { libc::getsid(member) } != pid {
+                continue;
+            }
+        }
         unsafe { libc::kill(-group, libc::SIGKILL) };
     }
     if pid > 1 {
@@ -837,7 +945,21 @@ async fn create(
                         return;
                     };
                     let mut child = live.child.lock().unwrap();
-                    match child.try_wait() {
+                    if !monitoring.running.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let exited = match child.process_id() {
+                        Some(pid) => shell_exited(pid).and_then(|exited| {
+                            if !exited {
+                                return Ok(None);
+                            }
+                            let foreground = live.master.lock().unwrap().process_group_leader();
+                            kill_session_groups(pid as i32, foreground);
+                            child.wait().map(Some)
+                        }),
+                        None => child.try_wait(),
+                    };
+                    match exited {
                         Ok(Some(status)) => {
                             monitoring.running.store(false, Ordering::SeqCst);
                             Some(format!("\r\n[Shell exited: {status}]\r\n"))
@@ -1066,7 +1188,7 @@ mod persistence_tests {
     use super::*;
     use crate::api::Client;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn shell_directory_changes_publish_and_survive_end() {
         let repository = tempfile::tempdir().unwrap();
@@ -1155,6 +1277,99 @@ mod persistence_tests {
         assert!(recovered.summary().archived);
         assert!(recovered.live().is_none());
         hub.shutdown().await.unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn terminal_lifecycle_stops_background_jobs() {
+        struct Cleanup(Arc<Terminal>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.0.close();
+            }
+        }
+        for action in ["end", "shutdown", "exit"] {
+            let repository = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let root = repository.path().canonicalize().unwrap();
+            let catalog = Catalog::new(Client::test_client()).unwrap();
+            let hub = TerminalHub::open(root.clone(), state.path().into(), catalog).unwrap();
+            let Json(created) = create(
+                State(hub.clone()),
+                Json(Create {
+                    cwd: None,
+                    cols: None,
+                    rows: None,
+                }),
+            )
+            .await
+            .unwrap();
+            let terminal = hub.find(&created.id).unwrap();
+            let _cleanup = Cleanup(terminal.clone());
+            let live = terminal.live().unwrap();
+            let shell = live.child.lock().unwrap().process_id().unwrap() as i32;
+            {
+                let mut writer = live.writer.lock().unwrap();
+                // A real interactive POSIX shell starts a separate background
+                // job group. Ignoring HUP makes group cleanup observable.
+                writer.write_all(b"exec /bin/sh\r/bin/sh -c 'trap \"\" HUP; sleep 1; echo leaked > leaked' & echo $! > job.pid\r").unwrap();
+                writer.flush().unwrap();
+            }
+            let job = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(pid) = fs::read_to_string(root.join("job.pid"))
+                        .ok()
+                        .and_then(|text| text.trim().parse::<i32>().ok())
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                unsafe { libc::getsid(job) },
+                shell,
+                "{action}: owned session"
+            );
+            assert_ne!(
+                unsafe { libc::getpgid(job) },
+                shell,
+                "{action}: separate job group"
+            );
+            match action {
+                "end" => {
+                    close(State(hub.clone()), Path(created.id.clone()))
+                        .await
+                        .unwrap();
+                }
+                "shutdown" => {
+                    hub.shutdown().await.unwrap();
+                }
+                _ => {
+                    let mut writer = live.writer.lock().unwrap();
+                    writer.write_all(b"exit\r").unwrap();
+                    writer.flush().unwrap();
+                    drop(writer);
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        while terminal.running.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            assert!(
+                !root.join("leaked").exists(),
+                "{action}: background job survived"
+            );
+            assert!(!terminal.summary().running);
+            assert!(terminal.live().is_none());
+            hub.shutdown().await.unwrap();
+        }
     }
 
     #[test]

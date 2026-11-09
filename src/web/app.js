@@ -29,7 +29,7 @@ function loadPaneOrder(cwd) {
     const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
     for (const draft of saved?.drafts || []) {
-      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) {
+      if (draft && typeof draft.id === "string" && ["name", "cwd"].every(key => typeof draft[key] === "string")) {
         const restored = { ...draft };
         if (saved.version !== 2) {
           for (const [key, value] of Object.entries(agentDefaults)) if (restored[key] === value) restored[key] = "";
@@ -136,7 +136,8 @@ function makePane(name, cwd, kind, id) {
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  const close = element("button", "pane-close", "×");
+  const close = element("button", "pane-close");
+  close.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
@@ -370,6 +371,41 @@ async function openSkillPicker(ui) {
   } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
 }
 
+const tokenFormat = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 2 });
+const usageCanvas = document.createElement("canvas").getContext("2d");
+
+function updateContextUsage(ui) {
+  const usage = ui.view.context_usage;
+  const used = usage && Number.isSafeInteger(usage.input_tokens) && Number.isSafeInteger(usage.output_tokens)
+    ? usage.input_tokens + usage.output_tokens : null;
+  const limit = ui.view.context_window;
+  const knownLimit = Number.isSafeInteger(limit) && limit > 0;
+  const percent = used !== null && knownLimit ? 100 * used / limit : null;
+  ui.tab.style.setProperty("--context-fill", `${Math.min(100, Math.max(0, percent || 0))}%`);
+  const amount = used === null ? "Context —" : knownLimit
+    ? `${tokenFormat.format(used)} / ${tokenFormat.format(limit)} · ${percent.toFixed(1)}%`
+    : `${tokenFormat.format(used)} tokens`;
+  ui.contextLabel.textContent = amount;
+  const detail = used === null ? "Context usage available after the next model response."
+    : `Last response: ${usage.input_tokens.toLocaleString("en")} input + ${usage.output_tokens.toLocaleString("en")} output tokens. Drafts and subsequent input are not included.`;
+  ui.contextLabel.title = detail;
+  ui.tab.title = detail;
+  updateContextVisibility(ui);
+}
+
+function updateContextVisibility(ui) {
+  if (!ui.contextLabel || !usageCanvas) return;
+  const style = getComputedStyle(ui.input);
+  usageCanvas.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const firstLine = (ui.input.value || ui.input.placeholder).split("\n", 1)[0]
+    .replace(/\t/g, " ".repeat(parseInt(style.tabSize, 10) || 8));
+  const width = usageCanvas.measureText(firstLine).width
+    + Math.max(0, firstLine.length - 1) * (parseFloat(style.letterSpacing) || 0);
+  const textStart = ui.input.getBoundingClientRect().left + parseFloat(style.paddingLeft);
+  const available = ui.contextLabel.getBoundingClientRect().left - textStart - 12;
+  ui.contextLabel.style.visibility = ui.input.scrollTop > 0 || width >= available ? "hidden" : "visible";
+}
+
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
@@ -445,7 +481,9 @@ function addSession(view) {
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
-  ui.composer.append(ui.input);
+  ui.contextLabel = element("span", "context-usage");
+  ui.composer.append(ui.input, ui.contextLabel);
+  ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
   ui.overlay = overlay;
@@ -461,6 +499,7 @@ function addSession(view) {
     ui.overlayHeight = height;
     followTarget(ui);
     if (ui.autoClearance || ui.retainedPromptEnd) restorePosition(ui);
+    updateContextVisibility(ui);
   });
   overlayResize.observe(overlay);
   ui.overlayResize = overlayResize;
@@ -476,6 +515,7 @@ function addSession(view) {
     ui.slashSuggestion.textContent = ui.slashCommand === "/skills" ? "/skills  Select a skill" : "/model  Select model and effort";
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
     clearPromptSpaceWhenHidden(ui);
+    updateContextVisibility(ui);
   }
   let historyIndex = null;
   let savedDraft = "";
@@ -484,6 +524,7 @@ function addSession(view) {
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
     restorePosition(ui);
+    updateContextVisibility(ui);
   });
   traceResize.observe(ui.trace);
   ui.traceResize = traceResize;
@@ -553,6 +594,7 @@ function addSession(view) {
     finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
+  updateContextUsage(ui);
   setStatus(ui, view.status);
   for (const entry of view.entries || []) putEntry(ui, entry);
   setPending(ui, view.pending || []);
@@ -1028,6 +1070,7 @@ function snapshot(views, terminalViews = []) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
     ui.view = view;
+    updateContextUsage(ui);
     const follow = ui.follow;
     rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
@@ -1097,6 +1140,12 @@ function startEvents() {
         return;
       }
       if (!ui) return;
+      if (message.type === "context_usage") {
+        ui.view.context_usage = message.context_usage;
+        ui.view.context_window = message.context_window;
+        updateContextUsage(ui);
+        return;
+      }
       if (message.type === "input") {
         const item = ui.entries.get(String(message.id));
         if (item) item.inputBatch = message.input_batch;
@@ -1344,7 +1393,7 @@ function attachTerminal(info) {
 }
 
 const agentDefaults = {
-  name: "canary", cwd: "/work", message: "Inspect the working directory and summarize what is here.",
+  name: "canary", cwd: "",
 };
 let choicesVersion = 0;
 let choicesTimer;
@@ -1371,7 +1420,7 @@ function discardSetup(ui, replacement) {
 function addSetup(saved) {
   const values = saved || {
     id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
-    name: "", cwd: "", message: "",
+    name: "", cwd: "",
   };
   if (drafts.has(values.id)) return drafts.get(values.id);
   const ui = makePane("New agent", "", "draft", values.id);
@@ -1383,12 +1432,11 @@ function addSetup(saved) {
   ui.close.setAttribute("aria-label", "Discard agent draft");
   const body = element("div", "session-setup-grid");
   ui.form = element("form", "setup-form");
-  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"], ["message", "Task"]]) {
+  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"]]) {
     const wrapper = element("label", null, label);
-    const input = element(key === "message" ? "textarea" : "input");
+    const input = element("input");
     input.name = key;
     input.value = values[key];
-    if (key === "message") input.rows = 4;
     input.placeholder = agentDefaults[key];
     input.addEventListener("input", rememberPaneOrder);
     wrapper.append(input);
@@ -1521,11 +1569,180 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   finally { button.disabled = false; }
 });
 
+
+const diagnosticsButton = document.querySelector("#open-diagnostics");
+const diagnosticsDialog = document.querySelector("#diagnostics-dialog");
+const diagnosticsScope = document.querySelector("#diagnostics-scope");
+const diagnosticsContent = document.querySelector("#diagnostics-content");
+const diagnosticsError = document.querySelector("#diagnostics-error");
+let diagnosticsAgent = "";
+let diagnosticsSelection = "";
+let diagnosticsData;
+let diagnosticsTimer;
+let diagnosticsGeneration = 0;
+let diagnosticsOptions = "";
+let diagnosticsRendered = "";
+
+for (const kind of ["agent", "terminal"]) {
+  const plus = element("span", null, "+");
+  plus.setAttribute("aria-hidden", "true");
+  document.querySelector(`#add-${kind}`).replaceChildren(plus, paneIcon(kind));
+}
+
+function rememberDiagnosticsAgent(target) {
+  if (target.closest(".workspace-actions, #diagnostics-dialog")) return;
+  const pane = target.closest(".pane");
+  diagnosticsAgent = [...sessions.values()].find(ui => ui.pane === pane)?.id || "";
+}
+
+function diagnosticNumber(value) {
+  return Number.isFinite(value) ? value.toLocaleString("en-US") : "—";
+}
+
+function diagnosticCost(value) {
+  return Number.isFinite(value) ? `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}` : "—";
+}
+
+function diagnosticRow(list, label, value, reason) {
+  const term = element("dt", null, label);
+  const detail = element("dd", null, value);
+  if (reason) detail.append(element("span", "diagnostics-reason", reason));
+  list.append(term, detail);
+}
+
+function renderDiagnostics(resetMissing = true) {
+  if (!diagnosticsData) return;
+  const records = diagnosticsData.sessions || [];
+  const options = JSON.stringify(records.map(record => [record.id, record.name, record.archived]));
+  if (options !== diagnosticsOptions) {
+    diagnosticsOptions = options;
+    const all = element("option", null, "All agents");
+    all.value = "";
+    diagnosticsScope.replaceChildren(all);
+    for (const record of records) {
+      const duplicate = records.filter(other => other.name === record.name).length > 1;
+      const name = (record.name || "Agent") + (duplicate ? ` (${String(record.id).slice(0, 6)})` : "") + (record.archived ? " · ended" : "");
+      const option = element("option", null, name);
+      option.value = String(record.id);
+      diagnosticsScope.append(option);
+    }
+  }
+  const selectedRecord = records.find(record => String(record.id) === diagnosticsSelection);
+  if (!selectedRecord && resetMissing) diagnosticsSelection = "";
+  diagnosticsScope.value = selectedRecord ? diagnosticsSelection : "";
+  const summary = selectedRecord?.summary || diagnosticsData.aggregate;
+  if (!summary) return;
+  const rendered = JSON.stringify([diagnosticsSelection, summary, selectedRecord?.latest_context, selectedRecord?.latest_response, diagnosticsData.pricing]);
+  if (rendered === diagnosticsRendered) return;
+  diagnosticsRendered = rendered;
+  const reasonsExpanded = diagnosticsContent.querySelector("details")?.open || false;
+  diagnosticsContent.replaceChildren();
+  diagnosticsContent.append(element("h2", null, "Recorded totals"));
+  const totals = element("dl", "diagnostics-values");
+  const values = summary.totals || {};
+  const missing = summary.recorded_requests ? "Incomplete usage" : "No recorded responses";
+  diagnosticRow(totals, "Requests", diagnosticNumber(summary.recorded_requests));
+  for (const [label, key] of [["Input tokens", "input_tokens"], ["Output tokens", "output_tokens"], ["Cache read", "cached_read_tokens"], ["Cache write", "cache_write_tokens"]]) {
+    const value = values[key];
+    diagnosticRow(totals, label, diagnosticNumber(value), Number.isFinite(value) ? null : missing);
+  }
+  diagnosticRow(totals, "Cache reuse", Number.isFinite(values.reuse_pct) ? `${values.reuse_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%` : "—", Number.isFinite(values.reuse_pct) ? null : "No known ratio");
+  diagnosticRow(totals, "Token cost", diagnosticCost(summary.estimated_cost_usd), Number.isFinite(summary.estimated_cost_usd) ? null : "Incomplete pricing coverage");
+  if (!Number.isFinite(summary.estimated_cost_usd) && summary.priced_requests > 0) {
+    diagnosticRow(totals, "Priced subtotal", diagnosticCost(summary.priced_cost_usd), `${summary.priced_requests} of ${summary.recorded_requests} recorded requests`);
+  }
+  diagnosticRow(totals, "Rates updated", diagnosticsData.pricing?.as_of || "—");
+  diagnosticsContent.append(totals);
+  const coverage = [];
+  if (summary.in_flight_requests) coverage.push(`${diagnosticNumber(summary.in_flight_requests)} in flight`);
+  if (summary.unrecorded_requests) coverage.push(`${diagnosticNumber(summary.unrecorded_requests)} unrecorded`);
+  if (!summary.history_complete) coverage.push("Usage coverage is incomplete");
+  if (coverage.length) diagnosticsContent.append(element("p", "diagnostics-note", coverage.join(" · ")));
+  const reasons = [...new Set((summary.unknown_reasons || []).filter(reason => typeof reason === "string"))];
+  if (reasons.length) {
+    const disclosure = element("details", "diagnostics-note");
+    disclosure.open = reasonsExpanded;
+    disclosure.append(element("summary", null, "Coverage details"));
+    for (const reason of reasons) disclosure.append(element("p", "diagnostics-note", reason));
+    diagnosticsContent.append(disclosure);
+  }
+  if (selectedRecord) {
+    const latest = selectedRecord.latest_response;
+    if (latest) {
+      diagnosticsContent.append(element("h2", null, "Latest response"));
+      const details = element("dl", "diagnostics-values");
+      diagnosticRow(details, "Model", latest.model || "—", latest.model ? null : "Not reported");
+      diagnosticRow(details, "Service tier", latest.service_tier || "—", latest.service_tier ? null : "Not reported");
+      diagnosticsContent.append(details);
+    }
+    if (!latest) diagnosticsContent.append(element("p", "diagnostics-note", "No recorded response yet."));
+  }
+
+}
+
+async function refreshDiagnostics() {
+  const generation = diagnosticsGeneration;
+  try {
+    const data = await request("/api/diagnostics");
+    if (!diagnosticsDialog.open || generation !== diagnosticsGeneration) return;
+    diagnosticsData = data;
+    diagnosticsError.hidden = true;
+    renderDiagnostics();
+  } catch (error) {
+    if (!diagnosticsDialog.open || generation !== diagnosticsGeneration) return;
+    if (!diagnosticsData) diagnosticsContent.replaceChildren();
+    showError(diagnosticsError, `Could not refresh diagnostics: ${error.message || error}`);
+  } finally {
+    if (diagnosticsDialog.open && generation === diagnosticsGeneration) diagnosticsTimer = setTimeout(refreshDiagnostics, 2000);
+  }
+}
+
+diagnosticsButton.addEventListener("click", () => {
+  diagnosticsSelection = diagnosticsAgent;
+  diagnosticsGeneration++;
+  clearTimeout(diagnosticsTimer);
+  diagnosticsError.hidden = true;
+  diagnosticsDialog.showModal();
+  if (diagnosticsData) renderDiagnostics(false);
+  else diagnosticsContent.replaceChildren(element("p", "diagnostics-note", "Loading…"));
+  diagnosticsScope.focus();
+  refreshDiagnostics();
+});
+diagnosticsScope.addEventListener("change", () => {
+  diagnosticsSelection = diagnosticsScope.value;
+  renderDiagnostics();
+});
+document.querySelector("#close-diagnostics").addEventListener("click", () => diagnosticsDialog.close());
+diagnosticsDialog.addEventListener("close", () => {
+  diagnosticsGeneration++;
+  clearTimeout(diagnosticsTimer);
+  diagnosticsButton.focus({ preventScroll: true });
+});
+diagnosticsDialog.addEventListener("keydown", event => {
+  event.stopPropagation();
+  if (event.key === "Escape" && !event.isComposing) {
+    event.preventDefault();
+    diagnosticsDialog.close();
+  }
+});
+diagnosticsDialog.addEventListener("cancel", event => { event.preventDefault(); diagnosticsDialog.close(); });
+let diagnosticsOutside = false;
+function outsideDiagnostics(event) {
+  const rect = diagnosticsDialog.getBoundingClientRect();
+  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+}
+diagnosticsDialog.addEventListener("pointerdown", event => { diagnosticsOutside = outsideDiagnostics(event); });
+diagnosticsDialog.addEventListener("click", event => {
+  if (event.target === diagnosticsDialog && diagnosticsOutside && outsideDiagnostics(event)) diagnosticsDialog.close();
+});
+
 function requireLogin() {
   login.hidden = false;
   document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
+  diagnosticsButton.disabled = true;
+  if (diagnosticsDialog.open) diagnosticsDialog.close();
 }
 
 async function connect(token) {
@@ -1533,9 +1750,12 @@ async function connect(token) {
   const config = await request("/api/config");
   login.hidden = true;
   workspaceError.hidden = true;
+  agentDefaults.cwd = config.cwd;
+  for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = config.cwd;
   loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
+  diagnosticsButton.disabled = false;
   startEvents();
   for (const ui of terminals.values()) ui.reconnect();
 }
@@ -1559,12 +1779,15 @@ async function initialize() {
   }
 }
 document.addEventListener("pointerdown", event => {
+  rememberDiagnosticsAgent(event.target);
   selected = event.target.closest(".pane");
 });
 document.addEventListener("focusin", event => {
+  rememberDiagnosticsAgent(event.target);
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
+  if (diagnosticsDialog.open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault(); closeSkillPicker(skillPicker); return;

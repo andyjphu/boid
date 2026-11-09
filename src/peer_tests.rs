@@ -18,11 +18,20 @@ async fn fixture(
                 let (release, wait) = oneshot::channel();
                 requests.send((input, release)).await.unwrap();
                 let output = wait.await.unwrap_or(json!([]));
+                let response = if output.is_array() {
+                    json!({"output":output})
+                } else {
+                    output
+                };
                 (
                     [("content-type", "text/event-stream")],
                     format!(
                         "data: {}\n\n",
-                        json!({"type":"response.completed","response":{"output":output}})
+                        if response.get("type").is_some() {
+                            response
+                        } else {
+                            json!({"type":"response.completed","response":response})
+                        }
                     ),
                 )
             }
@@ -64,6 +73,137 @@ fn send(hub: &Hub, from: &View, to: &View, text: &str, urgency: Urgency, call: &
 }
 fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments.to_string()})
+}
+
+#[tokio::test]
+async fn diagnostics_preserve_reports_failed_usage_and_unknown_attempts_across_recovery() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let target = agent(&hub, work.path(), "accounting", "Begin");
+    let (_, release) = next(&mut rx).await;
+    assert_eq!(hub.diagnostics()["aggregate"]["in_flight_requests"], 1);
+    let usage = json!({"input_tokens":10000,"output_tokens":2000,"total_tokens":12000,
+        "input_tokens_details":{"cached_tokens":3000,"cache_write_tokens":2000,
+        "cache_write_tokens_details":{"ttl_30m_tokens":1000,"ttl_12h_tokens":1000}},
+        "output_tokens_details":{"reasoning_tokens":500},"future_field":{"opaque":true}});
+    release
+        .send(
+            json!({"id":"complete","output":[],"model":"gpt-6-sol","service_tier":"default",
+        "usage":usage,"prompt_cache_diagnostics":{"type":"cache_hit","future":true}}),
+        )
+        .unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    let diagnostics = hub.diagnostics();
+    assert_eq!(diagnostics["aggregate"]["recorded_requests"], 1);
+    assert_eq!(diagnostics["latest_response"]["usage"], usage);
+    assert_eq!(diagnostics["latest_response"]["model"], "gpt-6-sol");
+    assert!(
+        (diagnostics["aggregate"]["estimated_cost_usd"]
+            .as_f64()
+            .unwrap()
+            - 0.0381)
+            .abs()
+            < 1e-10
+    );
+    assert!(
+        serde_json::to_value(hub.view(&target.id))
+            .unwrap()
+            .get("usage")
+            .is_none()
+    );
+    hub.message(&target.id, "Fail with usage".into()).unwrap();
+    let (_, release) = next(&mut rx).await;
+    release
+        .send(
+            json!({"type":"response.failed","response":{"id":"failed","model":"gpt-6-sol",
+        "service_tier":"default","usage":usage,"error":{"message":"fixture failure"}}}),
+        )
+        .unwrap();
+    wait_status(&hub, &target.id, "error").await;
+    assert_eq!(hub.diagnostics()["latest_response"]["status"], "failed");
+    hub.message(&target.id, "Cancel without report".into())
+        .unwrap();
+    let (_, held) = next(&mut rx).await;
+    hub.close(&target.id).await.unwrap();
+    let diagnostics = hub.diagnostics();
+    assert_eq!(diagnostics["aggregate"]["request_attempts"], 3);
+    assert_eq!(diagnostics["aggregate"]["unrecorded_requests"], 1);
+    assert!(diagnostics["aggregate"]["estimated_cost_usd"].is_null());
+    assert_eq!(diagnostics["sessions"][0]["archived"], true);
+    hub.shutdown().await;
+    drop(hub);
+    drop(held);
+    server.abort();
+    let (restored, _, server) = fixture(Some(state.path().into())).await;
+    let diagnostics = restored.diagnostics();
+    assert_eq!(diagnostics["aggregate"]["recorded_requests"], 2);
+    assert_eq!(diagnostics["aggregate"]["unrecorded_requests"], 1);
+    assert_eq!(diagnostics["latest_response"]["usage"], usage);
+    assert_eq!(diagnostics["sessions"][0]["archived"], true);
+    restored.shutdown().await;
+    server.abort();
+}
+async fn wait_status(hub: &Hub, id: &str, status: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hub.view(id).unwrap().status != status {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn context_usage_is_latest_reported_measurement_and_survives_recovery() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let (_, mut events) = hub.subscribe();
+    let target = agent(&hub, work.path(), "usage", "Begin");
+    assert!(hub.view(&target.id).unwrap().context_usage.is_none());
+    for (index, input, output) in [(0, 100, 20), (1, 180, 10)] {
+        if index > 0 {
+            hub.message(&target.id, "Continue".into()).unwrap();
+        }
+        let (_, release) = next(&mut rx).await;
+        release
+            .send(json!({"output":[],"usage":{"input_tokens":input,"output_tokens":output}}))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if hub.view(&target.id).unwrap().status == "idle" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let view = hub.view(&target.id).unwrap();
+        let usage = view.context_usage.unwrap();
+        assert_eq!(usage.input_tokens, input);
+        assert_eq!(usage.output_tokens, output);
+        assert_eq!(view.context_window, None); // No fabricated limit for the fixture's model.
+    }
+    let mut updates = vec![];
+    while let Ok(event) = events.try_recv() {
+        if event["type"] == "context_usage" {
+            updates.push(event);
+        }
+    }
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[1]["context_usage"]["input_tokens"], 180);
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let (restored, _, server) = fixture(Some(state.path().into())).await;
+    let usage = restored.view(&target.id).unwrap().context_usage.unwrap();
+    assert_eq!(usage.input_tokens, 180);
+    assert_eq!(usage.output_tokens, 10);
+    assert_eq!(crate::api::context_window("gpt-6-sol"), Some(1_050_000));
+    restored.shutdown().await;
+    server.abort();
 }
 
 #[tokio::test]
@@ -470,7 +610,7 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
     server.abort();
 }
 
-// Run explicitly in an isolated test container. The browser drives the real
+// Run explicitly with isolated development state. The browser drives the real
 // authenticated routes, worker, persistence, and SSE stream with a mock provider.
 #[tokio::test]
 #[ignore]
@@ -480,7 +620,8 @@ async fn browser_fixture() {
         Ok("1")
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = Client::test_client_at(format!("http://{}/", listener.local_addr().unwrap()));
+    let mut client = Client::test_client_at(format!("http://{}/", listener.local_addr().unwrap()));
+    client.model = "gpt-6-sol".into();
     let router = Router::new().route(
         "/",
         post(|Json(input): Json<Value>| async move {
@@ -499,12 +640,19 @@ async fn browser_fixture() {
             } else {
                 json!([])
             };
+            let mut response = json!({"id":Uuid::new_v4().to_string(),"output":output,
+                "usage":{"input_tokens":210000,"output_tokens":5000}});
+            if content == "DiagnosticsComplete" {
+                response["model"] = json!("gpt-6-sol");
+                response["service_tier"] = json!("default");
+                response["usage"] = json!({"input_tokens":10000,"output_tokens":2000,"total_tokens":12000,
+                    "input_tokens_details":{"cached_tokens":3000,"cache_write_tokens":2000,
+                    "cache_write_tokens_details":{"ttl_30m_tokens":1000,"ttl_12h_tokens":1000}},
+                    "output_tokens_details":{"reasoning_tokens":500}});
+            }
             (
                 [("content-type", "text/event-stream")],
-                format!(
-                    "data: {}\n\n",
-                    json!({"type":"response.completed","response":{"output":output}})
-                ),
+                format!("data: {}\n\n", json!({"type":"response.completed","response":response})),
             )
         }),
     );

@@ -7,6 +7,15 @@ use std::time::Duration;
 
 const REASONING_EFFORT: &str = "medium";
 
+// API limit, not Codex's smaller default budget. Unknown models have no assumed limit.
+// https://developers.openai.com/api/docs/models/gpt-6-sol (2026-11-08)
+pub fn context_window(model: &str) -> Option<u64> {
+    match model {
+        "gpt-6-sol" => Some(1_050_000),
+        _ => None,
+    }
+}
+
 pub struct Client {
     http: reqwest::Client,
     key: String,
