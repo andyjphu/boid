@@ -4,6 +4,7 @@ mod server;
 mod session;
 mod session_store;
 mod skills;
+mod startup;
 mod terminal;
 mod tool_calls;
 mod usage;
@@ -11,17 +12,22 @@ mod usage;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-const HELP: &str = "Usage: boid serve | boid \"task\"
+const HELP: &str = "Usage: boid [--no-open] | boid serve | boid stop | boid \"task\"
 
-boid serve (or boid with no arguments) starts the shared server and prints its web URL.
-boid \"task\" submits a session to the running server and returns its ID.
+boid reuses the shared server or starts it in the background, then opens its web URL.
+--no-open prints the URL without opening a browser. SSH sessions also print the URL only.
+boid serve runs the server in the foreground. Ctrl-C stops that server.
+boid stop gracefully stops the shared server and its active work.
+boid \"task\" starts or connects to the shared server and returns a new session ID.
 The server owns execution; closing a submitting command or browser leaves it running.
 
 Server: OPENAI_API_KEY required; BOID_MODEL defaults to gpt-6-sol with medium reasoning.
 BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.
 BOID_LISTEN defaults to 127.0.0.1:7734. Commands run with the server account permissions.
-Client: BOID_URL defaults to http://127.0.0.1:7734.
-BOID_CWD selects a server-side directory; omitted uses the server working directory.
+Client: BOID_URL selects an existing remote server; no local server is started for it.
+Otherwise the launcher connects to BOID_LISTEN (default 127.0.0.1:7734).
+BOID_CWD selects a server-side directory; local launches default to the invocation directory.
+Remote connections without BOID_CWD use the server working directory.
 BOID_TOKEN overrides the private token file under BOID_STATE_DIR (default ~/.local/share/boid).
 Server shutdown stops execution; saved conversations return paused on restart. End archives a session without erasing its record.";
 
@@ -41,26 +47,30 @@ async fn run() -> Result<()> {
         println!("{HELP}");
         return Ok(());
     }
-    if args.is_empty() || args == ["serve"] {
+    if args == ["--version"] || args == ["-V"] {
+        println!("boid {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args == ["serve"] {
         return server::serve().await;
     }
-    let url = std::env::var("BOID_URL").unwrap_or_else(|_| "http://127.0.0.1:7734".into());
-    let parsed = reqwest::Url::parse(&url).context("Invalid BOID_URL.")?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        bail!("BOID_URL must use HTTP or HTTPS.");
+    if args == ["stop"] {
+        return startup::stop().await;
     }
-    let token = server::read_token()?;
+    let connection = startup::connect().await?;
+    if args.is_empty() || args == ["--no-open"] {
+        return startup::open_workspace(&connection, args == ["--no-open"]);
+    }
     let response = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?
-        .post(format!("{}/api/sessions", url.trim_end_matches('/')))
-        .bearer_auth(token)
-        .json(
-            &json!({"message":args.join(" "),"cwd":std::env::var("BOID_CWD").unwrap_or_default()}),
-        )
+        .post(connection.url.join("api/sessions")?)
+        .bearer_auth(&connection.token)
+        .json(&json!({"message":args.join(" "),"cwd":startup::invocation_cwd()?}))
         .send()
         .await
-        .context("Cannot reach the Boid server. Start `boid serve` first.")?;
+        .context("Cannot reach the Boid server.")?;
     let status = response.status();
     let body: Value = response.json().await.context("Invalid server response.")?;
     if !status.is_success() {
@@ -72,7 +82,7 @@ async fn run() -> Result<()> {
     println!(
         "Session {}\n{}",
         body["id"].as_str().context("Missing session ID.")?,
-        url
+        connection.url
     );
     Ok(())
 }

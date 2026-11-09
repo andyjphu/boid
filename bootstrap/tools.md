@@ -1,14 +1,27 @@
 # Server, web interface, and tools
 
-Run `boid serve` (or `boid` with no arguments) natively from the working directory. The
-shared server listens on `127.0.0.1:7734` by default and prints a browser URL.
-A second server cannot bind the same address. `BOID_LISTEN` changes the listener;
-no system service is installed. Set `OPENAI_API_KEY`; `BOID_MODEL` defaults to
+Run `boid` natively from the working directory. The v1.1 launcher authenticates
+and reuses the shared server, or starts it in the background and waits until it
+is ready. It opens the web workspace and returns to the shell. `--no-open` and
+SSH sessions print the URL without opening a browser. Concurrent launches share
+a startup lock. A different service or rejected token produces an error without
+stopping that service or starting another server.
+
+The server listens on `127.0.0.1:7734` by default. `BOID_LISTEN` changes both the
+local listener and launcher destination. `boid serve` keeps the foreground
+behavior for debugging; `boid stop` requests authenticated graceful shutdown.
+State defaults to `~/.local/share/boid`, with background output in `server.log`.
+No system service is installed. Set `OPENAI_API_KEY` for a cold start; attachment
+to a running server does not require it. `BOID_MODEL` defaults to
 `gpt-6-sol`, with medium reasoning effort and Daybreak Blue.
 
-`boid "task"` submits to the running server, prints its session ID, and exits.
-`BOID_URL` selects a server. `BOID_CWD` optionally selects a directory as seen
-by that server; otherwise the server's working directory is used. `BOID_TOKEN`
+`boid "task"` starts or connects to the server, submits a new session, prints its
+ID, and exits. A local launch uses the invocation directory for new agents and
+terminals; each browser tab retains that default on refresh. Existing sessions
+keep their directories. No project context or `.boid` directory is created.
+`BOID_URL` selects an existing remote server and disables local autostart.
+`BOID_CWD` optionally selects a directory as seen by that server; remote
+connections without it use the server's working directory. `BOID_TOKEN`
 supplies its access token, or the client reads the private token file under
 `BOID_STATE_DIR` (default `~/.local/share/boid`). The server generates a token
 file when needed.
