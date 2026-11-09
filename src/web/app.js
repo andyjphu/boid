@@ -146,6 +146,12 @@ function makePane(name, cwd, kind, id) {
   return { pane, header, tab, title, status, directory, error, close };
 }
 
+function reportUnsavedEnd(result) {
+  if (result.persisted === false) {
+    showError(workspaceError, "The agent ended, but storage failed. Its final state could not be saved.");
+  }
+}
+
 function removeSession(ui) {
   ui.traceResize.disconnect();
   ui.overlayResize.disconnect();
@@ -378,7 +384,8 @@ function addSession(view) {
   ui.close.addEventListener("click", async () => {
     ui.close.disabled = true;
     try {
-      await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      const result = await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      reportUnsavedEnd(result);
       if (sessions.has(id)) removeSession(ui);
     } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
   });
@@ -831,8 +838,12 @@ function startEvents() {
         return;
       }
       const ui = sessions.get(String(message.session_id));
+      if (message.type === "closed") {
+        reportUnsavedEnd(message);
+        if (ui) removeSession(ui);
+        return;
+      }
       if (!ui) return;
-      if (message.type === "closed") { removeSession(ui); return; }
       if (message.type === "input") {
         const item = ui.entries.get(String(message.id));
         if (item) item.inputBatch = message.input_batch;

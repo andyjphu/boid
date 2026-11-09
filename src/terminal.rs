@@ -197,6 +197,7 @@ struct Journal {
     path: PathBuf,
     file: File,
     bytes: u64,
+    repair_required: bool,
 }
 impl Journal {
     fn open(path: PathBuf) -> std::io::Result<Self> {
@@ -206,13 +207,47 @@ impl Journal {
             .mode(0o600)
             .open(&path)?;
         let bytes = file.metadata()?.len();
-        Ok(Self { path, file, bytes })
+        Ok(Self {
+            path,
+            file,
+            bytes,
+            repair_required: false,
+        })
     }
     fn append(&mut self, record: &Record) -> std::io::Result<()> {
+        self.append_with(record, |file, bytes| file.write_all(bytes))
+    }
+
+    fn append_with(
+        &mut self,
+        record: &Record,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        self.repair_tail()?;
         let mut bytes = serde_json::to_vec(record)?;
         bytes.push(b'\n');
-        self.file.write_all(&bytes)?;
+        if let Err(error) = write(&mut self.file, &bytes) {
+            // write_all can fail after writing a prefix. Never let a later
+            // record turn that prefix into a malformed complete JSONL line.
+            self.repair_required = true;
+            return match self.repair_tail() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(std::io::Error::new(
+                    error.kind(),
+                    format!("{error}; incomplete terminal record rollback failed: {rollback}"),
+                )),
+            };
+        }
         self.bytes += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn repair_tail(&mut self) -> std::io::Result<()> {
+        if self.repair_required {
+            self.file.set_len(self.bytes)?;
+            self.file.sync_data()?;
+            self.repair_required = false;
+        }
         Ok(())
     }
     fn compact(&mut self, meta: &Summary, output: &Output) -> std::io::Result<()> {
@@ -244,6 +279,7 @@ impl Journal {
         temporary.persist(&self.path).map_err(|error| error.error)?;
         self.file = OpenOptions::new().append(true).open(&self.path)?;
         self.bytes = self.file.metadata()?.len();
+        self.repair_required = false;
         Ok(())
     }
 }
@@ -1119,6 +1155,127 @@ mod persistence_tests {
         assert!(recovered.summary().archived);
         assert!(recovered.live().is_none());
         hub.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn partial_append_keeps_later_records_recoverable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("term-partial.jsonl");
+        let mut journal = Journal::open(path.clone()).unwrap();
+        let mut meta = Summary {
+            id: "term-partial".into(),
+            name: "Partial write fixture".into(),
+            cwd: directory.path().display().to_string(),
+            cwd_observed: false,
+            running: false,
+            status: "ended".into(),
+            archived: true,
+            persistence_error: None,
+        };
+        journal.append(&Record::Format { version: 1 }).unwrap();
+        journal.append(&Record::Meta(meta.clone())).unwrap();
+        journal
+            .append(&Record::Event(StoredEvent::Data(b"before\n".to_vec())))
+            .unwrap();
+        let error = journal
+            .append_with(
+                &Record::Event(StoredEvent::Data(b"failed\n".to_vec())),
+                |file, bytes| {
+                    file.write_all(&bytes[..bytes.len() / 2])?;
+                    Err(std::io::Error::other("injected partial write"))
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected partial write"));
+        journal
+            .append(&Record::Event(StoredEvent::Data(b"after\n".to_vec())))
+            .unwrap();
+        // The existing caller reports a failed append through retained metadata.
+        meta.persistence_error = Some(error.to_string());
+        journal.append(&Record::Meta(meta)).unwrap();
+        journal.file.sync_data().unwrap();
+        drop(journal);
+
+        let catalog = Catalog::new(Client::test_client()).unwrap();
+        let recovered = Terminal::restore(path.clone(), catalog.clone()).unwrap();
+        assert!(
+            recovered
+                .summary()
+                .persistence_error
+                .as_deref()
+                .unwrap()
+                .contains("injected partial write")
+        );
+        let (events, _, _) = recovered.attach();
+        let bytes: Vec<u8> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                TerminalEvent::Data(bytes) => Some(bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(bytes, b"before\nafter\n");
+        drop(recovered);
+
+        // A malformed complete historical record remains an error, not a tail
+        // that this repair is allowed to erase or silently skip.
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{malformed complete record}\n")
+            .unwrap();
+        let malformed = fs::read(&path).unwrap();
+        assert!(Terminal::restore(path.clone(), catalog).is_err());
+        assert_eq!(fs::read(path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn failed_tail_rollback_blocks_appends_until_repaired() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("term-rollback.jsonl");
+        let mut journal = Journal::open(path.clone()).unwrap();
+        journal.append(&Record::Format { version: 1 }).unwrap();
+        let error = journal
+            .append_with(
+                &Record::Event(StoredEvent::Data(b"failed".to_vec())),
+                |file, bytes| {
+                    file.write_all(&bytes[..bytes.len() / 2])?;
+                    // A read-only descriptor deterministically makes rollback
+                    // fail without changing global limits or other tests.
+                    *file = File::open(&path)?;
+                    Err(std::io::Error::other("injected partial write"))
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("rollback failed"));
+        assert!(journal.repair_required);
+        let partial = fs::read(&path).unwrap();
+        assert!(partial.len() as u64 > journal.bytes);
+        assert!(
+            journal
+                .append_with(&Record::Format { version: 1 }, |_, _| {
+                    panic!("A new append must not follow an unrepaired partial record")
+                })
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), partial);
+
+        journal.file = OpenOptions::new().append(true).open(&path).unwrap();
+        journal
+            .append(&Record::Event(StoredEvent::Data(b"after".to_vec())))
+            .unwrap();
+        assert!(!journal.repair_required);
+        assert_eq!(journal.file.metadata().unwrap().len(), journal.bytes);
+        let records: Vec<Record> = BufReader::new(File::open(&path).unwrap())
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert!(
+            matches!(&records[1], Record::Event(StoredEvent::Data(bytes)) if bytes == b"after")
+        );
     }
 
     #[test]

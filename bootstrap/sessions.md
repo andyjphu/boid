@@ -54,3 +54,11 @@ bound model working context without discarding authoritative history, retain the
 reason and scope of corrections, and preserve action/job identity and control.
 A saved transcript or an unverified summary alone does not meet that outcome.
 This remains open work after the initial session-lifecycle change.
+
+Persistence still holds the shared catalog lock while saving or syncing a session.
+Per-session asynchronous write ordering and delta-sync batching remain post-v1
+work; any change must preserve durable acknowledgement and stream replay order.
+Revisit this sooner if measured multi-agent latency requires it. Recovery
+isolation for already-corrupted terminal records is also follow-up work; the
+server currently reports malformed complete records rather than silently
+discarding them.

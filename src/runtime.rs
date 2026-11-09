@@ -590,7 +590,8 @@ impl Hub {
             .send_replace(order);
         Ok(())
     }
-    pub async fn close(&self, id: &str) -> Result<()> {
+    // The result indicates whether the final archived state was saved.
+    pub async fn close(&self, id: &str) -> Result<bool> {
         let started = self.update(id, |r| {
             if r.view.archived {
                 bail!("Session has already ended.");
@@ -647,9 +648,9 @@ impl Hub {
             self.fault(id, error);
             return self.close_without_storage(id, true).await;
         }
-        Ok(())
+        Ok(true)
     }
-    async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<()> {
+    async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<bool> {
         let (task, cancelled, users, peers) = {
             let mut data = self.0.data.lock().unwrap();
             let h = data.sessions.get_mut(id).context("Unknown session.")?;
@@ -705,7 +706,7 @@ impl Hub {
             &mut data,
             json!({"type":"closed","session_id":id,"persisted":false}),
         );
-        Ok(())
+        Ok(false)
     }
 
     pub fn reopen(&self, id: &str) -> Result<View> {
@@ -1620,7 +1621,7 @@ mod tests {
             .count();
         let ended = hub.close(&target.id).await;
         eprintln!("storage-failure reproduction: errors={errors}, end={ended:?}");
-        assert!(ended.is_ok());
+        assert!(!ended.unwrap());
         assert_eq!(errors, 1);
         let mut unsaved_close = false;
         while let Ok(event) = events.try_recv() {

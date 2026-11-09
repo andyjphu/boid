@@ -244,8 +244,8 @@ async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<
         .map_err(invalid)
 }
 async fn close_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    app.hub.close(&id).await.map_err(invalid)?;
-    Ok(Json(json!({"status":"closed"})))
+    let persisted = app.hub.close(&id).await.map_err(invalid)?;
+    Ok(Json(json!({"status":"closed", "persisted":persisted})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
