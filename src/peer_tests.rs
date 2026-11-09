@@ -67,6 +67,49 @@ fn call(id: &str, name: &str, arguments: Value) -> Value {
 }
 
 #[tokio::test]
+async fn paused_or_closed_inbox_ends_step_without_error_or_state_change() {
+    let work = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(None).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    let target = agent(&hub, work.path(), "receiver", "");
+    hub.stop(&target.id).unwrap();
+    send(
+        &hub,
+        &sender,
+        &target,
+        "remain queued",
+        Urgency::Regular,
+        "paused-step",
+    );
+    let tools = Tools::new(work.path()).unwrap();
+    for archived in [false, true] {
+        if archived {
+            hub.close(&target.id).await.unwrap();
+        }
+        let mut session = hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .engine
+            .clone();
+        let before = serde_json::to_value(&session).unwrap();
+        let view_before = serde_json::to_value(hub.view(&target.id).unwrap()).unwrap();
+        assert!(
+            !session
+                .step(&hub.0.client, &tools, &hub, &target.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(hub.view(&target.id).unwrap()).unwrap(),
+            view_before
+        );
+        assert!(rx.try_recv().is_err());
+    }
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn peer_boundaries_priority_and_running_tool_cancellation() {
     let work = tempfile::tempdir().unwrap();
     let (hub, mut rx, server) = fixture(None).await;

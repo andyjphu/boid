@@ -859,6 +859,12 @@ function renderCommunication(ui, item, message) {
   if (refocus) item.body.querySelector("button")?.focus({ preventScroll: true });
 }
 
+function refreshPeerEntries(sessionId) {
+  for (const peer of communications.values()) {
+    if (peer.sender_id === sessionId || peer.recipient_id === sessionId) receiveCommunication(peer);
+  }
+}
+
 function receiveCommunication(message) {
   communications.set(message.id, message);
   for (const id of [message.sender_id, message.recipient_id]) {
@@ -993,7 +999,10 @@ function acceptSessionResponse(view, startedAt) {
   if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
     throw new Error("This agent has ended. Choose it from Inactive sessions to reopen.");
   }
-  return addSession(view);
+  sessionLifecycle.set(String(view.id), { open: true, revision: ++catalogRevision });
+  const ui = addSession(view);
+  refreshPeerEntries(String(view.id));
+  return ui;
 }
 
 function snapshot(views, terminalViews = []) {
@@ -1069,7 +1078,11 @@ function startEvents() {
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
       if (["session", "closed", "status"].includes(message.type)) refreshChoices();
-      if (message.type === "session") { addSession(message.session); return; }
+      if (message.type === "session") {
+        addSession(message.session);
+        refreshPeerEntries(String(message.session.id));
+        return;
+      }
       if (message.type === "terminal") {
         terminalCatalog.set(String(message.terminal.id), message.terminal);
         reconcileTerminals([...terminalCatalog.values()]);
@@ -1080,9 +1093,7 @@ function startEvents() {
       if (message.type === "closed") {
         reportUnsavedEnd(message);
         if (ui) removeSession(ui);
-        for (const peer of communications.values()) {
-          if (peer.sender_id === message.session_id || peer.recipient_id === message.session_id) receiveCommunication(peer);
-        }
+        refreshPeerEntries(String(message.session_id));
         return;
       }
       if (!ui) return;

@@ -215,7 +215,10 @@ impl Session {
     ) -> Result<bool> {
         let Some(call) = self.pending.pop_front() else {
             self.model_requests += 1;
-            hub.apply_inbox(id, self)?;
+            if !hub.apply_inbox(id, self)? {
+                self.model_requests -= 1;
+                return Ok(false);
+            }
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
             let mut streams: BTreeMap<String, String> = BTreeMap::new();

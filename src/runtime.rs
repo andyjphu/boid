@@ -1061,12 +1061,17 @@ impl Hub {
         })?;
         Ok(true)
     }
-    pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<()> {
+    pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<bool> {
+        let mut data = self.0.data.lock().unwrap();
+        let handle = data.sessions.get(id).context("Unknown session.")?;
+        if let Some(error) = &handle.storage_error {
+            bail!("Session storage failed: {error}");
+        }
+        if handle.record.paused || handle.record.view.archived {
+            return Ok(false);
+        }
         let mut staged = session.clone();
-        self.update(id, |r| {
-            if r.paused || r.view.archived {
-                bail!("Recipient is paused.");
-            }
+        self.update_locked(&mut data, id, |r| {
             let urgent = r
                 .messages
                 .iter()
@@ -1104,7 +1109,7 @@ impl Hub {
             Ok(())
         })?;
         *session = staged;
-        Ok(())
+        Ok(true)
     }
     #[cfg(test)]
     pub fn take_inbox(&self, id: &str) -> Vec<(String, String)> {
