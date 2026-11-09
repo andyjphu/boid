@@ -6,6 +6,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Clone, PartialEq)]
@@ -68,7 +69,19 @@ pub fn scan(cwd: &Path) -> Snapshot {
     scan_roots(&roots(cwd), &cwd.join(".boid/skills.json"))
 }
 
+pub fn scan_cancellable(cwd: &Path, cancelled: &AtomicBool) -> Option<Snapshot> {
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    let snapshot = scan_inner(&roots(cwd), &cwd.join(".boid/skills.json"), cancelled);
+    (!cancelled.load(Ordering::Acquire)).then_some(snapshot)
+}
+
 pub fn scan_roots(roots: &[PathBuf], config_path: &Path) -> Snapshot {
+    scan_inner(roots, config_path, &AtomicBool::new(false))
+}
+
+fn scan_inner(roots: &[PathBuf], config_path: &Path, cancelled: &AtomicBool) -> Snapshot {
     let mut snapshot = Snapshot {
         skills: bundled(),
         warnings: vec![],
@@ -102,9 +115,19 @@ pub fn scan_roots(roots: &[PathBuf], config_path: &Path) -> Snapshot {
     let mut visited = BTreeSet::new();
     let mut paths = BTreeSet::new();
     for root in roots {
-        walk(root, 0, &mut visited, &mut paths, &mut snapshot.warnings);
+        walk(
+            root,
+            0,
+            &mut visited,
+            &mut paths,
+            &mut snapshot.warnings,
+            cancelled,
+        );
     }
     for path in paths {
+        if cancelled.load(Ordering::Acquire) {
+            return snapshot;
+        }
         match load(&path) {
             Ok(skill) => {
                 snapshot
@@ -142,7 +165,11 @@ fn walk(
     visited: &mut BTreeSet<PathBuf>,
     files: &mut BTreeSet<PathBuf>,
     warnings: &mut Vec<String>,
+    cancelled: &AtomicBool,
 ) {
+    if cancelled.load(Ordering::Acquire) {
+        return;
+    }
     let canonical = match path.canonicalize() {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && depth == 0 => return,
@@ -176,6 +203,9 @@ fn walk(
         Ok(entries) => {
             let mut directories = vec![];
             for entry in entries {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
                 match entry {
                     Ok(entry) if entry.path().is_dir() => directories.push(entry.path()),
                     Ok(_) => (),
@@ -184,7 +214,7 @@ fn walk(
             }
             directories.sort();
             for directory in directories {
-                walk(&directory, depth + 1, visited, files, warnings);
+                walk(&directory, depth + 1, visited, files, warnings, cancelled);
             }
         }
         Err(e) => warnings.push(format!("{}: {e}", canonical.display())),

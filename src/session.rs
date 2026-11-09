@@ -10,8 +10,10 @@ pub struct Session {
     pub model: String,
     pub instructions: String,
     pub tools: Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub skills: skills::Skills,
+    #[serde(default)]
+    pub skill_snapshot: Option<String>,
     #[serde(default)]
     pub skill_base: Option<String>,
     #[serde(default)]
@@ -119,7 +121,7 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
-    pub fn operator(&mut self, text: String) -> Vec<String> {
+    pub fn operator(&mut self, text: String) -> Vec<Value> {
         let selected = if self.skill_base.is_some() {
             skills::selection::mentions(&text, &self.skills)
         } else {
@@ -128,20 +130,26 @@ impl Session {
         self.user(text);
         let mut entries = vec![];
         for selection in selected {
-            let content = match selection {
-                Ok(id) => format!(
-                    "Operator-selected skill:\n{}",
-                    skills::loaded(&id, &self.skills[&id])
+            let (content, event) = match selection {
+                Ok(id) => {
+                    let loaded = skills::loaded(&id, &self.skills[&id]);
+                    (
+                        format!("Operator-selected skill:\n{loaded}"),
+                        json!({"event":"loaded", "skill":loaded}),
+                    )
+                }
+                Err(error) => (
+                    format!("Skill selection failed: {error}"),
+                    json!({"event":"error", "error":error}),
                 ),
-                Err(error) => format!("Skill selection failed: {error}"),
             };
             self.history
                 .push(json!({"role":"developer","content":content}));
-            entries.push(content);
+            entries.push(event);
         }
         entries
     }
-    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) -> Option<String> {
+    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) -> Option<Value> {
         let base = self.skill_base.as_ref()?;
         let prompt = skills::catalog::prompt(&snapshot.skills, snapshot.budget, &snapshot.warnings);
         let instructions = format!("{base}\n{prompt}");
@@ -152,6 +160,7 @@ impl Session {
             return None;
         }
         self.skills = snapshot.skills;
+        self.skill_snapshot = None;
         self.skill_warnings = snapshot.warnings;
         self.instructions = instructions;
         let notice = format!(
@@ -160,7 +169,7 @@ impl Session {
         );
         self.history
             .push(json!({"role":"developer","content":notice}));
-        Some(notice)
+        Some(json!({"event":"catalog", "text":notice, "warnings":self.skill_warnings}))
     }
     pub fn next_input_batch(&self) -> u64 {
         self.model_requests + 1

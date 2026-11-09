@@ -2,6 +2,7 @@
 pub mod catalog;
 pub mod discovery;
 mod parser;
+pub mod refresh;
 pub mod selection;
 
 use serde::{Deserialize, Serialize};

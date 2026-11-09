@@ -85,6 +85,8 @@ struct Inner {
     client: Client,
     store: SessionStore,
     pub cwd: PathBuf,
+    #[cfg(test)]
+    skill_scan_gate: Mutex<Option<Arc<SkillScanGate>>>,
 }
 struct Data {
     seq: u64,
@@ -100,6 +102,12 @@ struct Handle {
     wake: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
     storage_error: Option<String>,
+}
+
+#[cfg(test)]
+struct SkillScanGate {
+    started: Notify,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl Hub {
@@ -124,9 +132,14 @@ impl Hub {
             client,
             store,
             cwd: std::env::current_dir()?,
+            #[cfg(test)]
+            skill_scan_gate: Mutex::new(None),
         }));
         for mut record in records {
-            if record.version != 1 {
+            if let Some(id) = &record.engine.skill_snapshot {
+                record.engine.skills = hub.0.store.load_skills(id)?;
+            }
+            if !matches!(record.version, 1 | 2) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     record.version
@@ -161,7 +174,7 @@ impl Hub {
                 "stopped"
             }
             .into();
-            hub.0.store.save(&record.view.id, &record)?;
+            hub.save_record(&record.view.id.clone(), &mut record)?;
             hub.install(record, false)?;
         }
         Ok(hub)
@@ -265,6 +278,17 @@ impl Hub {
         data.terminal_summaries.insert(id.into(), summary.clone());
         self.emit(&mut data, json!({"type":"terminal","terminal":summary}));
     }
+    fn save_record(&self, id: &str, record: &mut Record) -> Result<()> {
+        // Older binaries must reject records that rely on external skill snapshots.
+        if record.engine.skill_base.is_some() || !record.engine.skills.is_empty() {
+            record.version = 2;
+        }
+        if record.engine.skill_snapshot.is_none() && !record.engine.skills.is_empty() {
+            record.engine.skill_snapshot = self.0.store.save_skills(&record.engine.skills)?;
+        }
+        self.0.store.save(id, record)
+    }
+
     fn update<T>(&self, id: &str, change: impl FnOnce(&mut Record) -> Result<T>) -> Result<T> {
         let mut data = self.0.data.lock().unwrap();
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
@@ -288,9 +312,12 @@ impl Hub {
         } else {
             None
         };
-        self.0
-            .store
-            .save(id, &next)
+        next.engine.skill_snapshot = if next.engine.skills == handle.record.engine.skills {
+            handle.record.engine.skill_snapshot.clone()
+        } else {
+            None
+        };
+        self.save_record(id, &mut next)
             .context("Cannot save session; action not acknowledged")?;
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
@@ -512,7 +539,7 @@ impl Hub {
             pending: vec![],
             archived: false,
         };
-        let record = Record {
+        let mut record = Record {
             version: 1,
             view,
             engine,
@@ -528,7 +555,7 @@ impl Hub {
             if data.closing {
                 bail!("Server is shutting down.");
             }
-            self.0.store.save(&id, &record)?;
+            self.save_record(&id, &mut record)?;
         }
         self.install(record, true)?;
         if !input.message.trim().is_empty() {
@@ -758,7 +785,7 @@ impl Hub {
         record.view.status = "stopped".into();
         record.view.working_since_ms = None;
         record.paused = true;
-        self.0.store.save(id, &record)?;
+        self.save_record(id, &mut record)?;
         data.sessions.remove(id);
         drop(data);
         self.install(record, true)?;
@@ -863,7 +890,9 @@ impl Hub {
             if !cancelled {
                 let selected = session.operator(input.text);
                 for text in selected {
-                    r.view.entries.push(Self::make_entry("context", text));
+                    r.view
+                        .entries
+                        .push(Self::make_entry("skill", text.to_string()));
                 }
                 r.engine = session.clone();
                 if let Some(entry) = r.view.entries.iter_mut().find(|entry| entry.id == input.id) {
@@ -905,6 +934,7 @@ impl Hub {
             }
         };
         let mut active = false;
+        let mut scan: Option<crate::skills::refresh::Scan> = None;
         loop {
             enum Next {
                 Interrupt,
@@ -912,6 +942,12 @@ impl Hub {
                 Halt,
                 Wake,
                 Finished(Result<bool>),
+                Scanned(
+                    std::result::Result<
+                        Option<crate::skills::discovery::Snapshot>,
+                        tokio::task::JoinError,
+                    >,
+                ),
             }
             let next = if halt.has_changed().unwrap_or(false) {
                 halt.borrow_and_update();
@@ -941,39 +977,44 @@ impl Hub {
                                 .is_some_and(|input| input.order > record.stop_through)
                         };
                         if needs_refresh && session.skill_base.is_some() {
-                            let skill_cwd = PathBuf::from(&cwd);
-                            match tokio::task::spawn_blocking(move || {
-                                crate::skills::discovery::scan(&skill_cwd)
-                            })
-                            .await
-                            {
-                                Ok(snapshot) => {
-                                    if let Some(notice) = session.refresh_skills(snapshot) {
-                                        self.entry(&id, "context", notice);
+                            if scan.is_none() {
+                                let skill_cwd = PathBuf::from(&cwd);
+                                #[cfg(test)]
+                                let gate = self.0.skill_scan_gate.lock().unwrap().take();
+                                scan =
+                                    Some(crate::skills::refresh::Scan::start(move |cancelled| {
+                                        #[cfg(test)]
+                                        if let Some(gate) = gate {
+                                            gate.started.notify_one();
+                                            let _ = gate.release.lock().unwrap().recv();
+                                        }
+                                        crate::skills::discovery::scan_cancellable(
+                                            &skill_cwd, cancelled,
+                                        )
+                                    }));
+                            }
+                        } else {
+                            match self.next_input(&id, &mut session) {
+                                Ok(applied) => {
+                                    if applied {
+                                        active = true;
+                                        self.status(&id, "working");
                                     }
                                 }
-                                Err(error) => {
-                                    self.fault(&id, error.into());
-                                    continue;
-                                }
+                                Err(error) => self.fault(&id, error),
                             }
-                        }
-                        match self.next_input(&id, &mut session) {
-                            Ok(applied) => {
-                                if applied {
-                                    active = true;
-                                    self.status(&id, "working");
-                                }
-                                continue;
-                            }
-                            Err(error) => {
-                                self.fault(&id, error);
-                                continue;
-                            }
+                            continue;
                         }
                     }
                 }
-                if active {
+                if let Some(pending) = scan.as_mut() {
+                    tokio::select! {biased;
+                        _=halt.changed()=>Next::Halt,
+                        _=cancel.changed()=>Next::Stop,
+                        _=interrupt.changed()=>Next::Interrupt,
+                        result=pending.finish()=>Next::Scanned(result),
+                    }
+                } else if active {
                     tokio::select! {biased;
                         _=halt.changed()=>Next::Halt,
                         _=cancel.changed()=>Next::Stop,
@@ -984,7 +1025,36 @@ impl Hub {
                     tokio::select! {biased;_=halt.changed()=>Next::Halt,_=cancel.changed()=>Next::Stop,_=interrupt.changed()=>Next::Interrupt,_=wake.notified()=>Next::Wake}
                 }
             };
+            if matches!(next, Next::Halt | Next::Stop | Next::Interrupt) {
+                if let Some(pending) = &scan {
+                    pending.cancel();
+                }
+            }
             match next {
+                Next::Scanned(result) => {
+                    let pending = scan.take().expect("finished skill scan");
+                    if pending.cancelled() {
+                        continue;
+                    }
+                    match result {
+                        Ok(Some(snapshot)) => {
+                            if let Some(event) = session.refresh_skills(snapshot) {
+                                self.entry(&id, "skill", event.to_string());
+                            }
+                            match self.next_input(&id, &mut session) {
+                                Ok(applied) => {
+                                    if applied {
+                                        active = true;
+                                        self.status(&id, "working");
+                                    }
+                                }
+                                Err(error) => self.fault(&id, error),
+                            }
+                        }
+                        Ok(None) => (),
+                        Err(error) => self.fault(&id, error.into()),
+                    }
+                }
                 Next::Halt => {
                     session.interrupt(self, &id);
                     let _ = self.checkpoint(&id, &session);
@@ -1083,6 +1153,77 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn control_remains_available_during_skill_discovery() {
+        use std::time::Duration;
+        let hub = Hub::new(Client::test_client()).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        for action in ["stop", "interrupt", "end"] {
+            let view = hub
+                .create(Create {
+                    name: action.into(),
+                    cwd: work.path().to_string_lossy().into_owned(),
+                    message: String::new(),
+                })
+                .unwrap();
+            let (release, wait) = std::sync::mpsc::channel();
+            let gate = Arc::new(SkillScanGate {
+                started: Notify::new(),
+                release: Mutex::new(wait),
+            });
+            *hub.0.skill_scan_gate.lock().unwrap() = Some(gate.clone());
+            hub.message(&view.id, "This input waits for discovery".into())
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), gate.started.notified())
+                .await
+                .unwrap();
+            if action == "end" {
+                tokio::time::timeout(Duration::from_secs(1), hub.close(&view.id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            } else {
+                if action == "stop" {
+                    hub.stop(&view.id).unwrap();
+                } else {
+                    hub.interrupt(&view.id).unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while hub.view(&view.id).unwrap().status != "stopped" {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(
+                        &hub.0.data.lock().unwrap().sessions[&view.id].record.engine
+                    )
+                    .unwrap()["model_requests"],
+                    0
+                );
+                // Repeated controls do not start another scan or consume queued input.
+                hub.interrupt(&view.id).unwrap();
+                tokio::time::timeout(Duration::from_secs(1), hub.close(&view.id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let ended = serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&view.id].record)
+                .unwrap();
+            release.send(()).unwrap();
+            // The worker has ended while the filesystem task was still blocked.
+            // A late result has no session owner to which it can commit.
+            assert!(hub.0.data.lock().unwrap().sessions[&view.id].task.is_none());
+            assert_eq!(
+                serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&view.id].record)
+                    .unwrap(),
+                ended
+            );
+        }
+        hub.shutdown().await;
+    }
 
     #[tokio::test]
     async fn local_skill_selection_refresh_and_recovery_reach_the_model() {
@@ -1316,11 +1457,9 @@ mod tests {
         hub.shutdown().await;
         drop(hub);
         let restored = Hub::open(Client::test_client_at(endpoint), state.path().into()).unwrap();
-        let records = restored.0.store.load::<Record>().unwrap();
-        let record = records
-            .iter()
-            .find(|record| record.view.id == view.id)
-            .unwrap();
+        let record = restored.0.data.lock().unwrap().sessions[&view.id]
+            .record
+            .clone();
         assert_eq!(record.engine.skills["bundled:humanizer"].text, skill_text);
         assert_eq!(record.engine.skills[&skill_id].text, changed);
         assert!(
@@ -1333,9 +1472,69 @@ mod tests {
         let mut old = serde_json::to_value(&record.engine).unwrap();
         old.as_object_mut().unwrap().remove("skills");
         old.as_object_mut().unwrap().remove("skill_base");
+        old.as_object_mut().unwrap().remove("skill_snapshot");
         let old: Session = serde_json::from_value(old).unwrap();
         assert!(old.skills.is_empty() && old.skill_base.is_none());
+        let mut legacy = serde_json::to_value(&record.engine).unwrap();
+        legacy.as_object_mut().unwrap().remove("skill_snapshot");
+        legacy["skills"] = serde_json::to_value(&record.engine.skills).unwrap();
+        let legacy: Session = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.skills["bundled:humanizer"].text, skill_text);
+        let saved: Value = serde_json::from_slice(
+            &std::fs::read(
+                state
+                    .path()
+                    .join("sessions")
+                    .join(format!("{}.json", view.id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["version"], 2);
+        assert!(saved["engine"].get("skills").is_none());
+        let snapshot_id = record.engine.skill_snapshot.as_ref().unwrap();
+        assert_eq!(saved["engine"]["skill_snapshot"], snapshot_id.as_str());
+        let snapshot_path = state
+            .path()
+            .join("skill-snapshots")
+            .join(format!("{snapshot_id}.json"));
+        let bytes = std::fs::read(&snapshot_path).unwrap();
+        assert_eq!(
+            restored
+                .0
+                .store
+                .save_skills(&record.engine.skills)
+                .unwrap()
+                .as_ref(),
+            Some(snapshot_id)
+        );
+        assert!(restored.0.store.load_skills("../outside").is_err());
+        std::fs::write(&snapshot_path, b"corrupt").unwrap();
+        assert!(
+            restored
+                .0
+                .store
+                .load_skills(snapshot_id)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("corrupt")
+        );
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), b"corrupt");
+        std::fs::remove_file(&snapshot_path).unwrap();
+        assert!(restored.0.store.load_skills(snapshot_id).is_err());
+        std::fs::write(&snapshot_path, &bytes).unwrap();
         restored.shutdown().await;
+        drop(restored);
+        let record_path = state
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", view.id));
+        let retained = std::fs::read(&record_path).unwrap();
+        std::fs::write(&snapshot_path, b"corrupt").unwrap();
+        assert!(Hub::open(Client::test_client(), state.path().into()).is_err());
+        assert_eq!(std::fs::read(&record_path).unwrap(), retained);
+        std::fs::write(&snapshot_path, &bytes).unwrap();
         server.abort();
     }
 
