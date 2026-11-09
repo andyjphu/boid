@@ -192,7 +192,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .model-option[aria-disabled="true"] { color: #888; cursor: default; }
 .model-hint { color: #888; margin-top: 6px; }
 .slash-suggestion { cursor: pointer; }
-.working-status { flex-shrink: 0; padding: 0 4px 4px; color: #999; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.working-status { flex-shrink: 0; height: calc(1.5em + 4px); line-height: 1.5; white-space: nowrap; overflow: hidden; padding: 0 4px 4px; color: #999; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.agent-pane:not([data-status="working"]) .working-status { visibility: hidden; }
 .agent-pane[data-status="working"] .pane-title, .working-label {
   font-weight: 400;
   color: transparent;

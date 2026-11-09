@@ -427,7 +427,6 @@ function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
     ui.view.working_since_ms = status === "working" ? workingSince : null;
   }
   ui.pane.dataset.status = status || "idle";
-  ui.activity.hidden = status !== "working";
   updateActivity(ui);
   ui.status.textContent = "";
 }
