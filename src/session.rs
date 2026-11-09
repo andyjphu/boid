@@ -183,7 +183,7 @@ impl Session {
             self.compact_resume = true;
         }
         if let Some(tools) = self.tools.as_array_mut() {
-            if !tools.iter().any(|tool| tool["name"] == "compact_context") {
+            if !tools.iter().any(|tool| tool["name"] == "oai_compact") {
                 tools.push(tool_calls::compaction_definition());
             }
         }
@@ -407,13 +407,13 @@ impl Session {
         }
         let call = self.running.as_ref().expect("running call");
         let result = match call.name.as_str() {
-            "compact_context" => match serde_json::from_str::<Value>(&call.arguments) {
+            "oai_compact" => match serde_json::from_str::<Value>(&call.arguments) {
                 Ok(value) if value == json!({}) => {
                     self.compact_requested = true;
                     self.compact_resume = true;
                     json!({"queued":true,"message":"Compaction will run after the current tool batch."})
                 }
-                _ => json!({"error":"compact_context expects an empty JSON object."}),
+                _ => json!({"error":"oai_compact expects an empty JSON object."}),
             },
             "list_skills" => {
                 json!({"skills":skills::catalog::list(&self.skills), "warnings":self.skill_warnings})

@@ -84,7 +84,7 @@ pub fn definitions() -> Value {
 
 pub fn compaction_definition() -> Value {
     definition(
-        "compact_context",
+        "oai_compact",
         "Request manual OpenAI context compaction when the operator asks. Runs after this tool batch; preserves the visible transcript. Do not schedule automatic compaction.",
         &[],
     )

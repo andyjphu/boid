@@ -877,7 +877,7 @@ impl Hub {
             r.order += 1;
             r.inputs.push_back(Input {
                 id: message_id.clone(),
-                compact: text.trim() == "/compact",
+                compact: text.trim() == "/oai-compact",
                 text,
                 order: r.order,
             });

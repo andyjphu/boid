@@ -106,7 +106,7 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     .unwrap();
     let view = create(&hub, work.path(), "");
     let before = engine(&hub, &view.id);
-    hub.message(&view.id, "/compact".into()).unwrap();
+    hub.message(&view.id, "/oai-compact".into()).unwrap();
     let (path, request, release) = mock.request().await;
     assert_eq!(path, "/compact");
     assert_eq!(request["input"], before["history"]);
@@ -176,20 +176,20 @@ async fn failed_and_cancelled_compaction_keep_prior_context_and_queued_input() {
             json!({"object":"response.compaction","output":[]}),
         ),
     ] {
-        hub.message(&view.id, "/compact".into()).unwrap();
+        hub.message(&view.id, "/oai-compact".into()).unwrap();
         let (_, _, release) = mock.request().await;
         release.send((status, body)).unwrap();
         idle(&hub, &view.id, "idle").await;
         assert_eq!(engine(&hub, &view.id)["history"], original);
         assert!(mock.requests.try_recv().is_err());
     }
-    hub.message(&view.id, "/compact".into()).unwrap();
+    hub.message(&view.id, "/oai-compact".into()).unwrap();
     let (_, _, release) = mock.request().await;
     hub.interrupt(&view.id).unwrap();
     idle(&hub, &view.id, "stopped").await;
     let _ = release.send((StatusCode::OK, compacted(window())));
     assert_eq!(engine(&hub, &view.id)["history"], original);
-    hub.message(&view.id, "/compact".into()).unwrap();
+    hub.message(&view.id, "/oai-compact".into()).unwrap();
     let (_, _, release) = mock.request().await;
     hub.message(&view.id, "Queued while compacting".into())
         .unwrap();
@@ -217,32 +217,33 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
     let mut mock = Mock::new().await;
     let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
     let work = tempfile::tempdir().unwrap();
-    let skill = work.path().join(".agents/skills/boid-compact");
+    let skill = work.path().join(".agents/skills/oai-compact");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
         skill.join("SKILL.md"),
-        include_str!("../skills/boid-compact/SKILL.md"),
+        include_str!("../skills/oai-compact/SKILL.md"),
     )
     .unwrap();
-    let view = create(&hub, work.path(), "$boid-compact");
+    let view = create(&hub, work.path(), "$oai-compact");
     let (path, first, release) = mock.request().await;
     assert_eq!(path, "/");
-    assert!(
-        first["input"]
-            .to_string()
-            .contains("Call `compact_context`")
-    );
+    assert!(first["input"].to_string().contains("Call `oai_compact`"));
     assert!(
         first["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|t| t["name"] == "compact_context")
+            .any(|t| t["name"] == "oai_compact")
     );
-    release.send((StatusCode::OK,json!([
-        {"type":"function_call","call_id":"compact","name":"compact_context","arguments":"{}"},
-        {"type":"function_call","call_id":"agents","name":"list_agents","arguments":"{}"}
-    ]))).unwrap();
+    release
+        .send((
+            StatusCode::OK,
+            json!([
+                {"type":"function_call","call_id":"compact","name":"oai_compact","arguments":"{}"},
+                {"type":"function_call","call_id":"agents","name":"list_agents","arguments":"{}"}
+            ]),
+        ))
+        .unwrap();
     let (path, compact, release) = mock.request().await;
     assert_eq!(path, "/compact");
     for id in ["compact", "agents"] {
@@ -289,7 +290,7 @@ async fn archive_failure_prevents_compaction_request() {
         "blocked directory",
     )
     .unwrap();
-    hub.message(&view.id, "/compact".into()).unwrap();
+    hub.message(&view.id, "/oai-compact".into()).unwrap();
     idle(&hub, &view.id, "error").await;
     assert_eq!(engine(&hub, &view.id)["history"], before);
     assert!(mock.requests.try_recv().is_err());
@@ -319,7 +320,7 @@ async fn browser_fixture() {
                 } else {
                     let selected=body["input"].to_string().contains("Operator-selected skill");
                     let already=body["input"].to_string().contains("Compaction will run");
-                    let result=if selected && !already {json!([{"type":"function_call","call_id":"browser-compact","name":"compact_context","arguments":"{}"}])}
+                    let result=if selected && !already {json!([{"type":"function_call","call_id":"browser-compact","name":"oai_compact","arguments":"{}"}])}
                     else {json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Fixture response."}]}])};
                     let _=release.send((StatusCode::OK,result));
                 }

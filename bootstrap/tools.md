@@ -150,7 +150,7 @@ Loading alone does not establish compliance or improved writing.
 
 ## Manual context compaction
 
-Send `/compact` in an agent pane to compact its model context. This queues an
+Send `/oai-compact` in an agent pane to compact its model context. This queues an
 OpenAI compaction request after the current response and tool batch, without
 asking the model to interpret the command first. From idle, compaction finishes
 without starting another model turn. New messages accepted during compaction
@@ -164,18 +164,18 @@ window returned by OpenAI, including opaque items and retained messages. The
 next ordinary response supplies a new context usage measurement. Compaction
 usage is retained in diagnostics; unreported pricing fields remain unknown.
 
-The `boid-compact` skill invokes the same operation with `compact_context`.
+The `oai-compact` skill invokes the same operation with `oai_compact`.
 Install the supplied package in the server account's user-level skill directory
 after updating Boid:
 
 ```sh
 mkdir -p ~/.agents/skills
-cp -R skills/boid-compact ~/.agents/skills/
+cp -R skills/oai-compact ~/.agents/skills/
 ```
 
-Select it through `/skills`, or send `$boid-compact`. Existing sessions refresh
+Select it through `/skills`, or send `$oai-compact`. Existing sessions refresh
 their skill catalog and gain the tool on the next operator message. The direct
-`/compact` command also works without installing the skill. The skill does not
+`/oai-compact` command also works without installing the skill. The skill does not
 provide compaction in other agent harnesses.
 
 See [OpenAI's standalone compaction guide](https://developers.openai.com/api/docs/guides/compaction).
