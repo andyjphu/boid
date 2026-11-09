@@ -316,12 +316,22 @@ function rememberPosition(ui) {
   ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
 }
 
+function scrollTrace(ui, top) {
+  if (Math.abs(ui.trace.scrollTop - top) > 0.5) ui.trace.scrollTop = top;
+  // Programmatic movement must not be interpreted as a new reading gesture.
+  ui.lastScrollTop = ui.trace.scrollTop;
+}
+
+function atTraceEnd(ui) {
+  return ui.trace.scrollTop >= ui.trace.scrollHeight - ui.trace.clientHeight - 1;
+}
+
 function restorePosition(ui) {
   if (ui.follow && !selectedWithin(ui.trace)) {
-    ui.trace.scrollTop = followTarget(ui);
+    scrollTrace(ui, followTarget(ui));
   } else if (ui.anchor?.node.isConnected) {
-    ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
-      - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
+    scrollTrace(ui, ui.trace.scrollTop + ui.anchor.node.getBoundingClientRect().top
+      - ui.trace.getBoundingClientRect().top - ui.anchor.offset);
   }
 }
 
@@ -350,7 +360,7 @@ function followLatest(ui) {
   requestAnimationFrame(() => {
     ui.followScheduled = false;
     if (ui.follow && !selectedWithin(ui.trace)) {
-      ui.trace.scrollTop = followTarget(ui);
+      scrollTrace(ui, followTarget(ui));
     }
   });
 }
@@ -517,6 +527,7 @@ function addSession(view) {
   ui.overlayHeight = 0;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
+  ui.lastScrollTop = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.content = element("div", "trace-content");
   ui.trace.append(ui.content);
@@ -566,9 +577,13 @@ function addSession(view) {
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
   ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
+    const top = ui.trace.scrollTop;
+    const movedDown = top > ui.lastScrollTop;
+    ui.lastScrollTop = top;
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     const wasFollowing = ui.follow;
-    ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
+    ui.follow = (wasFollowing ? atBottom(ui) : movedDown && atTraceEnd(ui))
+      && !selectedWithin(ui.trace);
     ui.followClearance = ui.follow && promptVisible(ui)
       ? Math.min(ui.overlay.getBoundingClientRect().height + composerPadding,
         Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
@@ -576,8 +591,22 @@ function addSession(view) {
     if (ui.follow && !wasFollowing) scheduleTranscript(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
-    if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
+    if (event.deltaY < 0) {
+      ui.follow = false;
+      ui.lastScrollTop = ui.trace.scrollTop;
+      rememberPosition(ui);
+    } else if (event.deltaY > 0 && !ui.follow && atTraceEnd(ui) && !selectedWithin(ui.trace)) {
+      ui.follow = true;
+      scheduleTranscript(ui);
+    }
   }, { passive: true });
+  ui.trace.addEventListener("keydown", event => {
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key)) {
+      ui.follow = false;
+      ui.lastScrollTop = ui.trace.scrollTop;
+      rememberPosition(ui);
+    }
+  });
   ui.contextLabel = element("span", "context-usage");
   ui.composer.append(ui.input, ui.contextLabel);
   ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
@@ -961,7 +990,8 @@ async function locateCommunication(ui, message, otherId) {
     target.follow = false;
     target.autoClearance = false;
     target.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
-    target.trace.scrollTop += item.node.getBoundingClientRect().top - target.trace.getBoundingClientRect().top;
+    scrollTrace(target, target.trace.scrollTop + item.node.getBoundingClientRect().top
+      - target.trace.getBoundingClientRect().top);
     item.node.tabIndex = -1;
     item.node.focus({ preventScroll: true });
     rememberPosition(target);

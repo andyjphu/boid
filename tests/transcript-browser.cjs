@@ -114,11 +114,12 @@ views.forEach(view => view.communications = [message]);
         return ui.trace.scrollHeight - ui.trace.clientHeight - ui.trace.scrollTop <= 1.1;
       }));
     }
+    await page.evaluate(() => putEntry(sessions.get('sender'), { id: '599', kind: 'assistant', text: 'Tail' }));
+    await frames();
     await page.evaluate(() => {
-      let n = 0;
       window.streamTimer = setInterval(() => putEntry(sessions.get('sender'), {
-        id: 'wheel-' + n++, kind: 'assistant', text: 'stream '.repeat(40),
-      }), 40);
+        id: '599', text: '.',
+      }, true), 40);
     });
     try {
       for (let i = 0; i < 5; i++) {
@@ -129,6 +130,25 @@ views.forEach(view => view.communications = [message]);
           return ui.trace.scrollHeight - ui.trace.clientHeight - ui.trace.scrollTop <= 1.1;
         }));
       }
+      assert.equal(await page.evaluate(() => sessions.get('sender').follow), true);
+      for (const amount of [1, 4, 4, 4, 10]) {
+        const before = await page.evaluate(() => sessions.get('sender').trace.scrollTop);
+        await page.mouse.wheel(0, -amount);
+        await page.waitForTimeout(80);
+        const after = await page.evaluate(() => {
+          const ui = sessions.get('sender'); return { top: ui.trace.scrollTop, follow: ui.follow };
+        });
+        assert.equal(after.follow, false);
+        assert.ok(after.top < before - 0.5, `Small upward gesture stuck: ${before} -> ${after.top}`);
+      }
+      await page.mouse.wheel(0, 500);
+      await page.waitForTimeout(80);
+      assert.equal(await page.evaluate(() => sessions.get('sender').follow), true);
+      await page.evaluate(() => putEntry(sessions.get('sender'), { id: 'new-tail', kind: 'assistant', text: 'New streamed entry' }));
+      await frames();
+      assert.ok(await page.evaluate(() => {
+        const ui = sessions.get('sender'); return ui.follow && atBottom(ui);
+      }));
       await page.mouse.wheel(0, -250);
       await page.waitForTimeout(100);
       assert.equal(await page.evaluate(() => sessions.get('sender').follow), false);
@@ -155,6 +175,6 @@ views.forEach(view => view.communications = [message]);
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('0').node.isConnected), true);
     assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 201);
     assert.deepEqual(errors, []);
-    console.log('PASS: full history, peer navigation, targeted updates, expanded tools, selection/streaming, large entries, hidden reasoning, reconnect, bottom wheel/streaming, retained composer space');
+    console.log('PASS: full history, peer navigation, targeted updates, expanded tools, selection/streaming, large entries, hidden reasoning, reconnect, bottom wheel/streaming, small upward gestures, follow resumption, retained composer space');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
