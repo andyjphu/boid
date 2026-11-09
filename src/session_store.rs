@@ -75,8 +75,11 @@ impl SessionStore {
             bail!("Invalid persisted session ID.");
         }
         let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-        serde_json::to_writer(temporary.as_file_mut(), record)?;
-        temporary.write_all(b"\n")?;
+        // JSON serialization makes many tiny writes unless buffered, which is
+        // costly on cross-VM bind mounts. Keep the same durable commit below.
+        let mut bytes = serde_json::to_vec(record)?;
+        bytes.push(b'\n');
+        temporary.write_all(&bytes)?;
         temporary.as_file().sync_all()?;
         temporary
             .persist(directory.join(format!("{id}.json")))
