@@ -24,6 +24,9 @@ and a measured repair. Andy requested its availability for Boid self-development
 and described [case-informed meta-review](meta-review.md) as Project Marigold's
 successor. The template design remains a proposal.
 
+The [v0.8 integration plan](v08-implementation-plan.md) reviews the accepted
+v0.7.2 baseline and describes how local skills and case work should preserve it.
+
 ## Maintaining this brief
 
 Keep named entries stable so feedback can refer to a particular lesson. Revise
