@@ -245,6 +245,8 @@ impl Session {
             }
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
+            // Read current metadata at each request; worker checkpoints never overwrite names.
+            let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let attempt = self.model_requests;
@@ -255,7 +257,7 @@ impl Session {
                     &self.history,
                     self.tools.clone(),
                     &self.model,
-                    &self.instructions,
+                    &instructions,
                     &self.profile,
                     |event| {
                         if let Some(report) = crate::usage::Report::from_event(attempt, event) {

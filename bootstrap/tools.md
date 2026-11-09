@@ -74,6 +74,19 @@ indicator shows Working, elapsed time, and Esc to interrupt; it remains visible
 when the message box is hidden. The elapsed time uses the server timestamp and
 survives browser refresh.
 
+Agent names come from [`src/agent-names.json`](../src/agent-names.json), bundled
+at build time: canary, swift, falcon, kestrel, lark, and duck. Automatic
+assignment skips names already used by active or archived agents, then adds
+numeric suffixes. The creation form suggests these names and accepts custom
+ones. An empty name uses the next available default.
+
+Double-click an agent or terminal title, or focus it and press F2, to rename it.
+The field selects the current name. Enter saves; Escape or clicking elsewhere
+cancels. Agent renames persist and update connected views. Each model request
+includes the current name in its system instructions; a rename during a request
+takes effect on the next request. Session IDs and past message attribution stay
+unchanged, and renaming does not start or interrupt work.
+
 `list_agents` exposes session identities and status. `send_message` accepts
 `to`, `text`, and `urgency`. Regular or null urgency waits for the current model
 response and its tool batch. Emergency interrupts foreground work and takes
@@ -145,6 +158,7 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
+| `PATCH /api/sessions/{id}` | Rename with `{ "name": "..." }` |
 | `GET /api/sessions/{id}/skills` | Inspect skills available for the next operator message |
 | `DELETE /api/sessions/{id}` | End the worker and archive its retained record |
 | `GET /api/sessions/archived` | Discover ended agent records |
