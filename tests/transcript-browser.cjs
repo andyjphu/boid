@@ -15,6 +15,7 @@ views.forEach(view => view.communications = [message]);
   try {
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     const errors = [];
+    const submitted = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       window.EventSource = class { constructor() { window.testEvents = this; } close() {} };
@@ -23,6 +24,10 @@ views.forEach(view => view.communications = [message]);
       const url = new URL(route.request().url());
       if (url.hostname !== 'boid.test') return route.abort();
       if (url.pathname === '/api/config') return route.fulfill({ json: { cwd: '/tmp', next_agent_name: 'canary', agent_names: ['canary', 'swift'] } });
+      if (url.pathname.endsWith('/messages')) {
+        submitted.push(route.request().postDataJSON().text);
+        return route.fulfill({ json: {} });
+      }
       if (url.pathname.startsWith('/api/sessions/')) return route.fulfill({ json: views.find(view => url.pathname.endsWith('/' + view.id)) });
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: [] });
       const file = path.join(root, url.pathname === '/' ? 'index.html' : url.pathname);
@@ -174,6 +179,34 @@ views.forEach(view => view.communications = [message]);
     }));
     assert.equal(await page.evaluate(() => sessions.get('sender').entries.get('0').node.isConnected), true);
     assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 201);
+
+    // Slash commands are discoverable, keyboard-selectable, and submitted exactly.
+    const composer = page.locator('[data-pane-key="agent:sender"] textarea');
+    await composer.fill('/');
+    assert.deepEqual(await page.locator('.slash-option:visible').allTextContents(), [
+      '/model  Select model and effort', '/skills  Select a skill',
+      '/oai-compact  Compact OpenAI context', '/clear  Start fresh model context'
+    ]);
+    await composer.press('ArrowDown');
+    await composer.press('ArrowDown');
+    await composer.press('Enter');
+    await page.waitForFunction(() => !sessions.get('sender').sending);
+    assert.equal(submitted.at(-1), '/oai-compact');
+    await composer.fill('/cl');
+    await composer.press('Tab');
+    assert.equal(await composer.inputValue(), '/clear');
+    await composer.press('Enter');
+    await page.waitForFunction(() => !sessions.get('sender').sending);
+    assert.equal(submitted.at(-1), '/clear');
+    await composer.fill('/');
+    await page.locator('.slash-option:visible').filter({ hasText: '/oai-compact' }).click();
+    await page.waitForFunction(() => !sessions.get('sender').sending);
+    assert.equal(submitted.at(-1), '/oai-compact');
+    await composer.fill('/clear explanation');
+    assert.equal(await page.locator('.slash-option:visible').count(), 0);
+    await composer.press('Enter');
+    await page.waitForFunction(() => !sessions.get('sender').sending);
+    assert.equal(submitted.at(-1), '/clear explanation');
     assert.deepEqual(errors, []);
     console.log('PASS: full history, peer navigation, targeted updates, expanded tools, selection/streaming, large entries, hidden reasoning, reconnect, bottom wheel/streaming, small upward gestures, follow resumption, retained composer space');
   } finally { await browser.close(); }

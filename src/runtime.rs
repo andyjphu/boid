@@ -90,6 +90,8 @@ struct Input {
     order: u64,
     #[serde(default)]
     compact: bool,
+    #[serde(default)]
+    clear: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Peer {
@@ -958,6 +960,7 @@ impl Hub {
             r.inputs.push_back(Input {
                 id: message_id.clone(),
                 compact: text.trim() == "/oai-compact",
+                clear: text.trim() == "/clear",
                 text,
                 order: r.order,
             });
@@ -1373,7 +1376,7 @@ impl Hub {
         })
         .unwrap()
     }
-    fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<bool> {
+    fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
         let event = self.update(id, |r| {
             let Some(input) = r.inputs.front() else {
                 return Ok(None);
@@ -1384,7 +1387,14 @@ impl Hub {
             let input = r.inputs.pop_front().unwrap();
             let cancelled = input.order <= r.stop_through;
             if !cancelled {
-                let selected = if input.compact {
+                let selected = if input.clear {
+                    self.0.store.archive_clear(id, &input.id, r)?;
+                    session.clear_context();
+                    r.view.entries.push(Self::make_entry(
+                        "notice", "Context cleared. The transcript is retained; new messages start a fresh conversation.".into(),
+                    ));
+                    vec![]
+                } else if input.compact {
                     session.request_compaction(active);
                     vec![]
                 } else {
@@ -1401,13 +1411,9 @@ impl Hub {
                 }
             }
             r.view.pending.retain(|p| p != &input.id);
-            Ok(Some((input.id, cancelled)))
+            Ok((!cancelled).then_some(!input.clear))
         })?;
-        if let Some((_input, cancelled)) = event {
-            Ok(!cancelled)
-        } else {
-            Ok(false)
-        }
+        Ok(event)
     }
     async fn worker(
         &self,
@@ -1485,7 +1491,7 @@ impl Hub {
                             let data = self.0.data.lock().unwrap();
                             let record = &data.sessions[&id].record;
                             record.inputs.front().is_some_and(|input| {
-                                input.order > record.stop_through && !input.compact
+                                input.order > record.stop_through && !input.compact && !input.clear
                             })
                         };
                         if needs_refresh && session.skill_base.is_some() {
@@ -1508,9 +1514,9 @@ impl Hub {
                         } else {
                             match self.next_input(&id, &mut session, active) {
                                 Ok(applied) => {
-                                    if applied {
-                                        active = true;
-                                        self.status(&id, "working");
+                                    if let Some(continue_work) = applied {
+                                        active = continue_work || self.peers_ready(&id);
+                                        self.status(&id, if active { "working" } else { "idle" });
                                     }
                                 }
                                 Err(error) => self.fault(&id, error),
@@ -1580,9 +1586,9 @@ impl Hub {
                             }
                             match self.next_input(&id, &mut session, active) {
                                 Ok(applied) => {
-                                    if applied {
-                                        active = true;
-                                        self.status(&id, "working");
+                                    if let Some(continue_work) = applied {
+                                        active = continue_work || self.peers_ready(&id);
+                                        self.status(&id, if active { "working" } else { "idle" });
                                     }
                                 }
                                 Err(error) => self.fault(&id, error),
