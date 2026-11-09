@@ -87,6 +87,9 @@ fn ensure_token() -> Result<String> {
     Ok(token)
 }
 pub async fn serve() -> Result<()> {
+    serve_client(Client::new()?).await
+}
+pub(crate) async fn serve_client(client: Client) -> Result<()> {
     let address = std::env::var("BOID_LISTEN").unwrap_or_else(|_| "127.0.0.1:7734".into());
     let listener = tokio::net::TcpListener::bind(&address).await.context("Cannot bind Boid server. The default port permits one server; connect to the running server instead of starting another.")?;
     let token = ensure_token()?;
@@ -94,7 +97,7 @@ pub async fn serve() -> Result<()> {
         .parent()
         .context("State directory has no parent.")?
         .to_path_buf();
-    let hub = Hub::open(Client::new()?, state_dir.clone())?;
+    let hub = Hub::open(client, state_dir.clone())?;
     let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
     let app = App {
         hub: hub.clone(),

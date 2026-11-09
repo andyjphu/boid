@@ -136,6 +136,31 @@ impl SessionStore {
         serde_json::from_slice(&bytes).context("Invalid skill snapshot; original retained")
     }
 
+    pub fn backup(&self, id: &str) -> Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            bail!("Invalid session ID.");
+        }
+        let source = directory.join(format!("{id}.json"));
+        if !source.exists() {
+            return Ok(());
+        }
+        let backup = directory.join(format!("{id}.before-v9"));
+        if backup.exists() {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(backup)?;
+        file.write_all(&fs::read(source)?)?;
+        file.sync_all()?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    }
     pub fn save<T: Serialize>(&self, id: &str, record: &T) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());

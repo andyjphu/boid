@@ -62,3 +62,19 @@ Revisit this sooner if measured multi-agent latency requires it. Recovery
 isolation for already-corrupted terminal records is also follow-up work; the
 server currently reports malformed complete records rather than silently
 discarding them.
+
+## Peer messages
+
+New v0.9 sessions advertise regular and emergency messaging. Existing sessions
+retain their original model, instructions, tools and skill environment; their
+regular sends remain valid. They can receive emergency messages while runnable.
+Urgent peer input cancels foreground work or pending skill discovery and uses
+the last committed skill snapshot. Cancelled scans finish cleanup without
+applying late results or starting overlapping scans.
+
+Records with v0.9 capabilities or message state use version 3. Before upgrading
+an older recipient record, Boid retains its original JSON in a `.before-v9` file.
+Older binaries reject version 3. Back up the full state directory before a
+software rollback; copying a single older record over current state would lose
+later work. Restart still restores agents paused. When storage fails, End stops
+execution and reports that cancellation and archival were not saved.

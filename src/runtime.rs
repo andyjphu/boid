@@ -24,6 +24,8 @@ pub struct Entry {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct View {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub communications: Vec<Communication>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -36,6 +38,36 @@ pub struct View {
     pub pending: Vec<String>,
     #[serde(default)]
     pub archived: bool,
+}
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Urgency {
+    #[default]
+    Regular,
+    Emergency,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Communication {
+    pub id: String,
+    pub sender_id: String,
+    pub recipient_id: String,
+    pub sender_name: String,
+    pub recipient_name: String,
+    pub call_id: String,
+    pub sender_entry: String,
+    pub text: String,
+    pub urgency: Urgency,
+    pub state: String,
+    pub applied_batch: Option<u64>,
+    pub blocked: bool,
+    pub persisted: bool,
+}
+impl Communication {
+    pub fn receipt(&self) -> Value {
+        json!({"queued":true,"to":self.recipient_id,"message_id":self.id,
+            "urgency":self.urgency,"state":self.state,"blocked":self.blocked,
+            "accepted_by_agent":false})
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +98,8 @@ struct Record {
     engine: Session,
     inputs: VecDeque<Input>,
     inbox: VecDeque<Peer>,
+    #[serde(default)]
+    messages: Vec<Communication>,
     order: u64,
     stop_through: u64,
     paused: bool,
@@ -93,11 +127,13 @@ struct Data {
     closing: bool,
     sessions: BTreeMap<String, Handle>,
     terminal_summaries: BTreeMap<String, Value>,
+    messages: BTreeMap<(String, String), Communication>,
 }
 struct Handle {
     record: Record,
     cancel: watch::Sender<u64>,
     interrupt: watch::Sender<()>,
+    emergency: watch::Sender<u64>,
     halt: watch::Sender<()>,
     wake: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -120,6 +156,11 @@ impl Hub {
     }
     fn with_store(client: Client, store: SessionStore) -> Result<Self> {
         let records: Vec<Record> = store.load()?;
+        let messages: BTreeMap<_, _> = records
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .map(|m| ((m.sender_id.clone(), m.call_id.clone()), m.clone()))
+            .collect();
         let (events, _) = broadcast::channel(512);
         let hub = Self(Arc::new(Inner {
             data: Mutex::new(Data {
@@ -127,6 +168,7 @@ impl Hub {
                 closing: false,
                 sessions: BTreeMap::new(),
                 terminal_summaries: BTreeMap::new(),
+                messages: messages.clone(),
             }),
             events,
             client,
@@ -139,7 +181,7 @@ impl Hub {
             if let Some(id) = &record.engine.skill_snapshot {
                 record.engine.skills = hub.0.store.load_skills(id)?;
             }
-            if !matches!(record.version, 1 | 2) {
+            if !matches!(record.version, 1 | 2 | 3) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     record.version
@@ -156,6 +198,9 @@ impl Hub {
                     }
                 }
                 record.stream_seq = delta.seq;
+            }
+            for (kind, text) in record.engine.recover_sends(&record.view.id, &messages) {
+                record.view.entries.push(Self::make_entry(&kind, text));
             }
             // Completed API items survive; unresolved side effects must not replay.
             for (kind, text) in record.engine.recover() {
@@ -192,6 +237,7 @@ impl Hub {
         let id = record.view.id.clone();
         let (cancel, cancelled) = watch::channel(record.stop_through);
         let (interrupt, interrupted) = watch::channel(());
+        let (emergency, emergencies) = watch::channel(0);
         let (halt, halted) = watch::channel(());
         let wake = Arc::new(Notify::new());
         let mut data = self.0.data.lock().unwrap();
@@ -205,6 +251,7 @@ impl Hub {
                 record,
                 cancel,
                 interrupt,
+                emergency,
                 halt,
                 wake: wake.clone(),
                 task: None,
@@ -212,14 +259,14 @@ impl Hub {
             },
         );
         if emit {
-            let view = data.sessions[&id].record.view.clone();
+            let view = Self::project_view(&data, &data.sessions[&id].record.view);
             self.emit(&mut data, json!({"type":"session","session":view}));
         }
         if !archived {
             let hub = self.clone();
             let worker_id = id.clone();
             let task = tokio::spawn(async move {
-                hub.worker(worker_id, cancelled, interrupted, halted, wake)
+                hub.worker(worker_id, cancelled, interrupted, emergencies, halted, wake)
                     .await;
             });
             data.sessions.get_mut(&id).unwrap().task = Some(task);
@@ -238,30 +285,42 @@ impl Hub {
         self.list(true)
     }
     fn list(&self, archived: bool) -> Vec<View> {
-        self.0
-            .data
-            .lock()
-            .unwrap()
-            .sessions
+        let data = self.0.data.lock().unwrap();
+        data.sessions
             .values()
             .filter(|h| h.record.view.archived == archived)
-            .map(|h| h.record.view.clone())
+            .map(|h| Self::project_view(&data, &h.record.view))
             .collect()
     }
+    fn project_view(data: &Data, source: &View) -> View {
+        let mut view = source.clone();
+        view.communications = data
+            .messages
+            .values()
+            .filter(|m| m.sender_id == source.id || m.recipient_id == source.id)
+            .cloned()
+            .map(|mut m| {
+                m.blocked = m.state == "queued"
+                    && data
+                        .sessions
+                        .get(&m.recipient_id)
+                        .is_some_and(|h| h.record.paused);
+                m
+            })
+            .collect();
+        view
+    }
     pub fn view(&self, id: &str) -> Option<View> {
-        self.0
-            .data
-            .lock()
-            .unwrap()
-            .sessions
+        let data = self.0.data.lock().unwrap();
+        data.sessions
             .get(id)
-            .map(|h| h.record.view.clone())
+            .map(|h| Self::project_view(&data, &h.record.view))
     }
     pub fn subscribe(&self) -> (Value, broadcast::Receiver<Value>) {
         let data = self.0.data.lock().unwrap();
         let receiver = self.0.events.subscribe();
         (
-            json!({"seq":data.seq,"type":"snapshot","sessions":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| &h.record.view).collect::<Vec<_>>(),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
+            json!({"seq":data.seq,"type":"snapshot","sessions":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| Self::project_view(&data, &h.record.view)).collect::<Vec<_>>(),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
             receiver,
         )
     }
@@ -281,16 +340,28 @@ impl Hub {
     fn save_record(&self, id: &str, record: &mut Record) -> Result<()> {
         // Older binaries must reject records that rely on external skill snapshots.
         if record.engine.skill_base.is_some() || !record.engine.skills.is_empty() {
-            record.version = 2;
+            record.version = record.version.max(2);
         }
         if record.engine.skill_snapshot.is_none() && !record.engine.skills.is_empty() {
             record.engine.skill_snapshot = self.0.store.save_skills(&record.engine.skills)?;
+        }
+        if !record.messages.is_empty() && record.version < 3 {
+            self.0.store.backup(id)?;
+            record.version = 3;
         }
         self.0.store.save(id, record)
     }
 
     fn update<T>(&self, id: &str, change: impl FnOnce(&mut Record) -> Result<T>) -> Result<T> {
         let mut data = self.0.data.lock().unwrap();
+        self.update_locked(&mut data, id, change)
+    }
+    fn update_locked<T>(
+        &self,
+        data: &mut Data,
+        id: &str,
+        change: impl FnOnce(&mut Record) -> Result<T>,
+    ) -> Result<T> {
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
         if let Some(error) = &handle.storage_error {
             bail!("Session storage failed: {error}");
@@ -317,8 +388,22 @@ impl Hub {
         } else {
             None
         };
-        self.save_record(id, &mut next)
-            .context("Cannot save session; action not acknowledged")?;
+        if let Err(error) = self.save_record(id, &mut next) {
+            let message = format!("Session persistence failed; execution stopped: {error:#}");
+            handle.storage_error = Some(message.clone());
+            handle.record.paused = true;
+            handle.record.view.status = "error".into();
+            handle.record.view.working_since_ms = None;
+            handle.halt.send_replace(());
+            let entry = Self::make_entry("error", message);
+            handle.record.view.entries.push(entry.clone());
+            self.emit(data, json!({"type":"entry","session_id":id,"entry":entry}));
+            self.emit(
+                data,
+                json!({"type":"status","session_id":id,"status":"error","working_since_ms":null}),
+            );
+            return Err(error.context("Cannot save session; acceptance unconfirmed"));
+        }
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         let mut events = vec![];
@@ -361,8 +446,25 @@ impl Hub {
         {
             events.push(json!({"type":"closed","session_id":id}));
         }
+        let changed: Vec<_> = current
+            .messages
+            .iter()
+            .filter(|m| !previous.messages.contains(m) || current.paused != previous.paused)
+            .cloned()
+            .map(|mut m| {
+                m.blocked = m.state == "queued" && current.paused;
+                m
+            })
+            .collect();
+        for message in changed {
+            data.messages.insert(
+                (message.sender_id.clone(), message.call_id.clone()),
+                message.clone(),
+            );
+            events.push(json!({"type":"communication", "message":message}));
+        }
         for event in events {
-            self.emit(&mut data, event);
+            self.emit(data, event);
         }
         Ok(result)
     }
@@ -523,6 +625,7 @@ impl Hub {
         engine.skill_warnings = snapshot.warnings;
         engine.profile = self.0.client.config();
         let view = View {
+            communications: vec![],
             id: id.clone(),
             name,
             profile: engine.profile.clone(),
@@ -540,11 +643,12 @@ impl Hub {
             archived: false,
         };
         let mut record = Record {
-            version: 1,
+            version: 3,
             view,
             engine,
             inputs: VecDeque::new(),
             inbox: VecDeque::new(),
+            messages: vec![],
             order: 0,
             stop_through: 0,
             paused: false,
@@ -664,6 +768,9 @@ impl Hub {
             let peers = r.inbox.len();
             r.inputs.clear();
             r.inbox.clear();
+            for message in &mut r.messages {
+                if message.state == "queued" { message.state = "cancelled".into(); message.blocked = false; }
+            }
             r.view.pending.clear();
             r.view.entries.push(Self::make_entry(
                 "notice",
@@ -726,6 +833,13 @@ impl Hub {
             let peers = h.record.inbox.len();
             h.record.inputs.clear();
             h.record.inbox.clear();
+            for message in &mut h.record.messages {
+                if message.state == "queued" {
+                    message.state = "cancelled".into();
+                    message.blocked = false;
+                    message.persisted = false;
+                }
+            }
             let cancelled = std::mem::take(&mut h.record.view.pending);
             h.halt.send_replace(());
             (h.task.take(), cancelled, users, peers)
@@ -745,6 +859,17 @@ impl Hub {
         )));
         h.record.view.entries.extend(entries.iter().cloned());
         h.record.view.status = "archived".into();
+        let messages = h.record.messages.clone();
+        for message in messages {
+            data.messages.insert(
+                (message.sender_id.clone(), message.call_id.clone()),
+                message.clone(),
+            );
+            self.emit(
+                &mut data,
+                json!({"type":"communication", "message":message}),
+            );
+        }
         for entry in entries {
             self.emit(
                 &mut data,
@@ -799,75 +924,186 @@ impl Hub {
                 .collect::<Vec<_>>()
         )
     }
+    #[cfg(test)]
     pub fn send_peer(&self, from: &str, to: &str, text: &str) -> Result<Value> {
+        self.send_communication(
+            from,
+            to,
+            text,
+            Urgency::Regular,
+            &Uuid::new_v4().to_string(),
+            "",
+        )
+    }
+    pub fn send_communication(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        urgency: Urgency,
+        call_id: &str,
+        sender_entry: &str,
+    ) -> Result<Value> {
         if from == to {
             bail!("Address another session.");
         }
         if text.trim().is_empty() || text.len() > 65536 {
             bail!("Peer messages must contain 1 to 65536 bytes.");
         }
-        let sender = {
-            let data = self.0.data.lock().unwrap();
-            if data.closing {
-                bail!("Server is shutting down.");
+        let mut data = self.0.data.lock().unwrap();
+        if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
+            if message.recipient_id != to || message.text != text || message.urgency != urgency {
+                bail!("A send operation cannot change its recipient, text or urgency.");
             }
-            data.sessions
-                .get(from)
-                .filter(|h| !h.record.view.archived)
-                .context("Unknown sender.")?
-                .record
-                .view
-                .name
-                .clone()
-        };
-        let peer = Peer {
+            let mut message = message.clone();
+            message.blocked =
+                message.state == "queued" && data.sessions.get(to).is_some_and(|h| h.record.paused);
+            return Ok(message.receipt());
+        }
+        if data.closing {
+            bail!("Server is shutting down.");
+        }
+        let sender = data
+            .sessions
+            .get(from)
+            .filter(|h| !h.record.view.archived && h.storage_error.is_none())
+            .context("Sender is unavailable.")?
+            .record
+            .view
+            .name
+            .clone();
+        let recipient = data
+            .sessions
+            .get(to)
+            .context("Unknown recipient.")?
+            .record
+            .view
+            .name
+            .clone();
+        let mut message = Communication {
             id: Uuid::new_v4().to_string(),
-            sender: format!("{sender} ({from})"),
+            sender_id: from.into(),
+            recipient_id: to.into(),
+            sender_name: sender.clone(),
+            recipient_name: recipient,
+            call_id: call_id.into(),
+            sender_entry: sender_entry.into(),
             text: text.into(),
+            urgency,
+            state: "queued".into(),
+            applied_batch: None,
+            blocked: false,
+            persisted: true,
         };
-        let entry = Entry {
-            id: peer.id.clone(),
-            kind: "peer".into(),
-            text: format!(
-                "Received from {}; queued for the next model request:\n{text}",
-                peer.sender
-            ),
-            replaces: None,
-            input_batch: None,
-        };
-        self.update(to, |r| {
+        self.update_locked(&mut data, to, |r| {
             if r.view.archived {
                 bail!("Recipient session has ended.");
             }
-            if r.inbox.len() >= 64 {
-                bail!("Recipient inbox is full.");
+            let urgent = r
+                .messages
+                .iter()
+                .filter(|m| m.state == "queued" && m.urgency == Urgency::Emergency)
+                .count();
+            if (urgency == Urgency::Emergency && urgent >= 8)
+                || (urgency == Urgency::Regular && r.inbox.len().saturating_sub(urgent) >= 64)
+            {
+                bail!("Recipient inbox is full for this urgency.");
             }
-            r.inbox.push_back(peer.clone());
-            r.view.entries.push(entry.clone());
+            message.blocked = r.paused;
+            r.inbox.push_back(Peer {
+                id: message.id.clone(),
+                sender: format!("{sender} ({from})"),
+                text: text.into(),
+            });
+            let mut entry = Self::make_entry("peer", text.into());
+            entry.id = message.id.clone();
+            r.view.entries.push(entry);
+            r.messages.push(message.clone());
             Ok(())
         })?;
-        self.0.data.lock().unwrap().sessions[to].wake.notify_one();
-        Ok(json!({"queued":true,"to":to,"message_id":peer.id,"accepted_by_agent":false}))
+        let recipient = &data.sessions[to];
+        if urgency == Urgency::Emergency && !recipient.record.paused {
+            recipient
+                .emergency
+                .send_modify(|generation| *generation += 1);
+        }
+        recipient.wake.notify_one();
+        Ok(message.receipt())
+    }
+    fn urgent_ready(&self, id: &str) -> bool {
+        let data = self.0.data.lock().unwrap();
+        let r = &data.sessions[id].record;
+        !r.paused
+            && !r.view.archived
+            && r.messages
+                .iter()
+                .any(|m| m.state == "queued" && m.urgency == Urgency::Emergency)
+    }
+    fn peers_ready(&self, id: &str) -> bool {
+        let data = self.0.data.lock().unwrap();
+        let r = &data.sessions[id].record;
+        !r.paused && !r.view.archived && !r.inbox.is_empty()
+    }
+    pub fn claim_tool(&self, id: &str, session: &Session) -> Result<bool> {
+        let mut data = self.0.data.lock().unwrap();
+        let r = &data.sessions[id].record;
+        if r.paused
+            || r.view.archived
+            || r.messages
+                .iter()
+                .any(|m| m.state == "queued" && m.urgency == Urgency::Emergency)
+        {
+            return Ok(false);
+        }
+        self.update_locked(&mut data, id, |r| {
+            r.engine = session.clone();
+            Ok(())
+        })?;
+        Ok(true)
     }
     pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<()> {
-        let peers = self.update(id, |r| {
-            let peers = r.inbox.drain(..).collect::<Vec<_>>();
-            for peer in &peers {
-                session.user(format!("Peer message from {}:\n{}", peer.sender, peer.text));
+        let mut staged = session.clone();
+        self.update(id, |r| {
+            if r.paused || r.view.archived {
+                bail!("Recipient is paused.");
             }
-            r.engine = session.clone();
-            Ok(peers)
+            let urgent = r
+                .messages
+                .iter()
+                .any(|m| m.state == "queued" && m.urgency == Urgency::Emergency);
+            let mut waiting = VecDeque::new();
+            for peer in r.inbox.drain(..) {
+                let message = r.messages.iter_mut().find(|m| m.id == peer.id);
+                if urgent
+                    && !message
+                        .as_ref()
+                        .is_some_and(|m| m.urgency == Urgency::Emergency)
+                {
+                    waiting.push_back(peer);
+                    continue;
+                }
+                let urgency = message.as_ref().map(|m| m.urgency).unwrap_or_default();
+                staged.user(format!(
+                    "Peer message from {} ({}):\n{}",
+                    peer.sender,
+                    if urgency == Urgency::Emergency {
+                        "emergency"
+                    } else {
+                        "regular"
+                    },
+                    peer.text
+                ));
+                if let Some(message) = message {
+                    message.state = "applied".into();
+                    message.blocked = false;
+                    message.applied_batch = Some(staged.current_input_batch());
+                }
+            }
+            r.inbox = waiting;
+            r.engine = staged.clone();
+            Ok(())
         })?;
-        for peer in peers {
-            self.entry(
-                id,
-                "notice",
-                format!(
-                    "Queued message {} from {} applied to this model request.",
-                    peer.id, peer.sender
-                ),
-            );
-        }
+        *session = staged;
         Ok(())
     }
     #[cfg(test)]
@@ -913,6 +1149,7 @@ impl Hub {
         id: String,
         mut cancel: watch::Receiver<u64>,
         mut interrupt: watch::Receiver<()>,
+        mut emergency: watch::Receiver<u64>,
         mut halt: watch::Receiver<()>,
         wake: Arc<Notify>,
     ) {
@@ -935,8 +1172,16 @@ impl Hub {
         };
         let mut active = false;
         let mut scan: Option<crate::skills::refresh::Scan> = None;
+        let mut urgent_turn = false;
         loop {
+            if scan
+                .as_ref()
+                .is_some_and(|s| s.cancelled() && s.is_finished())
+            {
+                let _ = scan.take().unwrap().finish().await;
+            }
             enum Next {
+                Emergency,
                 Interrupt,
                 Stop,
                 Halt,
@@ -958,8 +1203,11 @@ impl Hub {
             } else if interrupt.has_changed().unwrap_or(false) {
                 interrupt.borrow_and_update();
                 Next::Interrupt
+            } else if !urgent_turn && self.urgent_ready(&id) {
+                emergency.borrow_and_update();
+                Next::Emergency
             } else {
-                if !session.has_pending_tools() {
+                if !urgent_turn && !session.has_pending_tools() {
                     let ready = {
                         let data = self.0.data.lock().unwrap();
                         let r = &data.sessions[&id].record;
@@ -1007,11 +1255,16 @@ impl Hub {
                         }
                     }
                 }
-                if let Some(pending) = scan.as_mut() {
+                if scan
+                    .as_ref()
+                    .is_some_and(|pending| !pending.cancelled() || !active)
+                {
+                    let pending = scan.as_mut().unwrap();
                     tokio::select! {biased;
                         _=halt.changed()=>Next::Halt,
                         _=cancel.changed()=>Next::Stop,
                         _=interrupt.changed()=>Next::Interrupt,
+                        _=emergency.changed()=>Next::Emergency,
                         result=pending.finish()=>Next::Scanned(result),
                     }
                 } else if active {
@@ -1019,18 +1272,38 @@ impl Hub {
                         _=halt.changed()=>Next::Halt,
                         _=cancel.changed()=>Next::Stop,
                         _=interrupt.changed()=>Next::Interrupt,
+                        _=emergency.changed()=>Next::Emergency,
                         result=session.step(&self.0.client,&tools,self,&id)=>Next::Finished(result),
                     }
                 } else {
-                    tokio::select! {biased;_=halt.changed()=>Next::Halt,_=cancel.changed()=>Next::Stop,_=interrupt.changed()=>Next::Interrupt,_=wake.notified()=>Next::Wake}
+                    tokio::select! {biased;_=halt.changed()=>Next::Halt,_=cancel.changed()=>Next::Stop,_=interrupt.changed()=>Next::Interrupt,
+                    _=emergency.changed()=>Next::Emergency,_=wake.notified()=>Next::Wake}
                 }
             };
-            if matches!(next, Next::Halt | Next::Stop | Next::Interrupt) {
+            if matches!(next, Next::Emergency) && !self.urgent_ready(&id) {
+                continue;
+            }
+            if matches!(
+                next,
+                Next::Halt | Next::Stop | Next::Interrupt | Next::Emergency
+            ) {
                 if let Some(pending) = &scan {
                     pending.cancel();
                 }
             }
             match next {
+                Next::Emergency => {
+                    // A notification can outlive the message it announced.
+                    if !self.urgent_ready(&id) {
+                        continue;
+                    }
+                    session.interrupt(self, &id);
+                    urgent_turn = self.urgent_ready(&id);
+                    active = urgent_turn;
+                    if active {
+                        self.status(&id, "working");
+                    }
+                }
                 Next::Scanned(result) => {
                     let pending = scan.take().expect("finished skill scan");
                     if pending.cancelled() {
@@ -1061,6 +1334,7 @@ impl Hub {
                     break;
                 }
                 Next::Interrupt => {
+                    urgent_turn = false;
                     session.interrupt(self, &id);
                     active = false;
                     if let Err(error) = self.checkpoint(&id, &session) {
@@ -1071,6 +1345,7 @@ impl Hub {
                     self.status(&id, "stopped");
                 }
                 Next::Stop => {
+                    urgent_turn = false;
                     session.interrupt(self, &id);
                     session.user("Stop the current task. Wait for new user direction.".into());
                     active = false;
@@ -1086,7 +1361,8 @@ impl Hub {
                     self.status(&id, "stopped");
                 }
                 Next::Finished(Ok(more)) => {
-                    active = more;
+                    urgent_turn = false;
+                    active = more || self.peers_ready(&id);
                     if !active {
                         self.status(&id, "idle");
                     }
@@ -1490,7 +1766,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["version"], 3);
         assert!(saved["engine"].get("skills").is_none());
         let snapshot_id = record.engine.skill_snapshot.as_ref().unwrap();
         assert_eq!(saved["engine"]["skill_snapshot"], snapshot_id.as_str());
@@ -2231,3 +2507,7 @@ mod tests {
         restored.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "peer_tests.rs"]
+mod peer_tests;
