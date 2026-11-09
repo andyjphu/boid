@@ -832,6 +832,7 @@ function renderCommunication(ui, item, message) {
     : message.blocked ? "Recipient paused; waiting for operator input." : "";
   if (note) item.body.append(element("div", "tool-note", note));
   item.node.dataset.communicationId = message.id;
+  item.node.dataset.communicationDirection = message.sender_id === ui.id ? "outgoing" : "incoming";
   item.communicationSignature = signature;
   if (refocus) item.body.querySelector("button")?.focus({ preventScroll: true });
 }

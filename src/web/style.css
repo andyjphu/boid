@@ -285,4 +285,6 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .skill-event summary { cursor: pointer; color: #aaa; }
 .skill-text { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
 
-.entry[data-communication-id] { color: inherit; margin-bottom: 12px; padding-bottom: 0; }
+.entry[data-communication-id] { color: inherit; margin-bottom: 12px; padding: 5px 0; }
+.entry[data-communication-direction="outgoing"] { background: #253344; }
+.entry[data-communication-direction="incoming"] { background: #263A32; }
