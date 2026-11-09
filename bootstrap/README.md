@@ -316,11 +316,13 @@ still detects selected literal forced-deletion commands; passing it does not
 establish safety. No Codex App Server, container runtime mode, or general
 executor framework is part of this scope.
 
-The approved cleanup scope covers owned processes, ordinary background work,
-Stop, End, and graceful server shutdown. Arbitrary daemonization and abrupt
-server death do not have a universal cleanup guarantee. Preserve existing
-records and deployments when validating native execution separately. Project
-initialization, discovery and start-or-attach behavior belong to v0.11.
+Andy approved the cleanup plan in the v0.10 planning exchange on 2026-11-08:
+"great this is the plan i approve for". That scope covers owned processes,
+ordinary background work, Stop, End, and graceful server shutdown. Arbitrary
+daemonization and abrupt server death do not have a universal cleanup guarantee.
+Preserve existing records and deployments when validating native execution
+separately. Project initialization, discovery and start-or-attach behavior belong
+to v0.11.
 
 Andy personally assigns dangerous host or system work to Codex and intends
 to give Boid work that does not require that access. He clarified this on
