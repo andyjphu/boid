@@ -158,6 +158,26 @@ impl SessionStore {
         File::open(directory)?.sync_all()?;
         Ok(())
     }
+    pub fn archive_context<T: Serialize>(&self, id: &str, attempt: u64, record: &T) -> Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        if uuid::Uuid::parse_str(id).is_err() {
+            bail!("Invalid session ID.");
+        }
+        let archive = directory.join("compactions");
+        fs::create_dir_all(&archive)?;
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o700))?;
+        File::open(directory)?.sync_all()?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&archive)?;
+        temporary.write_all(&serde_json::to_vec(record)?)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(archive.join(format!("{id}-{attempt}.json")))
+            .map_err(|e| e.error)?;
+        File::open(archive)?.sync_all()?;
+        Ok(())
+    }
     pub fn save<T: Serialize>(&self, id: &str, record: &T) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
