@@ -8,6 +8,7 @@ use std::time::Duration;
 pub fn definitions() -> Value {
     let string = json!({"type": "string"});
     json!([
+        compaction_definition(),
         definition(
             "list_skills",
             "List skills in the current turn snapshot, including source ids, invocation policies, disabled entries and discovery warnings.",
@@ -79,6 +80,14 @@ pub fn definitions() -> Value {
             ]
         ),
     ])
+}
+
+pub fn compaction_definition() -> Value {
+    definition(
+        "oai_compact",
+        "Request manual OpenAI context compaction when the operator asks. Runs after this tool batch; preserves the visible transcript. Do not schedule automatic compaction.",
+        &[],
+    )
 }
 
 fn definition(name: &str, description: &str, fields: &[(&str, Value)]) -> Value {
