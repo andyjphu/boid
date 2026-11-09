@@ -100,6 +100,8 @@ struct Record {
     version: u32,
     view: View,
     engine: Session,
+    #[serde(default)]
+    usage: crate::usage::Ledger,
     inputs: VecDeque<Input>,
     inbox: VecDeque<Peer>,
     #[serde(default)]
@@ -322,6 +324,54 @@ impl Hub {
         data.sessions
             .get(id)
             .map(|h| Self::project_view(&data, &h.record.view))
+    }
+    pub fn record_usage(&self, id: &str, report: crate::usage::Report) {
+        if let Err(error) = self.update(id, |record| {
+            record.usage.record(report);
+            Ok(())
+        }) {
+            self.persistence_fault(id, error);
+        }
+    }
+    pub fn diagnostics(&self) -> Value {
+        // Clone only accounting and display metadata. Price calculation does not hold the catalog lock.
+        let records: Vec<_> = {
+            let data = self.0.data.lock().unwrap();
+            data.sessions
+                .values()
+                .map(|handle| {
+                    let r = &handle.record;
+                    (
+                        r.view.id.clone(),
+                        r.view.name.clone(),
+                        r.view.archived,
+                        r.view.status.clone(),
+                        r.usage.clone(),
+                        r.engine.request_count(),
+                        r.engine.request_in_flight(),
+                        r.engine.context_usage.clone(),
+                        crate::api::context_window(&r.engine.model),
+                    )
+                })
+                .collect()
+        };
+        let aggregate = crate::usage::summarize(records.iter().map(|r| (&r.4, r.5, r.6)));
+        let mut latest = None;
+        let sessions: Vec<_> = records.iter().map(|r| {
+            let response = r.4.records.iter().max_by_key(|report| report.observed_at_ms);
+            if let Some(report) = response {
+                if latest.as_ref().is_none_or(|(time, _)| *time <= report.observed_at_ms) {
+                    latest = Some((report.observed_at_ms, report.view(&r.0, &r.1)));
+                }
+            }
+            json!({"id":r.0,"name":r.1,"archived":r.2,"status":r.3,
+                "summary":crate::usage::summarize([(&r.4,r.5,r.6)]),
+                "latest_response":response.map(|report|report.view(&r.0,&r.1)),
+                "latest_context":r.7.as_ref().map(|context|json!({"input_tokens":context.input_tokens,
+                    "output_tokens":context.output_tokens,"context_window":r.8}))})
+        }).collect();
+        json!({"schema_version":1,"pricing":crate::usage::pricing(),"aggregate":aggregate,
+            "sessions":sessions,"latest_response":latest.map(|(_,response)|response)})
     }
     pub fn subscribe(&self) -> (Value, broadcast::Receiver<Value>) {
         let data = self.0.data.lock().unwrap();
@@ -660,6 +710,7 @@ impl Hub {
             version: 3,
             view,
             engine,
+            usage: crate::usage::Ledger::new(),
             inputs: VecDeque::new(),
             inbox: VecDeque::new(),
             messages: vec![],

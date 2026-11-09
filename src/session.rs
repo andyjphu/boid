@@ -216,6 +216,12 @@ impl Session {
             .push(json!({"role":"developer","content":notice}));
         Some(json!({"event":"catalog", "text":notice, "warnings":self.skill_warnings}))
     }
+    pub fn request_count(&self) -> u64 {
+        self.model_requests
+    }
+    pub fn request_in_flight(&self) -> bool {
+        self.request_in_flight
+    }
     pub fn next_input_batch(&self) -> u64 {
         self.model_requests + 1
     }
@@ -241,6 +247,7 @@ impl Session {
             hub.checkpoint(id, self)?;
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
+            let attempt = self.model_requests;
             let partial = &mut self.partial_text;
             let context_usage = &mut self.context_usage;
             let output = client
@@ -251,6 +258,9 @@ impl Session {
                     &self.instructions,
                     &self.profile,
                     |event| {
+                        if let Some(report) = crate::usage::Report::from_event(attempt, event) {
+                            hub.record_usage(id, report);
+                        }
                         let event_type = event["type"].as_str().unwrap_or("");
                         if matches!(event_type, "response.completed" | "response.incomplete") {
                             *context_usage = ContextUsage::from_event(event);

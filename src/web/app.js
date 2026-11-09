@@ -1569,11 +1569,197 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   finally { button.disabled = false; }
 });
 
+
+const diagnosticsButton = document.querySelector("#open-diagnostics");
+const diagnosticsDialog = document.querySelector("#diagnostics-dialog");
+const diagnosticsScope = document.querySelector("#diagnostics-scope");
+const diagnosticsContent = document.querySelector("#diagnostics-content");
+const diagnosticsError = document.querySelector("#diagnostics-error");
+let diagnosticsAgent = "";
+let diagnosticsSelection = "";
+let diagnosticsData;
+let diagnosticsTimer;
+let diagnosticsGeneration = 0;
+let diagnosticsOptions = "";
+let diagnosticsRendered = "";
+
+for (const kind of ["agent", "terminal"]) {
+  const plus = element("span", null, "+");
+  plus.setAttribute("aria-hidden", "true");
+  document.querySelector(`#add-${kind}`).replaceChildren(plus, paneIcon(kind));
+}
+
+function rememberDiagnosticsAgent(target) {
+  if (target.closest(".workspace-actions, #diagnostics-dialog")) return;
+  const pane = target.closest(".pane");
+  diagnosticsAgent = [...sessions.values()].find(ui => ui.pane === pane)?.id || "";
+}
+
+function diagnosticNumber(value) {
+  return Number.isFinite(value) ? value.toLocaleString("en-US") : "—";
+}
+
+function diagnosticCost(value) {
+  return Number.isFinite(value) ? `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}` : "—";
+}
+
+function diagnosticRow(list, label, value, reason) {
+  const term = element("dt", null, label);
+  const detail = element("dd", null, value);
+  if (reason) detail.append(element("span", "diagnostics-reason", reason));
+  list.append(term, detail);
+}
+
+function renderDiagnostics(resetMissing = true) {
+  if (!diagnosticsData) return;
+  const records = diagnosticsData.sessions || [];
+  const options = JSON.stringify(records.map(record => [record.id, record.name, record.archived]));
+  if (options !== diagnosticsOptions) {
+    diagnosticsOptions = options;
+    const all = element("option", null, "All agents");
+    all.value = "";
+    diagnosticsScope.replaceChildren(all);
+    for (const record of records) {
+      const duplicate = records.filter(other => other.name === record.name).length > 1;
+      const name = (record.name || "Agent") + (duplicate ? ` (${String(record.id).slice(0, 6)})` : "") + (record.archived ? " · ended" : "");
+      const option = element("option", null, name);
+      option.value = String(record.id);
+      diagnosticsScope.append(option);
+    }
+  }
+  const selectedRecord = records.find(record => String(record.id) === diagnosticsSelection);
+  if (!selectedRecord && resetMissing) diagnosticsSelection = "";
+  diagnosticsScope.value = selectedRecord ? diagnosticsSelection : "";
+  const summary = selectedRecord?.summary || diagnosticsData.aggregate;
+  if (!summary) return;
+  const rendered = JSON.stringify([diagnosticsSelection, summary, selectedRecord?.latest_context, selectedRecord?.latest_response, diagnosticsData.pricing]);
+  if (rendered === diagnosticsRendered) return;
+  diagnosticsRendered = rendered;
+  const reasonsExpanded = diagnosticsContent.querySelector("details")?.open || false;
+  diagnosticsContent.replaceChildren();
+  diagnosticsContent.append(element("h2", null, "Recorded totals"));
+  const totals = element("dl", "diagnostics-values");
+  const values = summary.totals || {};
+  const missing = summary.recorded_requests ? "Incomplete usage" : "No recorded responses";
+  diagnosticRow(totals, "Requests", diagnosticNumber(summary.recorded_requests));
+  for (const [label, key] of [["Input tokens", "input_tokens"], ["Output tokens", "output_tokens"], ["Cache read", "cached_read_tokens"], ["Cache write", "cache_write_tokens"]]) {
+    const value = values[key];
+    diagnosticRow(totals, label, diagnosticNumber(value), Number.isFinite(value) ? null : missing);
+  }
+  diagnosticRow(totals, "Cache reuse", Number.isFinite(values.reuse_pct) ? `${values.reuse_pct.toLocaleString("en-US", { maximumFractionDigits: 1 })}%` : "—", Number.isFinite(values.reuse_pct) ? null : "No known ratio");
+  diagnosticRow(totals, "Estimated USD", diagnosticCost(summary.estimated_cost_usd), Number.isFinite(summary.estimated_cost_usd) ? null : "Incomplete pricing coverage");
+  if (!Number.isFinite(summary.estimated_cost_usd) && summary.priced_requests > 0) {
+    diagnosticRow(totals, "Priced subtotal", diagnosticCost(summary.priced_cost_usd), `${summary.priced_requests} of ${summary.recorded_requests} recorded requests`);
+  }
+  diagnosticsContent.append(totals);
+  const coverage = [];
+  if (summary.in_flight_requests) coverage.push(`${diagnosticNumber(summary.in_flight_requests)} in flight`);
+  if (summary.unrecorded_requests) coverage.push(`${diagnosticNumber(summary.unrecorded_requests)} unrecorded`);
+  if (!summary.history_complete) coverage.push("Usage coverage is incomplete");
+  if (coverage.length) diagnosticsContent.append(element("p", "diagnostics-note", coverage.join(" · ")));
+  const reasons = [...new Set((summary.unknown_reasons || []).filter(reason => typeof reason === "string"))];
+  if (reasons.length) {
+    const disclosure = element("details", "diagnostics-note");
+    disclosure.open = reasonsExpanded;
+    disclosure.append(element("summary", null, "Coverage details"));
+    for (const reason of reasons) disclosure.append(element("p", "diagnostics-note", reason));
+    diagnosticsContent.append(disclosure);
+  }
+  if (selectedRecord) {
+    const latest = selectedRecord.latest_response;
+    const context = selectedRecord.latest_context;
+    if (latest) {
+      diagnosticsContent.append(element("h2", null, "Latest response"));
+      const details = element("dl", "diagnostics-values");
+      diagnosticRow(details, "Model", latest.model || "—", latest.model ? null : "Not reported");
+      diagnosticRow(details, "Service tier", latest.service_tier || "—", latest.service_tier ? null : "Not reported");
+      diagnosticsContent.append(details);
+    }
+    if (context) {
+      diagnosticsContent.append(element("h2", null, "Last context measurement"));
+      const details = element("dl", "diagnostics-values");
+      diagnosticRow(details, "Context input", diagnosticNumber(context.input_tokens), Number.isFinite(context.input_tokens) ? null : "Not recorded");
+      diagnosticRow(details, "Context window", diagnosticNumber(context.context_window), Number.isFinite(context.context_window) ? null : "Unknown for this model");
+      diagnosticRow(details, "Output tokens", diagnosticNumber(context.output_tokens), Number.isFinite(context.output_tokens) ? null : "Not recorded");
+      diagnosticsContent.append(details);
+    } else diagnosticsContent.append(element("p", "diagnostics-note", "No context measurement recorded."));
+    if (!latest) diagnosticsContent.append(element("p", "diagnostics-note", "No recorded response yet."));
+  }
+  const pricing = element("p", "diagnostics-note", "Estimates at public token rates, not the provider invoice.");
+  const source = diagnosticsData.pricing?.sources?.find(url => typeof url === "string" && url.startsWith("https://"));
+  if (source) {
+    const link = element("a", null, diagnosticsData.pricing.as_of || "Rates");
+    link.href = source;
+    link.target = "_blank";
+    link.rel = "noopener";
+    pricing.append(" ", link);
+  }
+  diagnosticsContent.append(pricing);
+}
+
+async function refreshDiagnostics() {
+  const generation = diagnosticsGeneration;
+  try {
+    const data = await request("/api/diagnostics");
+    if (!diagnosticsDialog.open || generation !== diagnosticsGeneration) return;
+    diagnosticsData = data;
+    diagnosticsError.hidden = true;
+    renderDiagnostics();
+  } catch (error) {
+    if (!diagnosticsDialog.open || generation !== diagnosticsGeneration) return;
+    if (!diagnosticsData) diagnosticsContent.replaceChildren();
+    showError(diagnosticsError, `Could not refresh diagnostics: ${error.message || error}`);
+  } finally {
+    if (diagnosticsDialog.open && generation === diagnosticsGeneration) diagnosticsTimer = setTimeout(refreshDiagnostics, 2000);
+  }
+}
+
+diagnosticsButton.addEventListener("click", () => {
+  diagnosticsSelection = diagnosticsAgent;
+  diagnosticsGeneration++;
+  clearTimeout(diagnosticsTimer);
+  diagnosticsError.hidden = true;
+  diagnosticsDialog.showModal();
+  if (diagnosticsData) renderDiagnostics(false);
+  else diagnosticsContent.replaceChildren(element("p", "diagnostics-note", "Loading…"));
+  diagnosticsScope.focus();
+  refreshDiagnostics();
+});
+diagnosticsScope.addEventListener("change", () => {
+  diagnosticsSelection = diagnosticsScope.value;
+  renderDiagnostics();
+});
+document.querySelector("#close-diagnostics").addEventListener("click", () => diagnosticsDialog.close());
+diagnosticsDialog.addEventListener("close", () => {
+  diagnosticsGeneration++;
+  clearTimeout(diagnosticsTimer);
+  diagnosticsButton.focus({ preventScroll: true });
+});
+diagnosticsDialog.addEventListener("keydown", event => {
+  event.stopPropagation();
+  if (event.key === "Escape" && !event.isComposing) {
+    event.preventDefault();
+    diagnosticsDialog.close();
+  }
+});
+diagnosticsDialog.addEventListener("cancel", event => { event.preventDefault(); diagnosticsDialog.close(); });
+let diagnosticsOutside = false;
+function outsideDiagnostics(event) {
+  const rect = diagnosticsDialog.getBoundingClientRect();
+  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+}
+diagnosticsDialog.addEventListener("pointerdown", event => { diagnosticsOutside = outsideDiagnostics(event); });
+diagnosticsDialog.addEventListener("click", event => {
+  if (event.target === diagnosticsDialog && diagnosticsOutside && outsideDiagnostics(event)) diagnosticsDialog.close();
+});
+
 function requireLogin() {
   login.hidden = false;
   document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
+  diagnosticsButton.disabled = true;
+  if (diagnosticsDialog.open) diagnosticsDialog.close();
 }
 
 async function connect(token) {
@@ -1586,6 +1772,7 @@ async function connect(token) {
   loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
+  diagnosticsButton.disabled = false;
   startEvents();
   for (const ui of terminals.values()) ui.reconnect();
 }
@@ -1609,12 +1796,15 @@ async function initialize() {
   }
 }
 document.addEventListener("pointerdown", event => {
+  rememberDiagnosticsAgent(event.target);
   selected = event.target.closest(".pane");
 });
 document.addEventListener("focusin", event => {
+  rememberDiagnosticsAgent(event.target);
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
+  if (diagnosticsDialog.open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault(); closeSkillPicker(skillPicker); return;

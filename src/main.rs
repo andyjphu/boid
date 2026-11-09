@@ -6,6 +6,7 @@ mod session_store;
 mod skills;
 mod terminal;
 mod tool_calls;
+mod usage;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};

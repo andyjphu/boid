@@ -106,6 +106,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
     let protected = Router::new()
         .route("/api/login", post(login))
         .route("/api/config", get(config))
+        .route("/api/diagnostics", get(diagnostics))
         .route("/api/sessions", get(sessions).post(create))
         .route("/api/sessions/archived", get(archived_sessions))
         .route("/api/sessions/{id}/reopen", post(reopen_session))
@@ -214,6 +215,9 @@ async fn login(State(app): State<App>) -> impl IntoResponse {
         .unwrap(),
     );
     (headers, Json(json!({"ok":true})))
+}
+async fn diagnostics(State(app): State<App>) -> Json<Value> {
+    Json(app.hub.diagnostics())
 }
 async fn config(State(app): State<App>) -> Json<Value> {
     Json(app.hub.config())
