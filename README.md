@@ -30,6 +30,13 @@ conversations. `boid serve` runs in the foreground for debugging. New panes use
 the directory where `boid` was invoked; existing agents keep their directories.
 State and background server logs live under `~/.local/share/boid` by default.
 
+Agent panes initially render the latest 200 entries or approximately 100,000
+characters, retaining whole entries and paired tool calls. Use **Show older
+entries** to load more and **Latest** to return to the bounded view. Culling
+pauses while reading earlier text or selecting it. The full saved transcript
+and the agent's context are unchanged. This is a temporary rendering hotfix;
+full transcript virtualization remains v2 work.
+
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 
 v0.5 preview · [PR #5](https://github.com/andyjphu/boid/pull/5).

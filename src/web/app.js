@@ -6,6 +6,16 @@ const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
 const communications = new Map();
+const communicationEntries = new Map();
+const transcriptEntries = 200;
+const transcriptCharacters = 100_000;
+let renderSelection;
+
+function rememberCommunication(message) {
+  communications.set(message.id, message);
+  communicationEntries.set(`${message.sender_id}:${message.sender_entry}`, message);
+  communicationEntries.set(`${message.recipient_id}:${message.id}`, message);
+}
 const terminals = new Map();
 const terminalCatalog = new Map();
 let selected = null;
@@ -280,10 +290,22 @@ function activatePromptSpace(ui) {
   restorePosition(ui);
 }
 
-function selectedWithin(node) {
+function selectionRange() {
   const selection = window.getSelection();
   return selection && !selection.isCollapsed && selection.rangeCount > 0
-    && selection.getRangeAt(0).intersectsNode(node);
+    ? selection.getRangeAt(0).cloneRange() : null;
+}
+
+function selectedWithin(node) {
+  if (!node.isConnected) return false;
+  const range = renderSelection === undefined ? selectionRange() : renderSelection;
+  return Boolean(range?.intersectsNode(node));
+}
+
+function withRenderSelection(render) {
+  const previous = renderSelection;
+  renderSelection = selectionRange();
+  try { render(); } finally { renderSelection = previous; }
 }
 
 function rememberPosition(ui) {
@@ -479,10 +501,16 @@ function addSession(view) {
   if (sessions.has(id)) return sessions.get(id);
   const ui = makePane(view.name || id, view.cwd, "agent", id);
   ui.view = view;
-  for (const message of view.communications || []) communications.set(message.id, message);
+  for (const message of view.communications || []) rememberCommunication(message);
   ui.id = id;
   enablePaneRename(ui, "agent");
   ui.entries = new Map();
+  ui.toolPairs = new Map();
+  ui.messageResults = new Map();
+  ui.mounted = new Set();
+  ui.dirty = new Set();
+  ui.historyLimit = transcriptEntries;
+  ui.historyCharacters = transcriptCharacters;
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.followClearance = 0;
@@ -494,6 +522,28 @@ function addSession(view) {
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.content = element("div", "trace-content");
   ui.trace.append(ui.content);
+  ui.historyControls = element("div", "transcript-history");
+  ui.historyOlder = element("button", "", "Show older entries");
+  ui.historyLatest = element("button", "", "Latest");
+  const fullRecord = element("a", "", "Full session record");
+  fullRecord.href = `/api/sessions/${encodeURIComponent(id)}`;
+  fullRecord.target = "_blank";
+  fullRecord.rel = "noopener";
+  ui.historyControls.append(ui.historyOlder, ui.historyLatest, fullRecord);
+  ui.historyControls.hidden = true;
+  ui.content.append(ui.historyControls);
+  ui.historyOlder.addEventListener("click", () => {
+    ui.follow = false;
+    ui.historyLimit += transcriptEntries;
+    ui.historyCharacters += transcriptCharacters;
+    scheduleTranscript(ui);
+  });
+  ui.historyLatest.addEventListener("click", () => {
+    ui.historyLimit = transcriptEntries;
+    ui.historyCharacters = transcriptCharacters;
+    ui.follow = true;
+    scheduleTranscript(ui);
+  });
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
@@ -546,6 +596,7 @@ function addSession(view) {
       ? Math.min(ui.overlay.getBoundingClientRect().height,
         Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
     rememberPosition(ui);
+    if (ui.follow) scheduleTranscript(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
@@ -800,11 +851,7 @@ function toolOutput(tool) {
 function renderToolEntry(ui, item) {
   const tool = toolEntry(item.text);
   const counterpartKind = item.kind === "tool_call" ? "tool_result" : "tool_call";
-  const counterpart = tool.callId && [...ui.entries.values()].find(entry => {
-    if (entry.kind !== counterpartKind) return false;
-    const other = toolEntry(entry.text);
-    return other.callId === tool.callId && other.heading === tool.heading;
-  });
+  const counterpart = tool.callId && ui.toolPairs.get(tool.heading)?.[counterpartKind];
   const call = item.kind === "tool_call" ? item : counterpart;
   const result = item.kind === "tool_result" ? item : counterpart;
   const owner = call || result;
@@ -919,18 +966,25 @@ function renderSkillEntry(ui, item) {
 }
 
 function communicationFor(ui, item) {
-  return [...communications.values()].find(message =>
-    (message.recipient_id === ui.id && message.id === item.id)
-    || (message.sender_id === ui.id && message.sender_entry === item.id));
+  return communicationEntries.get(`${ui.id}:${item.id}`);
 }
 
 async function locateCommunication(ui, message, otherId) {
   try {
     const startedAt = catalogRevision;
     const view = await request(`/api/sessions/${encodeURIComponent(otherId)}`);
-    for (const entry of view.communications || []) communications.set(entry.id, entry);
+    for (const entry of view.communications || []) rememberCommunication(entry);
     const target = acceptSessionResponse(view, startedAt);
-    const entryId = otherId === message.recipient_id ? message.id : message.sender_entry;
+    const entryId = String(otherId === message.recipient_id ? message.id : message.sender_entry);
+    const history = [...target.entries.values()];
+    const index = history.findIndex(item => item.id === entryId);
+    if (index >= 0) {
+      target.historyLimit = Math.max(target.historyLimit, history.length - index);
+      target.historyCharacters = Math.max(target.historyCharacters,
+        history.slice(index).reduce((total, item) => total + item.text.length, 0));
+      target.follow = false;
+      scheduleTranscript(target);
+    }
     await new Promise(resolve => requestAnimationFrame(resolve));
     const item = target.entries.get(entryId);
     if (!item) throw new Error("Message is unavailable in this session.");
@@ -982,22 +1036,94 @@ function refreshPeerEntries(sessionId) {
 }
 
 function receiveCommunication(message) {
-  communications.set(message.id, message);
-  for (const id of [message.sender_id, message.recipient_id]) {
+  rememberCommunication(message);
+  for (const id of new Set([message.sender_id, message.recipient_id])) {
     const ui = sessions.get(id);
     if (!ui) continue;
-    rememberPosition(ui);
-    for (const item of ui.entries.values()) {
-      if (communicationFor(ui, item)?.id !== message.id && item.kind !== "tool_result") continue;
-      if (selectedWithin(item.node)) { item.deferred = true; continue; }
-      renderEntry(ui, item);
+    for (const entryId of [message.id, message.sender_entry]) {
+      const item = ui.entries.get(String(entryId));
+      if (item && communicationFor(ui, item)?.id === message.id) ui.dirty.add(item);
     }
-    groupUserEntries(ui);
-    restorePosition(ui);
+    for (const item of ui.messageResults.get(message.id) || []) ui.dirty.add(item);
+    scheduleTranscript(ui);
   }
 }
 
+// Temporary bounded view. Full history stays in memory and in the session record.
+// V2 can replace this with viewport virtualization and paged history retrieval.
+function updateTranscriptWindow(ui) {
+  const history = [...ui.entries.values()].filter(item =>
+    !item.suppressed && (!item.superseded || selectedWithin(item.node)));
+  const wanted = new Set();
+  let characters = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (wanted.size && (wanted.size >= ui.historyLimit
+        || characters + item.text.length > ui.historyCharacters)) break;
+    wanted.add(item);
+    characters += item.text.length;
+  }
+  // A tool's output belongs to its call, including at the window boundary.
+  for (const item of [...wanted]) {
+    if (item.kind !== "tool_result") continue;
+    const call = ui.toolPairs.get(toolEntry(item.text).heading)?.tool_call;
+    if (call) wanted.add(call);
+  }
+  // Never remove the text being read or selected as new events arrive.
+  if (!ui.follow || selectedWithin(ui.trace)) {
+    const retained = new Set(history);
+    for (const item of ui.mounted) if (retained.has(item)) wanted.add(item);
+  }
+  for (const item of ui.mounted) {
+    if (wanted.has(item)) continue;
+    item.node.remove();
+    item.body.replaceChildren();
+    item.rendered = false;
+    item.communicationSignature = undefined;
+  }
+  let next = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (!wanted.has(item)) continue;
+    if (item.node.parentNode !== ui.content) {
+      ui.content.insertBefore(item.node, next);
+      ui.dirty.add(item);
+    }
+    next = item.node;
+  }
+  ui.mounted = new Set(history.filter(item => wanted.has(item)));
+  const older = history.length - ui.mounted.size;
+  ui.historyControls.hidden = !older && ui.historyLimit === transcriptEntries
+    && ui.historyCharacters === transcriptCharacters;
+  ui.historyOlder.hidden = !older;
+  ui.historyOlder.textContent = `Show older entries (${older})`;
+}
+
+function scheduleTranscript(ui) {
+  if (ui.renderScheduled) return;
+  ui.renderScheduled = true;
+  requestAnimationFrame(() => {
+    ui.renderScheduled = false;
+    if (sessions.get(ui.id) !== ui) return;
+    withRenderSelection(() => {
+      rememberPosition(ui);
+      updateTranscriptWindow(ui);
+      for (const item of ui.dirty) {
+        if (!ui.mounted.has(item)) { item.rendered = false; continue; }
+        if (selectedWithin(item.node)) { item.deferred = true; continue; }
+        renderEntry(ui, item);
+        item.rendered = true;
+      }
+      ui.dirty.clear();
+      groupUserEntries(ui);
+      activatePromptSpace(ui);
+      restorePosition(ui);
+    });
+  });
+}
+
 function renderEntry(ui, item) {
+  if (!ui.mounted.has(item)) { item.rendered = false; return; }
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
@@ -1025,10 +1151,10 @@ function renderEntry(ui, item) {
 
 function groupUserEntries(ui) {
   let previous;
-  for (const item of ui.entries.values()) {
+  for (const item of ui.mounted) {
     item.node.classList.remove("user-joined-before", "user-joined-after");
   }
-  for (const item of ui.entries.values()) {
+  for (const item of ui.mounted) {
     if (item.node.hidden) continue;
     if (item.kind === "user" && previous?.kind === "user"
       && ((ui.pending.has(item.id) && ui.pending.has(previous.id))
@@ -1070,33 +1196,31 @@ function putEntry(ui, entry, delta = false) {
         if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
       }
     }
-    ui.content.append(node);
-    item = { id, node, body, kind, text: "", groupChanged: true };
+    item = { id, node, body, kind, text: "", suppressed: node.hidden };
     ui.entries.set(id, item);
     if (kind === "user") ui.pending.add(id);
   }
   const batchChanged = !delta && item.inputBatch !== entry.input_batch;
-  if (batchChanged) item.groupChanged = true;
   if (!delta) item.inputBatch = entry.input_batch;
   const text = delta ? item.text + (entry.text || "") : (entry.text || "");
   if (text !== item.text || !item.rendered || batchChanged) {
     item.text = text;
-    if (!item.renderScheduled) {
-      item.renderScheduled = true;
-      requestAnimationFrame(() => {
-        item.renderScheduled = false;
-        if (selectedWithin(item.node)) { item.deferred = true; return; }
-        rememberPosition(ui);
-        renderEntry(ui, item);
-        item.rendered = true;
-        if (item.groupChanged) {
-          groupUserEntries(ui);
-          item.groupChanged = false;
-        }
-        if (!item.node.hidden) activatePromptSpace(ui);
-        restorePosition(ui);
-      });
+    if (item.kind === "tool_call" || item.kind === "tool_result") {
+      const tool = toolEntry(item.text);
+      if (tool.callId) {
+        const pair = ui.toolPairs.get(tool.heading) || {};
+        pair[item.kind] = item;
+        ui.toolPairs.set(tool.heading, pair);
+        for (const entry of Object.values(pair)) ui.dirty.add(entry);
+      }
+      const messageId = tool.name === "send_message" && tool.value?.message_id;
+      if (item.kind === "tool_result" && messageId) {
+        if (!ui.messageResults.has(messageId)) ui.messageResults.set(messageId, new Set());
+        ui.messageResults.get(messageId).add(item);
+      }
     }
+    ui.dirty.add(item);
+    scheduleTranscript(ui);
   }
 }
 
@@ -1123,7 +1247,8 @@ function acceptSessionResponse(view, startedAt) {
 
 function snapshot(views, terminalViews = []) {
   communications.clear();
-  for (const view of views) for (const message of view.communications || []) communications.set(message.id, message);
+  communicationEntries.clear();
+  for (const view of views) for (const message of view.communications || []) rememberCommunication(message);
   const revision = ++catalogRevision;
   const active = new Set(views.map(view => String(view.id)));
   for (const [id, lifecycle] of sessionLifecycle) {
@@ -1158,8 +1283,22 @@ function snapshot(views, terminalViews = []) {
       putEntry(ui, entry);
     }
     for (const [id, entry] of ui.entries) {
-      if (!present.has(id)) { entry.node.remove(); ui.entries.delete(id); }
+      if (!present.has(id)) {
+        entry.node.remove();
+        ui.entries.delete(id);
+        ui.mounted.delete(entry);
+        ui.dirty.delete(entry);
+      }
     }
+    for (const [heading, pair] of ui.toolPairs) {
+      for (const kind of Object.keys(pair)) if (!ui.entries.has(pair[kind].id)) delete pair[kind];
+      if (!Object.keys(pair).length) ui.toolPairs.delete(heading);
+    }
+    for (const [id, results] of ui.messageResults) {
+      for (const item of results) if (!ui.entries.has(item.id)) results.delete(item);
+      if (!results.size) ui.messageResults.delete(id);
+    }
+    scheduleTranscript(ui);
     setPending(ui, view.pending || []);
     setStatus(ui, view.status);
     if (follow) followLatest(ui);
