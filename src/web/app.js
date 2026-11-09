@@ -164,6 +164,31 @@ function atBottom(ui) {
   return ui.trace.scrollTop >= messageBottom(ui) - 1;
 }
 
+function promptVisible(ui) {
+  return !ui.composer.hidden && (ui.pane.matches(":hover")
+    || ui.composer.contains(document.activeElement) || ui.input.value.length > 0);
+}
+
+function followTarget(ui) {
+  const clearance = ui.autoClearance && promptVisible(ui)
+    ? ui.overlay.getBoundingClientRect().height : 0;
+  return messageBottom(ui) + Math.max(ui.followClearance, clearance);
+}
+
+function clearPromptSpaceWhenHidden(ui) {
+  if (promptVisible(ui)) return;
+  const hadClearance = ui.autoClearance || ui.followClearance > 0;
+  ui.autoClearance = false;
+  ui.followClearance = 0;
+  if (hadClearance && ui.follow && !selectedWithin(ui.trace)) restorePosition(ui);
+}
+
+function activatePromptSpace(ui) {
+  if (!ui.follow || selectedWithin(ui.trace) || !promptVisible(ui)) return;
+  ui.autoClearance = true;
+  restorePosition(ui);
+}
+
 function selectedWithin(node) {
   const selection = window.getSelection();
   return selection && !selection.isCollapsed && selection.rangeCount > 0
@@ -180,7 +205,7 @@ function rememberPosition(ui) {
 
 function restorePosition(ui) {
   if (ui.follow && !selectedWithin(ui.trace)) {
-    ui.trace.scrollTop = messageBottom(ui) + ui.followClearance;
+    ui.trace.scrollTop = followTarget(ui);
   } else if (ui.anchor?.node.isConnected) {
     ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
       - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
@@ -212,7 +237,7 @@ function followLatest(ui) {
   requestAnimationFrame(() => {
     ui.followScheduled = false;
     if (ui.follow && !selectedWithin(ui.trace)) {
-      ui.trace.scrollTop = messageBottom(ui) + ui.followClearance;
+      ui.trace.scrollTop = followTarget(ui);
     }
   });
 }
@@ -228,6 +253,7 @@ async function openModelPicker(ui) {
   ui.slashSuggestion.hidden = true;
   ui.composer.hidden = true;
   ui.modelPicker.hidden = false;
+  clearPromptSpaceWhenHidden(ui);
   updateActivity(ui);
   ui.modelAvailable = false;
   ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
@@ -271,6 +297,7 @@ function addSession(view) {
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
   ui.followClearance = 0;
+  ui.autoClearance = false;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
@@ -306,7 +333,7 @@ function addSession(view) {
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
-    ui.followClearance = ui.follow && ui.pane.matches(":hover")
+    ui.followClearance = ui.follow && promptVisible(ui)
       ? Math.max(0, ui.trace.scrollTop - messageBottom(ui)) : 0;
     rememberPosition(ui);
   }, { passive: true });
@@ -316,30 +343,31 @@ function addSession(view) {
   ui.composer.append(ui.input);
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
+  ui.overlay = overlay;
   overlay.append(ui.slashSuggestion, ui.composer);
   stream.append(ui.trace, overlay);
   ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker);
   const overlayResize = new ResizeObserver(() => {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
     if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
+    if (ui.autoClearance) restorePosition(ui);
   });
   overlayResize.observe(overlay);
   ui.overlayResize = overlayResize;
-  ui.pane.addEventListener("pointerleave", () => {
-    if (ui.follow && atBottom(ui) && !selectedWithin(ui.trace)) {
-      ui.followClearance = 0;
-      restorePosition(ui);
-    }
+  ui.pane.addEventListener("pointerleave", () => clearPromptSpaceWhenHidden(ui));
+  ui.composer.addEventListener("focusout", () => {
+    requestAnimationFrame(() => clearPromptSpaceWhenHidden(ui));
   });
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !"/model".startsWith(text) || ui.input.value.includes("\n");
+    clearPromptSpaceWhenHidden(ui);
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); });
+  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -387,6 +415,7 @@ function addSession(view) {
     event.preventDefault();
     if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
+    activatePromptSpace(ui);
     if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
       ui.input.value = "";
       historyIndex = null;
@@ -701,6 +730,7 @@ function putEntry(ui, entry, delta = false) {
           groupUserEntries(ui);
           item.groupChanged = false;
         }
+        if (!item.node.hidden) activatePromptSpace(ui);
         restorePosition(ui);
       });
     }
