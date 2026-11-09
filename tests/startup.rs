@@ -136,7 +136,7 @@ async fn simultaneous_launches_reuse_one_server_and_preserve_invocation_defaults
         }
     });
     let info = fixture.get("/api/server").await;
-    assert_eq!(info["version"], "1.1.0");
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
     let default_cwd = fixture.get("/api/config").await["cwd"].clone();
     let warm = fixture
         .command(&["--no-open"])
