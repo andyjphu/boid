@@ -2,6 +2,7 @@ mod api;
 mod runtime;
 mod server;
 mod session;
+mod session_store;
 mod terminal;
 mod tool_calls;
 
@@ -20,7 +21,7 @@ BOID_LISTEN defaults to 127.0.0.1:7734. Run inside the task container.
 Client: BOID_URL defaults to http://127.0.0.1:7734.
 BOID_CWD selects a server-side directory; omitted uses the server working directory.
 BOID_TOKEN overrides the private token file under BOID_STATE_DIR (default ~/.local/share/boid).
-Server shutdown ends its sessions. A browser Stop button stops only the selected agent.";
+Server shutdown stops execution; saved conversations return paused on restart. End archives a session without erasing its record.";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> std::process::ExitCode {

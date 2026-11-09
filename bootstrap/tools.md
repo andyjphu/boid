@@ -22,12 +22,12 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Each has a compact tab header with an icon and a left
-close control. Pane titles do not change the layout.
+and real terminal panes. Each has a compact tab header beginning with an icon and ending
+with a close control. Tabs grow with their title and path, truncating at the
+available pane width.
 Traces show selected instructions and tools, user and peer messages, text,
 tool calls and results, and control events. Provider-exposed reasoning summaries
-are hidden in every pane pending the v0.6 presentation work; events remain in
-the full session record.
+are hidden in every pane; events remain in the full session record.
 Models may return no summary; hidden reasoning is unavailable. Responses are displayed as plain text. Startup context is expandable;
 its full-session link retains the original event record, including transport
 receipts omitted from the reading view. The view adds no tool-result truncation.
@@ -41,9 +41,13 @@ arguments are replaced by their formatted call using entry identity, including
 when a peer message arrives between them. The full record retains both events.
 
 An empty message box appears on pane hover or keyboard focus; a draft keeps it
-visible. The hidden empty box collapses completely; Working retains its own slot below
-the stream. Browser text assistance is disabled on text inputs.
-Disconnection mutes the view. Each pane has an × control; there is no separate
+visible. The box overlays the stream, so revealing it does not resize the
+transcript. Typing, submission, or followed output makes room above the visible
+box; manual history reading keeps its position. Extra scroll space permits
+uncovering messages, but following targets the message end when the box is
+hidden. Working retains a reserved line below the stream even when idle.
+Browser text assistance is disabled on text inputs.
+Disconnection mutes the view. Each pane has an × control that ends execution and archives its record; there is no separate
 Latest control or title gesture that enlarges a pane.
 
 Adjacent queued messages form a compact block with a lighter background and
@@ -61,13 +65,14 @@ normal behavior.
 Enter sends; Shift+Enter adds a newline. Input accepted during work waits for
 the current model response and all its tool calls to finish, then enters the
 next model request without cancelling work. Escape in the selected
-agent pane interrupts immediately and applies queued input. Without queued
+agent pane requests interruption and applies queued input. Without queued
 input, it leaves execution stopped. Draft text is preserved. Completed results
 stay in context; interrupted actions are marked potentially partial. The
 headless Stop route retains its separate priority path and cancels older queued
 requests. Later user input can resume work. While an agent is working, a bottom
-indicator shows Working and Esc to interrupt; it remains visible when the
-message box is hidden.
+indicator shows Working, elapsed time, and Esc to interrupt; it remains visible
+when the message box is hidden. The elapsed time uses the server timestamp and
+survives browser refresh.
 
 `list_agents` exposes session identities and status. `send_message` queues an
 attributed message for the recipient's next model request. It does not interrupt
@@ -77,18 +82,21 @@ operator's permissions.
 
 The server owns execution. Closing a browser, event subscription, or submitting
 command leaves work running. Reconnection receives a snapshot followed by live
-events; slow event consumers receive a fresh snapshot. Session history currently
-lives in server memory and grows with conversation length. Server shutdown or
-failure ends sessions; disk persistence and restart recovery are not implemented.
+events; slow event consumers receive a fresh snapshot. Private session records live under BOID_STATE_DIR. They retain model history,
+accepted input, and tool execution state. Restart restores conversations stopped,
+without issuing model requests or replaying uncertain actions. Terminal records
+retain bounded output and return without a running shell. Keep the state directory
+on persistent storage when replacing the container. Context compaction and
+long-running-job continuity remain follow-up work; see [sessions](sessions.md).
 
 The Responses client streams with `store: false`, explicit conversation input,
 and `reasoning.summary: auto`. Completed encrypted reasoning returns as opaque
 context. API failures are reported without automatic retries. Runtime guidance
 is compiled from `src/PRINCIPLES.md`; parent/bootstrap discovery is not automatic.
 
-The active v0.6 profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
+The default profile is GPT-6 Sol / medium / Daybreak Blue. `/model` opens a
 local keyboard picker for that single profile; Enter confirms and Escape closes
-it. The command is not sent to an agent. The picker reads server configuration,
+it. The command is not sent to an agent. The picker reads the session's retained profile,
 so it does not imply an unavailable model was activated.
 
 Requests send `reasoning.effort: medium` and `access_programs.cyber: daybreak_blue`
@@ -108,16 +116,18 @@ The browser and scripts use the same authenticated API:
 | `GET /api/sessions` | Session snapshots |
 | `POST /api/sessions` | Create with optional `name`, `cwd`, `message` |
 | `GET /api/sessions/{id}` | Inspect one session |
-| `DELETE /api/sessions/{id}` | End the worker and remove its in-memory session |
+| `DELETE /api/sessions/{id}` | End the worker and archive its retained record |
+| `GET /api/sessions/archived` | Discover ended agent records |
+| `POST /api/sessions/{id}/reopen` | Reopen a retained agent, stopped until new input |
 | `POST /api/sessions/{id}/messages` | Queue `{ "text": "..." }`; return a message ID |
 | `POST /api/sessions/{id}/interrupt` | Interrupt current work and apply queued input; stop if none |
 | `POST /api/sessions/{id}/stop` | Request cancellation; later status confirms stopping |
-| `GET /api/events` | SSE snapshot, entries, deltas, input delivery, status |
+| `GET /api/events` | Shared agent/terminal catalog snapshot and sequenced events |
 | `GET /api/terminals` | Terminal identities and status |
 | `POST /api/terminals` | Open with optional `cwd`, `cols`, `rows` |
 | `GET /api/terminals/{id}/ws` | WebSocket terminal output, input, resize |
 | `PATCH /api/terminals/{id}` | Rename with `{ "name": "..." }` |
-| `DELETE /api/terminals/{id}` | End and wait for the shell |
+| `DELETE /api/terminals/{id}` | End and wait for the shell, retaining its archive |
 
 Agent behavior can be checked headlessly. Browser checks establish interface
 behavior. Tool unit tests alone do not establish disconnect or coordination behavior.
@@ -126,11 +136,12 @@ behavior. Tool unit tests alone do not establish disconnect or coordination beha
 
 Terminals start as #1, #2, etc. Double-click a terminal name to edit it; Enter
 saves and Escape cancels. Renaming updates other views without replacing the
-shell. Names remain for the server process lifetime, like terminal sessions.
+shell. Names remain with the durable terminal record across server restarts.
 
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×
-control ends it. Agent panes use the same control to end and remove the session.
+control ends it. Agent panes use the same control to end and archive the session. The + agent setup pane reopens
+an agent stopped; terminal records are retained separately.
 Replay retains a bounded 512 KiB history with resize events and marks omitted
 older output. Replaying bytes never sends terminal responses back to the shell.
 Views share the PTY dimensions; focusing or clicking a terminal transfers input
@@ -146,7 +157,28 @@ Install personal themes/plugins and portable shell settings in the container's
 home; host-specific paths and credential loaders do not belong in that copy.
 The browser terminal prefers locally installed MesloLGS NF, with monospace
 fallbacks. Andy's preview uses his Powerlevel10k settings, Oh My Zsh, Git,
-autosuggestions, and syntax highlighting.
+autosuggestions, and syntax highlighting. These are operator-provided container
+settings, not assets bundled with Boid.
+
+Keep configured shell settings in a persistent container-home volume so replacing
+the server container does not remove the theme. For an existing configured
+container, copy only the portable theme files into that volume before first use:
+
+```sh
+BOID_THEME_SOURCE=existing-configured-container
+set -o pipefail
+docker exec "$BOID_THEME_SOURCE" tar \
+  --exclude=.git --exclude=cache --exclude=log \
+  -C /root -cf - .zshrc .p10k.zsh .oh-my-zsh | \
+  docker run --rm -i --network none -v boid-shell-home:/root \
+    boid-dev tar -C /root -xf -
+```
+
+Use a new volume for that initial copy, then reuse it when replacing containers.
+The source must already have the desired theme and portable settings; this does
+not install Powerlevel10k from scratch. The named paths deliberately omit shell
+history and unrelated home files. Keep personal settings out of Git. The launch
+example below mounts both durable session state and this separate shell home.
 
 ## File and command behavior
 
@@ -204,6 +236,8 @@ docker run --rm --init \
   --pids-limit=256 --memory=4g --cpus=4 \
   -p 127.0.0.1:7734:7734 \
   -e OPENAI_API_KEY -e BOID_MODEL -e BOID_LISTEN=0.0.0.0:7734 \
+  -e BOID_STATE_DIR=/state -v boid-state:/state \
+  -v boid-shell-home:/root \
   -v "$BOID_WORKSPACE:/work" -v boid-v3-target:/opt/boid:ro \
   boid-dev /opt/boid/debug/boid serve
 ```

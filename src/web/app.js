@@ -6,9 +6,56 @@ const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
 const terminals = new Map();
+const terminalCatalog = new Map();
 let selected = null;
 let lastSequence = -1;
+// Local revisions remain ordered when a restarted server resets its sequence.
+let catalogRevision = 0;
+const sessionLifecycle = new Map();
 let events;
+const drafts = new Map();
+let paneOrder = [];
+let orderKey = "";
+let catalogReady = false;
+let reconcilingCatalog = false;
+
+function loadPaneOrder(cwd) {
+  const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
+  if (key === orderKey) return;
+  orderKey = key;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+    const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
+    paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
+    for (const draft of saved?.drafts || []) {
+      if (draft && typeof draft.id === "string" && ["name", "cwd", "message"].every(key => typeof draft[key] === "string")) {
+        const restored = { ...draft };
+        if (saved.version !== 2) {
+          for (const [key, value] of Object.entries(agentDefaults)) if (restored[key] === value) restored[key] = "";
+        }
+        addSetup(restored);
+      }
+    }
+  } catch { paneOrder = []; }
+}
+
+function rememberPaneOrder() {
+  if (!catalogReady || reconcilingCatalog) return;
+  const panes = new Map([...workspace.querySelectorAll(".pane")].map(pane => [pane.dataset.paneKey, pane]));
+  paneOrder = paneOrder.filter(key => panes.has(key));
+  for (const key of panes.keys()) if (!paneOrder.includes(key)) paneOrder.push(key);
+  for (let i = 0; i < paneOrder.length; i++) {
+    const pane = panes.get(paneOrder[i]);
+    const current = workspace.querySelectorAll(".pane")[i];
+    if (pane !== current) workspace.insertBefore(pane, current || null);
+  }
+  try {
+    sessionStorage.setItem(orderKey, JSON.stringify({
+      version: 2, order: paneOrder,
+      drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
+    }));
+  } catch { /* Storage availability must not prevent session access. */ }
+}
 
 function disableTextAssistance(input) {
   for (const [name, value] of Object.entries({
@@ -51,6 +98,7 @@ async function request(path, method = "GET", body, headers = {}) {
 }
 
 function layout(event) {
+  rememberPaneOrder();
   if (event?.type !== "resize") {
     for (const ui of sessions.values()) rememberPosition(ui);
   }
@@ -74,9 +122,10 @@ function paneIcon(kind) {
   return icon;
 }
 
-function makePane(name, cwd, kind) {
+function makePane(name, cwd, kind, id) {
   const pane = element("section", `pane ${kind}-pane`);
   pane.setAttribute("aria-label", name);
+  pane.dataset.paneKey = `${kind}:${id}`;
   const header = element("header", "pane-header");
   const tab = element("div", "pane-tab");
   const title = element("span", "pane-title", name);
@@ -90,23 +139,60 @@ function makePane(name, cwd, kind) {
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  tab.append(close, paneIcon(kind), title, directory);
+  tab.append(paneIcon(kind), title, directory, close);
   header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
   return { pane, header, tab, title, status, directory, error, close };
 }
 
+function reportUnsavedEnd(result) {
+  if (result.persisted === false) {
+    showError(workspaceError, "The agent ended, but storage failed. Its final state could not be saved.");
+  }
+}
+
 function removeSession(ui) {
   ui.traceResize.disconnect();
+  ui.overlayResize.disconnect();
   if (selected === ui.pane) selected = null;
   ui.pane.remove();
   sessions.delete(ui.id);
   layout();
 }
 
-function atBottom(trace) {
-  return trace.scrollHeight - trace.scrollTop - trace.clientHeight <= 1;
+function messageBottom(ui) {
+  // Keep the usual trace padding, but never follow into the composer reserve.
+  return Math.max(0, ui.content.offsetHeight + 20 - ui.trace.clientHeight);
+}
+
+function atBottom(ui) {
+  return ui.trace.scrollTop >= messageBottom(ui) - 1;
+}
+
+function promptVisible(ui) {
+  return !ui.composer.hidden && (ui.pane.matches(":hover")
+    || ui.composer.contains(document.activeElement) || ui.input.value.length > 0);
+}
+
+function followTarget(ui) {
+  const clearance = ui.autoClearance && promptVisible(ui)
+    ? ui.overlay.getBoundingClientRect().height : 0;
+  return messageBottom(ui) + Math.max(ui.followClearance, clearance);
+}
+
+function clearPromptSpaceWhenHidden(ui) {
+  if (promptVisible(ui)) return;
+  const hadClearance = ui.autoClearance || ui.followClearance > 0;
+  ui.autoClearance = false;
+  ui.followClearance = 0;
+  if (hadClearance && ui.follow && !selectedWithin(ui.trace)) restorePosition(ui);
+}
+
+function activatePromptSpace(ui) {
+  if (!ui.follow || selectedWithin(ui.trace) || !promptVisible(ui)) return;
+  ui.autoClearance = true;
+  restorePosition(ui);
 }
 
 function selectedWithin(node) {
@@ -125,7 +211,7 @@ function rememberPosition(ui) {
 
 function restorePosition(ui) {
   if (ui.follow && !selectedWithin(ui.trace)) {
-    ui.trace.scrollTop = ui.trace.scrollHeight;
+    ui.trace.scrollTop = followTarget(ui);
   } else if (ui.anchor?.node.isConnected) {
     ui.trace.scrollTop += ui.anchor.node.getBoundingClientRect().top
       - ui.trace.getBoundingClientRect().top - ui.anchor.offset;
@@ -157,7 +243,7 @@ function followLatest(ui) {
   requestAnimationFrame(() => {
     ui.followScheduled = false;
     if (ui.follow && !selectedWithin(ui.trace)) {
-      ui.trace.scrollTop = ui.trace.scrollHeight;
+      ui.trace.scrollTop = followTarget(ui);
     }
   });
 }
@@ -165,7 +251,7 @@ function followLatest(ui) {
 function closeModelPicker(ui) {
   ui.modelPicker.hidden = true;
   ui.composer.hidden = false;
-  ui.activity.lastChild.textContent = " · Esc to interrupt";
+  updateActivity(ui);
   ui.input.focus({ preventScroll: true });
 }
 
@@ -173,12 +259,15 @@ async function openModelPicker(ui) {
   ui.slashSuggestion.hidden = true;
   ui.composer.hidden = true;
   ui.modelPicker.hidden = false;
-  ui.activity.lastChild.textContent = "";
+  clearPromptSpaceWhenHidden(ui);
+  updateActivity(ui);
   ui.modelAvailable = false;
   ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
   ui.modelPicker.focus({ preventScroll: true });
   try {
-    const config = await request("/api/config");
+    const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}`);
+    ui.view = view;
+    const config = view.profile || { model: view.model };
     if (ui.modelPicker.hidden) return;
     ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
       && config.cyber_access_program === "daybreak_blue";
@@ -195,7 +284,7 @@ async function openModelPicker(ui) {
     ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), choices);
     if (!ui.modelAvailable) {
       const current = [config.model, config.reasoning_effort, config.cyber_access_program].filter(Boolean).join(" · ");
-      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This profile is unavailable on this server.`));
+      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This session retains its original profile.`));
     }
     ui.modelPicker.append(element("div", "model-hint", "Enter select · Esc back"));
     option.focus({ preventScroll: true });
@@ -207,14 +296,19 @@ async function openModelPicker(ui) {
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
-  const ui = makePane(view.name || id, view.cwd, "agent");
+  const ui = makePane(view.name || id, view.cwd, "agent", id);
+  ui.view = view;
   ui.id = id;
   ui.entries = new Map();
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
+  ui.followClearance = 0;
+  ui.autoClearance = false;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
+  ui.content = element("div", "trace-content");
+  ui.trace.append(ui.content);
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
@@ -240,28 +334,46 @@ function addSession(view) {
   ui.input = element("textarea");
   ui.input.rows = 1;
   ui.input.placeholder = "Message…";
-  ui.input.title = "Enter to send · Shift+Enter for a new line · Esc to interrupt";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
   ui.sending = false;
   ui.trace.addEventListener("scroll", () => {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
-    ui.follow = atBottom(ui.trace) && !selectedWithin(ui.trace);
+    ui.follow = atBottom(ui) && !selectedWithin(ui.trace);
+    ui.followClearance = ui.follow && promptVisible(ui)
+      ? Math.max(0, ui.trace.scrollTop - messageBottom(ui)) : 0;
     rememberPosition(ui);
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) { ui.follow = false; rememberPosition(ui); }
   }, { passive: true });
   ui.composer.append(ui.input);
-  ui.pane.append(ui.trace, ui.error, ui.activity, ui.modelPicker, ui.slashSuggestion, ui.composer);
+  const stream = element("div", "agent-stream");
+  const overlay = element("div", "composer-overlay");
+  ui.overlay = overlay;
+  overlay.append(ui.slashSuggestion, ui.composer);
+  stream.append(ui.trace, overlay);
+  ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker);
+  const overlayResize = new ResizeObserver(() => {
+    const height = Math.ceil(overlay.getBoundingClientRect().height);
+    if (height) ui.trace.style.setProperty("--composer-space", `${height + 8}px`);
+    if (ui.autoClearance) restorePosition(ui);
+  });
+  overlayResize.observe(overlay);
+  ui.overlayResize = overlayResize;
+  ui.pane.addEventListener("pointerleave", () => clearPromptSpaceWhenHidden(ui));
+  ui.composer.addEventListener("focusout", () => {
+    requestAnimationFrame(() => clearPromptSpaceWhenHidden(ui));
+  });
   function resizeInput() {
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
     ui.slashSuggestion.hidden = ui.slashDismissed || !text || !"/model".startsWith(text) || ui.input.value.includes("\n");
+    clearPromptSpaceWhenHidden(ui);
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); });
+  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -272,7 +384,8 @@ function addSession(view) {
   ui.close.addEventListener("click", async () => {
     ui.close.disabled = true;
     try {
-      await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      const result = await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
+      reportUnsavedEnd(result);
       if (sessions.has(id)) removeSession(ui);
     } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
   });
@@ -309,6 +422,7 @@ function addSession(view) {
     event.preventDefault();
     if (ui.sending || !ui.input.value.trim()) return;
     const text = ui.input.value;
+    activatePromptSpace(ui);
     if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && "/model".startsWith(text.trim()))) {
       ui.input.value = "";
       historyIndex = null;
@@ -334,11 +448,22 @@ function addSession(view) {
   return ui;
 }
 
-function setStatus(ui, status) {
+function updateActivity(ui) {
+  const since = ui.view?.working_since_ms;
+  const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
+  const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hint = ui.modelPicker.hidden ? "Esc to interrupt" : "";
+  ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
+}
+
+function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
+  if (ui.view) {
+    ui.view.status = status;
+    ui.view.working_since_ms = status === "working" ? workingSince : null;
+  }
   ui.pane.dataset.status = status || "idle";
-  ui.activity.hidden = status !== "working";
-  ui.activity.lastChild.textContent = ui.modelPicker.hidden ? " · Esc to interrupt" : "";
-  ui.status.textContent = status === "working" || status === "idle" ? "" : (status || "");
+  updateActivity(ui);
+  ui.status.textContent = "";
 }
 
 function toolEntry(text) {
@@ -589,7 +714,7 @@ function putEntry(ui, entry, delta = false) {
         if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
       }
     }
-    ui.trace.append(node);
+    ui.content.append(node);
     item = { id, node, body, kind, text: "", groupChanged: true };
     ui.entries.set(id, item);
     if (kind === "user") ui.pending.add(id);
@@ -612,6 +737,7 @@ function putEntry(ui, entry, delta = false) {
           groupUserEntries(ui);
           item.groupChanged = false;
         }
+        if (!item.node.hidden) activatePromptSpace(ui);
         restorePosition(ui);
       });
     }
@@ -628,7 +754,25 @@ function setPending(ui, pending) {
   restorePosition(ui);
 }
 
-function snapshot(views) {
+function acceptSessionResponse(view, startedAt) {
+  const lifecycle = sessionLifecycle.get(String(view.id));
+  if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
+    throw new Error("This agent has ended. Choose it from Inactive sessions to reopen.");
+  }
+  return addSession(view);
+}
+
+function snapshot(views, terminalViews = []) {
+  const revision = ++catalogRevision;
+  const active = new Set(views.map(view => String(view.id)));
+  for (const [id, lifecycle] of sessionLifecycle) {
+    if (lifecycle.open && !active.has(id)) sessionLifecycle.set(id, { open: false, revision });
+  }
+  for (const id of active) sessionLifecycle.set(id, { open: true, revision });
+  views = [...views].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  reconcilingCatalog = true;
+  reconcileTerminals(terminalViews);
   const ids = new Set(views.map(view => String(view.id)));
   for (const [id, ui] of sessions) {
     if (!ids.has(id)) {
@@ -638,6 +782,7 @@ function snapshot(views) {
   for (const view of views) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
+    ui.view = view;
     const follow = ui.follow;
     rememberPosition(ui);
     ui.title.textContent = view.name || String(view.id);
@@ -656,6 +801,10 @@ function snapshot(views) {
     if (follow) followLatest(ui);
     else restorePosition(ui);
   }
+  reconcilingCatalog = false;
+  catalogReady = true;
+  layout();
+  refreshChoices();
 }
 
 function startEvents() {
@@ -673,15 +822,28 @@ function startEvents() {
       const message = JSON.parse(event.data);
       if (message.type === "snapshot") {
         lastSequence = message.seq;
-        snapshot(message.sessions);
+        snapshot(message.sessions, message.terminals || []);
         return;
       }
       if (message.seq <= lastSequence) return;
       lastSequence = message.seq;
+      const revision = ++catalogRevision;
+      if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
+      if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
+      if (["session", "closed", "status"].includes(message.type)) refreshChoices();
       if (message.type === "session") { addSession(message.session); return; }
+      if (message.type === "terminal") {
+        terminalCatalog.set(String(message.terminal.id), message.terminal);
+        reconcileTerminals([...terminalCatalog.values()]);
+        return;
+      }
       const ui = sessions.get(String(message.session_id));
+      if (message.type === "closed") {
+        reportUnsavedEnd(message);
+        if (ui) removeSession(ui);
+        return;
+      }
       if (!ui) return;
-      if (message.type === "closed") { removeSession(ui); return; }
       if (message.type === "input") {
         const item = ui.entries.get(String(message.id));
         if (item) item.inputBatch = message.input_batch;
@@ -690,15 +852,29 @@ function startEvents() {
       }
       if (message.type === "entry") putEntry(ui, message.entry);
       if (message.type === "delta") putEntry(ui, { id: message.entry_id, text: message.text }, true);
-      if (message.type === "status") setStatus(ui, message.status);
+      if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null);
     } catch (error) { showError(workspaceError, error); }
   };
 }
 
+function reconcileTerminals(infos) {
+  terminalCatalog.clear();
+  for (const info of infos) terminalCatalog.set(String(info.id), info);
+  for (const [id, ui] of terminals) {
+    const info = terminalCatalog.get(id);
+    if (!info || info.archived || !info.running) ui.dispose();
+    else ui.update(info);
+  }
+  for (const info of infos) {
+    if (info.running && !info.archived && !terminals.has(String(info.id))) attachTerminal(info);
+  }
+}
+
 function attachTerminal(info) {
+  if (!info.running || info.archived) return;
   const id = String(info.id);
   if (terminals.has(id)) return terminals.get(id);
-  const ui = makePane(info.name || "#?", info.cwd, "terminal");
+  const ui = makePane(info.name || "#?", info.cwd, "terminal", id);
   ui.id = id;
   ui.title.title = "Double-click or press F2 to rename";
   ui.title.tabIndex = 0;
@@ -841,8 +1017,8 @@ function attachTerminal(info) {
       try {
         const list = await request("/api/terminals");
         const current = list.find(item => String(item.id) === id);
-        if (current) setName(current.name);
-        if (!current || !current.running) { ui.status.textContent = "exited"; return; }
+        if (!current) { ui.dispose(); return; }
+        if (!current.running || current.archived) { ui.dispose(); return; }
       } catch (error) {
         if (error.status === 401) { requireLogin(); return; }
       }
@@ -851,6 +1027,7 @@ function attachTerminal(info) {
   }
   term.onData(data => { if (controller && !replaying) send({ type: "input", data }); });
   function takeControl() {
+    if (!info.running) return;
     if (replaying) wantsControl = true;
     else if (!controller) send({ type: "control" });
   }
@@ -874,68 +1051,221 @@ function attachTerminal(info) {
   });
   observer.observe(host);
   observer.observe(screen);
+  ui.dispose = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(retry);
+    socket?.close();
+    observer.disconnect();
+    clearTimeout(scrollbarIdle);
+    window.removeEventListener("focus", resumeControl);
+    term.dispose();
+    if (selected === ui.pane) selected = null;
+    ui.pane.remove();
+    terminals.delete(id);
+    layout();
+  };
+  ui.update = latest => {
+    if (!latest.running || latest.archived) { ui.dispose(); return; }
+    info = latest;
+    setName(info.name);
+    ui.directory.textContent = info.cwd || "";
+    ui.directory.title = (info.cwd || "") + (info.running && info.cwd_observed === false ? " (last known directory)" : "");
+    ui.status.textContent = "";
+    if (info.persistence_error) showError(ui.error, `History could not be saved: ${info.persistence_error}`);
+    if (!info.running) term.options.disableStdin = true;
+  };
   close.addEventListener("click", async () => {
     close.disabled = true;
     try {
       await request(`/api/terminals/${encodeURIComponent(id)}`, "DELETE");
-      closed = true;
-      clearTimeout(retry);
-      socket?.close();
-      observer.disconnect();
-      clearTimeout(scrollbarIdle);
-      window.removeEventListener("focus", resumeControl);
-      term.dispose();
-      if (selected === ui.pane) selected = null;
-      ui.pane.remove();
-      terminals.delete(id);
-      layout();
+      ui.dispose();
     } catch (error) { showError(ui.error, error); close.disabled = false; }
   });
   ui.reconnect = connect;
   terminals.set(id, ui);
+  ui.update(info);
   layout();
   connect();
   return ui;
 }
 
-const dialog = document.querySelector("#create-dialog");
-const createForm = document.querySelector("#create-form");
-const createError = document.querySelector("#create-error");
-const createButton = document.querySelector("#submit-create");
-let createKind = "agent";
-function openCreate(kind) {
-  createKind = kind;
-  createError.hidden = true;
-  document.querySelector("#create-title").textContent = kind === "agent" ? "New agent" : "New terminal";
-  createButton.textContent = kind === "agent" ? "Create agent" : "Open terminal";
-  document.querySelector("#name-field").hidden = kind !== "agent";
-  document.querySelector("#message-field").hidden = kind !== "agent";
-  dialog.showModal();
-  createForm.elements[kind === "agent" ? "name" : "cwd"].focus();
+const agentDefaults = {
+  name: "canary", cwd: "/work", message: "Inspect the working directory and summarize what is here.",
+};
+let choicesVersion = 0;
+let choicesTimer;
+
+function focusSession(ui) {
+  selected = ui.pane;
+  ui.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (ui.input) ui.input.focus({ preventScroll: true });
+  else ui.title.focus({ preventScroll: true });
 }
-document.querySelector("#add-agent").addEventListener("click", () => openCreate("agent"));
-document.querySelector("#add-terminal").addEventListener("click", () => openCreate("terminal"));
-document.querySelector("#cancel-create").addEventListener("click", () => dialog.close());
-createForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  createButton.disabled = true;
-  createError.hidden = true;
-  const fields = Object.fromEntries(new FormData(createForm));
-  try {
-    if (createKind === "agent") {
+
+function discardSetup(ui, replacement) {
+  if (replacement) {
+    const key = replacement.pane.dataset.paneKey;
+    paneOrder = paneOrder.filter(item => item !== key).map(item => item === `draft:${ui.id}` ? key : item);
+  }
+  drafts.delete(ui.id);
+  if (selected === ui.pane) selected = null;
+  ui.pane.remove();
+  layout();
+  if (replacement) focusSession(replacement);
+}
+
+function addSetup(saved) {
+  const values = saved || {
+    id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
+    name: "", cwd: "", message: "",
+  };
+  if (drafts.has(values.id)) return drafts.get(values.id);
+  const ui = makePane("New agent", "", "draft", values.id);
+  ui.pane.classList.add("setup-pane");
+  ui.id = values.id;
+  ui.directory.hidden = true;
+  ui.status.textContent = "";
+  ui.close.title = "Discard draft";
+  ui.close.setAttribute("aria-label", "Discard agent draft");
+  const body = element("div", "session-setup-grid");
+  ui.form = element("form", "setup-form");
+  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"], ["message", "Task"]]) {
+    const wrapper = element("label", null, label);
+    const input = element(key === "message" ? "textarea" : "input");
+    input.name = key;
+    input.value = values[key];
+    if (key === "message") input.rows = 4;
+    input.placeholder = agentDefaults[key];
+    input.addEventListener("input", rememberPaneOrder);
+    wrapper.append(input);
+    ui.form.append(wrapper);
+  }
+  const submit = element("button", "setup-submit", "Create agent");
+  submit.type = "submit";
+  ui.form.append(submit);
+  const choices = element("div", "session-choices");
+  ui.active = element("div", "active-agents");
+  ui.inactive = element("div", "inactive-agents");
+  choices.append(element("h2", null, "Active sessions"), ui.active, element("h2", null, "Inactive sessions"), ui.inactive);
+  body.append(ui.form, choices);
+  ui.pane.append(body, ui.error);
+  ui.close.addEventListener("click", () => discardSetup(ui));
+  ui.form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (ui.busy) return;
+    ui.busy = true;
+    submit.disabled = true;
+    ui.close.disabled = true;
+    ui.error.hidden = true;
+    try {
+      const startedAt = catalogRevision;
+      const fields = Object.fromEntries(new FormData(ui.form));
+      for (const [key, value] of Object.entries(agentDefaults)) fields[key] ||= value;
       const view = await request("/api/sessions", "POST", fields);
-      const ui = addSession(view);
-      dialog.close();
-      createForm.elements.name.value = "";
-      createForm.elements.message.value = "";
-      ui.input.focus();
-    } else {
-      const info = await request("/api/terminals", "POST", { cwd: fields.cwd, cols: 80, rows: 24 });
-      attachTerminal(info);
-      dialog.close();
+      discardSetup(ui, acceptSessionResponse(view, startedAt));
+    } catch (error) { showError(ui.error, error); }
+    finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
+  });
+  drafts.set(ui.id, ui);
+  layout();
+  refreshChoices();
+  return ui;
+}
+
+function sessionCard(record, action) {
+  const card = element("button", "session-card");
+  card.type = "button";
+  card.dataset.sessionId = String(record.id);
+  const heading = element("span", "session-card-heading");
+  heading.append(element("span", "session-card-name", record.name || "Agent"), element("span", "session-card-status", record.status || "idle"));
+  const cwd = element("span", "session-card-cwd", record.cwd || "");
+  cwd.title = record.cwd || "";
+  card.append(heading, cwd);
+  const task = record.entries?.find(entry => entry.kind === "user")?.text;
+  if (task) {
+    const excerpt = element("span", "session-card-task", task.replace(/\s+/g, " ").slice(0, 160));
+    excerpt.title = task;
+    card.append(excerpt);
+  }
+  card.title = action;
+  return card;
+}
+
+function focusedChoice(container) {
+  const focused = document.activeElement;
+  return container.contains(focused) ? focused.closest(".session-card")?.dataset.sessionId : null;
+}
+
+function restoreChoiceFocus(container, id) {
+  if (!id) return;
+  const card = [...container.querySelectorAll(".session-card")].find(card => card.dataset.sessionId === id);
+  if (card && !card.disabled) card.focus({ preventScroll: true });
+}
+
+function renderAgentChoices(ui, active, inactive) {
+  for (const [container, records, archived] of [[ui.active, active, false], [ui.inactive, inactive, true]]) {
+    const focused = focusedChoice(container);
+    container.replaceChildren();
+    if (!records.length) container.append(element("p", "session-empty", "None"));
+    for (const record of records) {
+      const card = sessionCard(record, archived ? "Reopen paused with history" : "Focus existing agent");
+      card.disabled = record.status === "ending" || (archived && !record.archived);
+      card.addEventListener("click", async () => {
+        if (ui.busy) return;
+        ui.busy = true;
+        card.disabled = true;
+        ui.close.disabled = true;
+        ui.error.hidden = true;
+        try {
+          const startedAt = catalogRevision;
+          const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen" : ""}`, archived ? "POST" : "GET");
+          const attached = sessions.has(String(view.id));
+          const agent = acceptSessionResponse(view, startedAt);
+          if (archived || !attached) discardSetup(ui, agent);
+          else { discardSetup(ui); focusSession(agent); }
+        } catch (error) { showError(ui.error, error); refreshChoices(); }
+        finally { ui.busy = false; card.disabled = false; ui.close.disabled = false; }
+      });
+      container.append(card);
     }
-  } catch (error) { showError(createError, error); }
-  finally { createButton.disabled = false; }
+    restoreChoiceFocus(container, focused);
+  }
+}
+
+function refreshChoices() {
+  const version = ++choicesVersion;
+  clearTimeout(choicesTimer);
+  if (!drafts.size) return;
+  choicesTimer = setTimeout(async () => {
+    try {
+      const [active, inactive] = await Promise.all([
+        request("/api/sessions"), request("/api/sessions/archived"),
+      ]);
+      if (version !== choicesVersion) return;
+      for (const ui of drafts.values()) {
+        renderAgentChoices(ui, active, inactive);
+      }
+    } catch (error) {
+      if (version !== choicesVersion) return;
+      for (const ui of drafts.values()) showError(ui.error, error);
+    }
+  }, 40);
+}
+
+document.querySelector("#add-agent").addEventListener("click", () => {
+  const ui = addSetup();
+  ui.form.elements.name.focus();
+});
+document.querySelector("#add-terminal").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  workspaceError.hidden = true;
+  try {
+    const info = await request("/api/terminals", "POST", { cols: 80, rows: 24 });
+    attachTerminal(info);
+  } catch (error) { showError(workspaceError, error); }
+  finally { button.disabled = false; }
 });
 
 function requireLogin() {
@@ -950,16 +1280,11 @@ async function connect(token) {
   const config = await request("/api/config");
   login.hidden = true;
   workspaceError.hidden = true;
-  createForm.elements.cwd.value ||= config.cwd || "";
+  loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
   startEvents();
-  const list = await request("/api/terminals");
-  for (const info of list) {
-    const existing = terminals.get(String(info.id));
-    if (existing) { existing.setName(info.name); existing.reconnect(); }
-    else attachTerminal(info);
-  }
+  for (const ui of terminals.values()) ui.reconnect();
 }
 
 login.addEventListener("submit", async event => {
@@ -993,7 +1318,7 @@ document.addEventListener("keydown", async event => {
     closeModelPicker(picker);
     return;
   }
-  if (!event.defaultPrevented && !event.isComposing && !dialog.open && !picker
+  if (!event.defaultPrevented && !event.isComposing && !picker
       && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1
       && !event.target.closest("input, textarea, [contenteditable], .model-picker")) {
     const selection = window.getSelection();
@@ -1008,7 +1333,7 @@ document.addEventListener("keydown", async event => {
       return;
     }
   }
-  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented || dialog.open) return;
+  if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
   const ui = [...sessions.values()].find(ui => ui.pane === selected);
   if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
   event.preventDefault();
@@ -1021,6 +1346,9 @@ document.addEventListener("keydown", async event => {
   catch (error) { showError(ui.error, error); }
   finally { ui.interrupting = false; }
 });
+setInterval(() => {
+  for (const ui of sessions.values()) if (ui.view?.status === "working") updateActivity(ui);
+}, 1000);
 initialize();
 window.addEventListener("resize", layout, { passive: true });
 layout();
