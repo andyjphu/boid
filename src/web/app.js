@@ -148,6 +148,73 @@ function makePane(name, cwd, kind, id) {
   return { pane, header, tab, title, status, directory, error, close };
 }
 
+function enablePaneRename(ui, kind) {
+  ui.title.title = "Double-click or press F2 to rename";
+  ui.title.tabIndex = 0;
+  ui.setName = name => {
+    ui.nameRevision = (ui.nameRevision || 0) + 1;
+    ui.name = name || ui.id;
+    ui.title.textContent = ui.name;
+    ui.pane.setAttribute("aria-label", ui.name);
+    ui.close.setAttribute("aria-label", `Close ${ui.name}`);
+    if (ui.view) ui.view.name = ui.name;
+    if (ui.input) ui.input.setAttribute("aria-label", `Message ${ui.name}`);
+  };
+  ui.setName(ui.title.textContent);
+  let editing = false;
+  function rename() {
+    if (editing) return;
+    editing = true;
+    const input = element("input", "pane-name-input");
+    input.type = "text";
+    input.value = ui.name;
+    input.maxLength = 128;
+    input.size = Math.max(4, Math.min(24, ui.name.length + 2));
+    input.setAttribute("aria-label", kind === "agent" ? "Agent name" : "Terminal name");
+    ui.title.hidden = true;
+    ui.title.after(input);
+    let saving = false;
+    function finish() {
+      if (!editing) return;
+      editing = false;
+      input.remove();
+      ui.title.hidden = false;
+    }
+    input.addEventListener("keydown", async event => {
+      if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") { finish(); ui.title.focus({ preventScroll: true }); return; }
+      if (saving) return;
+      const name = input.value.trim();
+      if (!name) { input.select(); return; }
+      saving = true;
+      input.disabled = true;
+      const revision = ui.nameRevision;
+      try {
+        const summary = await request(`/api/${kind === "agent" ? "sessions" : "terminals"}/${encodeURIComponent(ui.id)}`, "PATCH", { name });
+        // A newer catalog event takes precedence over a delayed PATCH response.
+        if (ui.nameRevision === revision) ui.setName(summary.name);
+        ui.error.hidden = true;
+        finish();
+        ui.title.focus({ preventScroll: true });
+      } catch (error) {
+        saving = false;
+        input.disabled = false;
+        showError(ui.error, error);
+        input.focus({ preventScroll: true });
+      }
+    });
+    input.addEventListener("blur", () => { if (!saving) finish(); });
+    input.focus({ preventScroll: true });
+    input.select();
+  }
+  ui.title.addEventListener("dblclick", rename);
+  ui.title.addEventListener("keydown", event => {
+    if (event.key === "F2") { event.preventDefault(); rename(); }
+  });
+}
+
 function reportUnsavedEnd(result) {
   if (result.persisted === false) {
     showError(workspaceError, "The agent ended, but storage failed. Its final state could not be saved.");
@@ -413,6 +480,7 @@ function addSession(view) {
   ui.view = view;
   for (const message of view.communications || []) communications.set(message.id, message);
   ui.id = id;
+  enablePaneRename(ui, "agent");
   ui.entries = new Map();
   ui.pending = new Set(view.pending || []);
   ui.follow = true;
@@ -1073,7 +1141,7 @@ function snapshot(views, terminalViews = []) {
     updateContextUsage(ui);
     const follow = ui.follow;
     rememberPosition(ui);
-    ui.title.textContent = view.name || String(view.id);
+    ui.setName(view.name || String(view.id));
     ui.directory.textContent = view.cwd;
     ui.directory.title = view.cwd;
     const present = new Set();
@@ -1120,7 +1188,7 @@ function startEvents() {
       const revision = ++catalogRevision;
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
-      if (["session", "closed", "status"].includes(message.type)) refreshChoices();
+      if (["session", "closed", "status", "name"].includes(message.type)) refreshChoices();
       if (message.type === "session") {
         addSession(message.session);
         refreshPeerEntries(String(message.session.id));
@@ -1140,6 +1208,7 @@ function startEvents() {
         return;
       }
       if (!ui) return;
+      if (message.type === "name") { ui.setName(message.name); return; }
       if (message.type === "context_usage") {
         ui.view.context_usage = message.context_usage;
         ui.view.context_window = message.context_window;
@@ -1178,66 +1247,7 @@ function attachTerminal(info) {
   if (terminals.has(id)) return terminals.get(id);
   const ui = makePane(info.name || "#?", info.cwd, "terminal", id);
   ui.id = id;
-  ui.title.title = "Double-click or press F2 to rename";
-  ui.title.tabIndex = 0;
-  function setName(name) {
-    ui.name = name || "#?";
-    ui.title.textContent = ui.name;
-    ui.pane.setAttribute("aria-label", ui.name);
-    ui.close.setAttribute("aria-label", `Close ${ui.name}`);
-  }
-  setName(info.name);
-  ui.setName = setName;
-  let editing = false;
-  function rename() {
-    if (editing) return;
-    editing = true;
-    const input = element("input", "pane-name-input");
-    input.type = "text";
-    input.value = ui.name;
-    input.maxLength = 128;
-    input.size = Math.max(4, Math.min(24, ui.name.length + 2));
-    input.setAttribute("aria-label", "Terminal name");
-    ui.title.hidden = true;
-    ui.title.after(input);
-    let saving = false;
-    function finish() {
-      if (!editing) return;
-      editing = false;
-      input.remove();
-      ui.title.hidden = false;
-    }
-    input.addEventListener("keydown", async event => {
-      if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.key === "Escape") { finish(); ui.title.focus({ preventScroll: true }); return; }
-      if (saving) return;
-      const name = input.value.trim();
-      if (!name) { input.select(); return; }
-      saving = true;
-      input.disabled = true;
-      try {
-        const summary = await request(`/api/terminals/${encodeURIComponent(id)}`, "PATCH", { name });
-        setName(summary.name);
-        ui.error.hidden = true;
-        finish();
-        ui.title.focus({ preventScroll: true });
-      } catch (error) {
-        saving = false;
-        input.disabled = false;
-        showError(ui.error, error);
-        input.focus({ preventScroll: true });
-      }
-    });
-    input.addEventListener("blur", () => { if (!saving) finish(); });
-    input.focus({ preventScroll: true });
-    input.select();
-  }
-  ui.title.addEventListener("dblclick", rename);
-  ui.title.addEventListener("keydown", event => {
-    if (event.key === "F2") { event.preventDefault(); rename(); }
-  });
+  enablePaneRename(ui, "terminal");
   const close = ui.close;
   const host = element("div", "terminal-host");
   ui.pane.append(host, ui.error);
@@ -1293,7 +1303,7 @@ function attachTerminal(info) {
           return;
         }
         const message = JSON.parse(event.data);
-        if (message.type === "name") setName(message.name);
+        if (message.type === "name") ui.setName(message.name);
         if (message.type === "hello") clientId = message.id;
         if (message.type === "replay_start") {
           replaying = true;
@@ -1370,7 +1380,7 @@ function attachTerminal(info) {
   ui.update = latest => {
     if (!latest.running || latest.archived) { ui.dispose(); return; }
     info = latest;
-    setName(info.name);
+    ui.setName(info.name);
     ui.directory.textContent = info.cwd || "";
     ui.directory.title = (info.cwd || "") + (info.running && info.cwd_observed === false ? " (last known directory)" : "");
     ui.status.textContent = "";
@@ -1393,8 +1403,9 @@ function attachTerminal(info) {
 }
 
 const agentDefaults = {
-  name: "canary", cwd: "",
+  name: "", cwd: "",
 };
+let agentNames = [];
 let choicesVersion = 0;
 let choicesTimer;
 
@@ -1438,6 +1449,18 @@ function addSetup(saved) {
     input.name = key;
     input.value = values[key];
     input.placeholder = agentDefaults[key];
+    if (key === "name") {
+      input.maxLength = 128;
+      const suggestions = element("datalist");
+      suggestions.id = `agent-names-${ui.id}`;
+      for (const name of agentNames) {
+        const option = element("option");
+        option.value = name;
+        suggestions.append(option);
+      }
+      input.setAttribute("list", suggestions.id);
+      wrapper.append(suggestions);
+    }
     input.addEventListener("input", rememberPaneOrder);
     wrapper.append(input);
     ui.form.append(wrapper);
@@ -1462,7 +1485,9 @@ function addSetup(saved) {
     try {
       const startedAt = catalogRevision;
       const fields = Object.fromEntries(new FormData(ui.form));
-      for (const [key, value] of Object.entries(agentDefaults)) fields[key] ||= value;
+      fields.cwd ||= agentDefaults.cwd;
+      // Empty names are allocated atomically by the server, including concurrent creation.
+      fields.name = fields.name.trim();
       const view = await request("/api/sessions", "POST", fields);
       discardSetup(ui, acceptSessionResponse(view, startedAt));
     } catch (error) { showError(ui.error, error); }
@@ -1540,11 +1565,13 @@ function refreshChoices() {
   if (!drafts.size) return;
   choicesTimer = setTimeout(async () => {
     try {
-      const [active, inactive] = await Promise.all([
-        request("/api/sessions"), request("/api/sessions/archived"),
+      const [active, inactive, config] = await Promise.all([
+        request("/api/sessions"), request("/api/sessions/archived"), request("/api/config"),
       ]);
       if (version !== choicesVersion) return;
+      agentDefaults.name = config.next_agent_name;
       for (const ui of drafts.values()) {
+        ui.form.elements.name.placeholder = agentDefaults.name;
         renderAgentChoices(ui, active, inactive);
       }
     } catch (error) {
@@ -1752,6 +1779,8 @@ async function connect(token) {
   login.hidden = true;
   workspaceError.hidden = true;
   agentDefaults.cwd = config.cwd;
+  agentDefaults.name = config.next_agent_name;
+  agentNames = config.agent_names;
   for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = config.cwd;
   loadPaneOrder(config.cwd);
   document.querySelector("#add-agent").disabled = false;

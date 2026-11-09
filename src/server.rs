@@ -110,7 +110,10 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/sessions", get(sessions).post(create))
         .route("/api/sessions/archived", get(archived_sessions))
         .route("/api/sessions/{id}/reopen", post(reopen_session))
-        .route("/api/sessions/{id}", get(session).delete(close_session))
+        .route(
+            "/api/sessions/{id}",
+            get(session).patch(rename_session).delete(close_session),
+        )
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/skills", get(skill_catalog))
         .route("/api/sessions/{id}/stop", post(stop))
@@ -262,6 +265,22 @@ async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<
 async fn close_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let persisted = app.hub.close(&id).await.map_err(invalid)?;
     Ok(Json(json!({"status":"closed", "persisted":persisted})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    name: String,
+}
+async fn rename_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<Rename>,
+) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.rename(&id, input.name))
+        .await
+        .map_err(invalid)?
+        .map(|view| Json(json!(view)))
+        .map_err(invalid)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
