@@ -64,7 +64,7 @@ pub fn definitions() -> Value {
         ),
         definition(
             "list_agents",
-            "List sessions and their current status. A working status does not establish task completion.",
+            "List open sessions, their current status, and whether they are listening for peer messages. Idle listening agents need no greeting. A working status does not establish task completion.",
             &[]
         ),
         definition(

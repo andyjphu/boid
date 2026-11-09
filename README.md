@@ -30,6 +30,12 @@ conversations. `boid serve` runs in the foreground for debugging. New panes use
 the directory where `boid` was invoked; existing agents keep their directories.
 State and background server logs live under `~/.local/share/boid` by default.
 
+After a restart, idle agents return ready for peer messages without a greeting.
+Explicitly stopped agents and interrupted or failed work remain paused until
+operator input. Already accepted peer messages can run after recovery; simply
+restoring an idle agent does not start a model request. `list_agents` reports
+whether each open agent is listening. Browser reloads do not change availability.
+
 Agent panes render the complete retained transcript. Temporary transcript
 culling is disabled; full transcript virtualization remains v2 work.
 

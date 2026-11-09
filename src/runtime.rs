@@ -111,8 +111,68 @@ struct Record {
     order: u64,
     stop_through: u64,
     paused: bool,
+    // None identifies records saved before restart availability was persisted.
+    #[serde(default)]
+    listen_on_restart: Option<bool>,
     stream_seq: u64,
 }
+impl Record {
+    fn restart_listening(&self) -> bool {
+        if self.view.archived
+            || matches!(self.view.status.as_str(), "working" | "error" | "ending")
+            || !self.inputs.is_empty()
+        {
+            return false;
+        }
+        if let Some(listen) = self.listen_on_restart {
+            return listen;
+        }
+        // Legacy shutdown and recovery both set paused, so inspect the last
+        // recorded operator boundary instead of treating every pause as Stop.
+        if self.stop_through > 0 && self.order == self.stop_through {
+            return false;
+        }
+        for entry in self.view.entries.iter().rev() {
+            match entry.kind.as_str() {
+                "user" | "assistant" => return true,
+                "error" => return false,
+                "context"
+                    if entry.text == "Stop the current task. Wait for new user direction." =>
+                {
+                    return false;
+                }
+                "notice"
+                    if entry.text.starts_with("Execution interrupted.")
+                        || entry.text.starts_with("The model request was interrupted;")
+                        || entry.text.starts_with("Compaction interrupted;") =>
+                {
+                    return false;
+                }
+                "tool_result" => {
+                    let error = entry
+                        .text
+                        .split_once('\n')
+                        .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())
+                        .and_then(|value| {
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        });
+                    if error.as_deref().is_some_and(|error| {
+                        error.starts_with("Interrupted.")
+                            || error == "Not executed because the turn was interrupted."
+                    }) {
+                        return false;
+                    }
+                }
+                _ => (),
+            }
+        }
+        true
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Delta {
     seq: u64,
@@ -229,6 +289,7 @@ impl Hub {
             #[cfg(test)]
             skill_scan_gate: Mutex::new(None),
         }));
+        let mut restored_records = Vec::new();
         for mut record in records {
             if let Some(id) = &record.engine.skill_snapshot {
                 record.engine.skills = hub.0.store.load_skills(id)?;
@@ -255,7 +316,9 @@ impl Hub {
                 record.view.entries.push(Self::make_entry(&kind, text));
             }
             // Completed API items survive; unresolved side effects must not replay.
-            for (kind, text) in record.engine.recover() {
+            let recovery = record.engine.recover();
+            let listen = recovery.is_empty() && record.restart_listening();
+            for (kind, text) in recovery {
                 record.view.entries.push(Self::make_entry(&kind, text));
             }
             record.view.profile = record.engine.profile.clone();
@@ -263,16 +326,26 @@ impl Hub {
                 record.view.profile = json!({});
             }
             record.view.profile["model"] = json!(record.engine.model);
-            record.paused = true;
+            record.paused = !listen;
+            record.listen_on_restart = Some(listen);
             record.view.working_since_ms = None;
             record.view.status = if record.view.archived {
                 "archived"
+            } else if listen {
+                "idle"
             } else {
                 "stopped"
             }
             .into();
             hub.save_record(&record.view.id.clone(), &mut record)?;
-            hub.install(record, false)?;
+            restored_records.push(record);
+        }
+        // Install the complete roster before any restored worker can run.
+        {
+            let mut data = hub.0.data.lock().unwrap();
+            for record in restored_records {
+                hub.install_locked(&mut data, record, false)?;
+            }
         }
         Ok(hub)
     }
@@ -299,6 +372,7 @@ impl Hub {
             bail!("Duplicate persisted session ID: {id}");
         }
         let archived = record.view.archived;
+        let pending_peers = !record.paused && !record.inbox.is_empty();
         data.sessions.insert(
             id.clone(),
             Handle {
@@ -324,6 +398,9 @@ impl Hub {
                     .await;
             });
             data.sessions.get_mut(&id).unwrap().task = Some(task);
+            if pending_peers {
+                data.sessions[&id].wake.notify_one();
+            }
         }
         Ok(())
     }
@@ -502,6 +579,7 @@ impl Hub {
             let message = format!("Session persistence failed; execution stopped: {error:#}");
             handle.storage_error = Some(message.clone());
             handle.record.paused = true;
+            handle.record.listen_on_restart = Some(false);
             handle.record.view.status = "error".into();
             handle.record.view.working_since_ms = None;
             handle.halt.send_replace(());
@@ -599,6 +677,7 @@ impl Hub {
             let message = format!("Session persistence failed; execution stopped: {error:#}");
             handle.storage_error = Some(message.clone());
             handle.record.paused = true;
+            handle.record.listen_on_restart = Some(false);
             handle.record.view.status = "error".into();
             handle.record.view.working_since_ms = None;
             handle.halt.send_replace(());
@@ -775,6 +854,7 @@ impl Hub {
             order: 0,
             stop_through: 0,
             paused: false,
+            listen_on_restart: Some(true),
             stream_seq: 0,
         };
         {
@@ -884,6 +964,7 @@ impl Hub {
             r.view.entries.push(entry.clone());
             r.view.pending.push(message_id.clone());
             r.paused = false;
+            r.listen_on_restart = Some(true);
             Ok(())
         })?;
         self.0.data.lock().unwrap().sessions[id].wake.notify_one();
@@ -895,6 +976,7 @@ impl Hub {
                 bail!("Session has ended.");
             }
             r.paused = r.inputs.iter().all(|input| input.order <= r.stop_through);
+            r.listen_on_restart = Some(!r.paused);
             Ok(())
         })?;
         self.0.data.lock().unwrap().sessions[id]
@@ -910,6 +992,7 @@ impl Hub {
             r.order += 1;
             r.stop_through = r.order;
             r.paused = true;
+            r.listen_on_restart = Some(false);
             Ok(r.order)
         })?;
         self.0.data.lock().unwrap().sessions[id]
@@ -926,6 +1009,7 @@ impl Hub {
             r.view.archived = true;
             r.view.status = "ending".into();
             r.paused = true;
+            r.listen_on_restart = Some(false);
             r.order += 1;
             r.stop_through = r.order;
             let users = r.inputs.len();
@@ -1074,6 +1158,7 @@ impl Hub {
         record.view.status = "stopped".into();
         record.view.working_since_ms = None;
         record.paused = true;
+        record.listen_on_restart = Some(false);
         self.save_record(id, &mut record)?;
         data.sessions.remove(id);
         drop(data);
@@ -1081,10 +1166,16 @@ impl Hub {
         Ok(self.view(id).unwrap())
     }
     pub fn peers(&self) -> Value {
+        let data = self.0.data.lock().unwrap();
         json!(
-            self.views()
-                .iter()
-                .map(|v| json!({"id":v.id,"name":v.name,"status":v.status,"cwd":v.cwd}))
+            data.sessions
+                .values()
+                .filter(|h| !h.record.view.archived)
+                .map(|h| {
+                    let v = &h.record.view;
+                    json!({"id":v.id,"name":v.name,"status":v.status,"cwd":v.cwd,
+                "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error"})
+                })
                 .collect::<Vec<_>>()
         )
     }
@@ -1546,6 +1637,7 @@ impl Hub {
                     let _ = self.update(&id, |r| {
                         r.engine = session.clone();
                         r.paused = true;
+                        r.listen_on_restart = Some(false);
                         Ok(())
                     });
                     self.entry(&id, "error", format!("{error:#}"));
