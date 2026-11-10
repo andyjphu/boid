@@ -58,7 +58,7 @@ const root = path.resolve(__dirname, '../src/web');
     await page.goto('http://boid.test');
     await page.waitForFunction(() => window.testEvents);
     await page.evaluate(() => snapshot([{ id: 'agent', name: 'canary', cwd: '/tmp', status: 'idle', entries: [], pending: [], profile: { billing_route: 'api_key', model: 'first' } }], []));
-    assert.equal(await page.locator('.billing-route').isVisible(), false);
+    assert.equal(await page.locator('.billing-route').count(), 0);
     assert.equal(await page.locator('#open-accounts, #accounts-dialog').count(), 0);
     const composer = page.locator('[data-pane-key="agent:agent"] textarea');
     async function command() {
@@ -81,7 +81,7 @@ const root = path.resolve(__dirname, '../src/web');
     assert.equal(await composer.isVisible(), true);
     assert.equal(profiles.agent.billing_route, 'chatgpt'); assert.equal(profiles.other.billing_route, 'api_key');
     assert.equal(status.billing_route, 'api_key', 'Pane selection must not change the default');
-    assert.equal(await page.locator('.billing-route').isVisible(), true);
+    assert.equal(await page.locator('.billing-route').count(), 0);
     await composer.fill('/model'); await composer.press('Enter');
     await page.getByRole('option', { name: 'Second model', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.model-picker').hidden);

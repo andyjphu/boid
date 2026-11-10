@@ -45,8 +45,7 @@ could not be confirmed, disconnect Boid in ChatGPT settings too.
 
 ## Limits and recovery
 
-**Using ChatGPT plan** appears next to plan-agent composers. Limits and credits
-are available in [ChatGPT usage settings](https://chatgpt.com/settings/usage). Diagnostics retain
+Limits and credits are available in [ChatGPT usage settings](https://chatgpt.com/settings/usage). Diagnostics retain
 token counts but do not assign API dollar estimates to plan requests.
 
 A usage-limit error pauses further requests for that account. Review usage,

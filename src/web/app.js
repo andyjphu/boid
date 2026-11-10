@@ -375,7 +375,6 @@ function closeModelPicker(ui) {
 
 function updateProfile(ui, profile, contextWindow = ui.view.context_window) {
   ui.view.profile = profile; ui.view.context_window = contextWindow;
-  ui.billingLabel.hidden = profile?.billing_route !== "chatgpt";
   updateContextUsage(ui);
 }
 async function openModelPicker(ui) {
@@ -628,9 +627,6 @@ function addSession(view) {
   });
   ui.contextLabel = element("span", "context-usage");
   ui.composer.append(ui.input, ui.contextLabel);
-  ui.billingLabel = element("span", "billing-route", "Using ChatGPT plan");
-  ui.billingLabel.hidden = view.profile?.billing_route !== "chatgpt";
-  ui.composer.append(ui.billingLabel);
   ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
