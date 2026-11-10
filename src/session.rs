@@ -248,6 +248,15 @@ impl Session {
     pub fn has_pending_tools(&self) -> bool {
         !self.pending.is_empty()
     }
+    pub fn clear_context(&mut self) {
+        self.history.clear();
+        self.partial_text.clear();
+        self.context_usage = None;
+        self.compact_requested = false;
+        self.compact_resume = false;
+        self.compact_in_flight = false;
+        self.request_in_flight = false;
+    }
     pub fn request_compaction(&mut self, resume: bool) {
         if !self.compact_requested {
             self.compact_resume = resume;

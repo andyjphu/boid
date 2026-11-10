@@ -660,3 +660,230 @@ async fn browser_fixture() {
     crate::server::serve_client(client).await.unwrap();
     mock.abort();
 }
+
+#[tokio::test]
+async fn restart_restores_listening_without_greetings_and_preserves_stop() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, _rx, server) = fixture(Some(state.path().into())).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    let ready = agent(&hub, work.path(), "ready", "");
+    let stopped = agent(&hub, work.path(), "stopped", "");
+    hub.stop(&stopped.id).unwrap();
+    wait_status(&hub, &stopped.id, "stopped").await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert_eq!(hub.view(&ready.id).unwrap().status, "idle");
+    let roster = hub.peers();
+    assert_eq!(roster.as_array().unwrap().len(), 3);
+    assert_eq!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == ready.id)
+            .unwrap()["listening"],
+        true
+    );
+    assert_eq!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == stopped.id)
+            .unwrap()["listening"],
+        false
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
+    let receipt = send(
+        &hub,
+        &sender,
+        &ready,
+        "Peer contact after restart",
+        Urgency::Regular,
+        "after-restart",
+    );
+    assert_eq!(receipt["blocked"], false);
+    let (request, release) = next(&mut rx).await;
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("Peer contact after restart")
+    );
+    assert!(
+        !hub.view(&ready.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.kind == "user")
+    );
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &ready.id, "idle").await;
+    for (urgency, call) in [
+        (Urgency::Regular, "regular-stop"),
+        (Urgency::Emergency, "urgent-stop"),
+    ] {
+        assert_eq!(
+            send(&hub, &sender, &stopped, "Wait for operator", urgency, call)["blocked"],
+            true
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(hub.view(&stopped.id).unwrap().status, "stopped");
+    hub.message(&stopped.id, "Resume explicitly".into())
+        .unwrap();
+    let (urgent, release) = next(&mut rx).await;
+    assert!(urgent["input"].to_string().contains("(emergency)"));
+    assert!(!urgent["input"].to_string().contains("Resume explicitly"));
+    release.send(json!([])).unwrap();
+    let (regular, release) = next(&mut rx).await;
+    assert!(regular["input"].to_string().contains("(regular)"));
+    assert!(regular["input"].to_string().contains("Resume explicitly"));
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &stopped.id, "idle").await;
+    assert_eq!(
+        hub.peers()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == stopped.id)
+            .unwrap()["listening"],
+        true
+    );
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+}
+
+#[tokio::test]
+async fn restart_delivers_previously_accepted_peer_after_complete_roster_install() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, _rx, server) = fixture(Some(state.path().into())).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    let target = agent(&hub, work.path(), "target", "");
+    // No await between durable acceptance and shutdown: the worker has not run.
+    send(
+        &hub,
+        &sender,
+        &target,
+        "Accepted before shutdown",
+        Urgency::Regular,
+        "queued-restart",
+    );
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let (request, release) = next(&mut rx).await;
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("Accepted before shutdown")
+    );
+    release
+        .send(json!([call("roster", "list_agents", json!({}))]))
+        .unwrap();
+    let (request, release) = next(&mut rx).await;
+    let result = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["type"] == "function_call_output" && v["call_id"] == "roster")
+        .unwrap();
+    let peers: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+    assert_eq!(peers.as_array().unwrap().len(), 2);
+    assert!(
+        peers
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["listening"] == true)
+    );
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_boundaries() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, _rx, server) = fixture(Some(state.path().into())).await;
+    let ready = agent(&hub, work.path(), "legacy idle", "");
+    let stopped = agent(&hub, work.path(), "legacy stopped", "");
+    let interrupted = agent(&hub, work.path(), "legacy interrupted", "");
+    let recovered = agent(&hub, work.path(), "legacy recovered", "");
+    let failed = agent(&hub, work.path(), "legacy failed", "");
+    hub.stop(&stopped.id).unwrap();
+    wait_status(&hub, &stopped.id, "stopped").await;
+    hub.interrupt(&interrupted.id).unwrap();
+    wait_status(&hub, &interrupted.id, "stopped").await;
+    hub.entry(
+        &recovered.id,
+        "notice",
+        "The model request was interrupted; no unfinished tool call was executed.",
+    );
+    hub.entry(&failed.id, "error", "Provider failed");
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    // Model the old binary's indistinguishable stopped/paused restart state.
+    for view in [&ready, &stopped, &interrupted, &recovered, &failed] {
+        let path = state
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", view.id));
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record.as_object_mut().unwrap().remove("listen_on_restart");
+        record["paused"] = json!(true);
+        record["view"]["status"] = json!("stopped");
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert_eq!(hub.view(&ready.id).unwrap().status, "idle");
+    for view in [&stopped, &interrupted, &recovered, &failed] {
+        assert_eq!(
+            hub.view(&view.id).unwrap().status,
+            "stopped",
+            "{}",
+            view.name
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
+    let sender = agent(&hub, work.path(), "sender", "");
+    send(
+        &hub,
+        &sender,
+        &ready,
+        "No greeting required",
+        Urgency::Regular,
+        "legacy-contact",
+    );
+    let (request, release) = next(&mut rx).await;
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("No greeting required")
+    );
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &ready.id, "idle").await;
+    hub.shutdown().await;
+    server.abort();
+}

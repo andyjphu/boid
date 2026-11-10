@@ -95,6 +95,120 @@ fn create(hub: &Hub, work: &std::path::Path, message: &str) -> View {
 }
 
 #[tokio::test]
+async fn clear_waits_for_tools_preserves_transcript_and_starts_fresh_after_restart() {
+    let mut mock = Mock::new().await;
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    let view = create(&hub, work.path(), "Old task marker");
+    let (_, _, release) = mock.request().await;
+    let clear_id = hub.message(&view.id, "/clear".into()).unwrap();
+    release.send((StatusCode::OK, json!([
+        {"type":"function_call","call_id":"roster-before-clear","name":"list_agents","arguments":"{}"}
+    ]))).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    let cleared = engine(&hub, &view.id);
+    assert_eq!(cleared["history"], json!([]));
+    assert_eq!(cleared["model_requests"], 1);
+    assert!(cleared["context_usage"].is_null());
+    assert!(mock.requests.try_recv().is_err());
+    let saved = hub.view(&view.id).unwrap();
+    assert!(
+        saved
+            .entries
+            .iter()
+            .any(|e| e.text.contains("Old task marker"))
+    );
+    assert!(
+        saved
+            .entries
+            .iter()
+            .any(|e| e.kind == "tool_result" && e.text.contains("roster-before-clear"))
+    );
+    assert!(
+        saved
+            .entries
+            .iter()
+            .any(|e| e.text.starts_with("Context cleared."))
+    );
+    let archive: Value = serde_json::from_slice(
+        &std::fs::read(
+            state
+                .path()
+                .join(format!("sessions/clears/{}-{clear_id}.json", view.id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        archive["engine"]["history"]
+            .to_string()
+            .contains("Old task marker")
+    );
+    assert!(
+        archive["engine"]["history"]
+            .to_string()
+            .contains("function_call_output")
+    );
+    hub.shutdown().await;
+    drop(hub);
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    assert_eq!(engine(&hub, &view.id)["history"], json!([]));
+    hub.message(&view.id, "Fresh task marker".into()).unwrap();
+    let (path, request, release) = mock.request().await;
+    assert_eq!(path, "/");
+    assert!(request["input"].to_string().contains("Fresh task marker"));
+    assert!(!request["input"].to_string().contains("Old task marker"));
+    assert!(!request["input"].to_string().contains("/clear"));
+    assert!(request["instructions"].as_str().unwrap().contains(&view.id));
+    assert!(request["instructions"].as_str().unwrap().contains("canary"));
+    assert_eq!(request["tools"], cleared["tools"]);
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["model_requests"], 2);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn clear_archive_failure_keeps_context_and_queued_input() {
+    let mut mock = Mock::new().await;
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    let view = create(&hub, work.path(), "Original context");
+    let (_, _, release) = mock.request().await;
+    std::fs::write(
+        state.path().join("sessions/clears"),
+        "block archive directory",
+    )
+    .unwrap();
+    hub.message(&view.id, "/clear".into()).unwrap();
+    hub.message(&view.id, "New queued task".into()).unwrap();
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &view.id, "error").await;
+    assert!(
+        engine(&hub, &view.id)["history"]
+            .to_string()
+            .contains("Original context")
+    );
+    assert_eq!(hub.view(&view.id).unwrap().pending.len(), 2);
+    assert!(mock.requests.try_recv().is_err());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
 async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     let mut mock = Mock::new().await;
     let state = tempfile::tempdir().unwrap();

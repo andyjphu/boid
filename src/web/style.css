@@ -192,10 +192,11 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .model-picker:focus, .model-option:focus { outline: none; }
 .model-heading { margin-bottom: 6px; }
 .model-option { padding: 3px 4px; cursor: pointer; }
-.model-option[aria-selected="true"], .slash-suggestion { background: #292929; }
+.model-option[aria-selected="true"], .slash-option[aria-selected="true"] { background: #292929; }
 .model-option[aria-disabled="true"] { color: #888; cursor: default; }
 .model-hint { color: #888; margin-top: 6px; }
-.slash-suggestion { cursor: pointer; }
+.slash-option { padding: 3px 4px; cursor: pointer; }
+.slash-option:hover { background: #292929; }
 .working-status { flex-shrink: 0; height: calc(1.5em + 4px); line-height: 1.5; white-space: nowrap; overflow: hidden; padding: 0 4px 4px; color: #999; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .agent-pane:not([data-status="working"]) .working-status { visibility: hidden; }
 .agent-pane[data-status="working"] .pane-title, .working-label {
