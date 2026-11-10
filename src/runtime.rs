@@ -561,6 +561,11 @@ impl Hub {
         }
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
+        // Connection selection belongs to the record, not an older worker clone.
+        next.engine.profile = next.view.profile.clone();
+        if let Some(model) = next.view.profile["model"].as_str() {
+            next.engine.model = model.to_owned();
+        }
         next.view.working_since_ms = if next.view.status == "working" {
             let previous = if handle.record.view.status == "working" {
                 handle.record.view.working_since_ms
@@ -601,6 +606,12 @@ impl Hub {
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         let mut events = vec![];
+        if current.view.profile != previous.view.profile {
+            events.push(
+                json!({"type":"profile","session_id":id,"profile":current.view.profile,
+                "context_window":crate::api::context_window(&current.engine.model)}),
+            );
+        }
         if current.view.name != previous.view.name {
             events.push(json!({"type":"name","session_id":id,"name":current.view.name}));
         }
@@ -924,6 +935,37 @@ impl Hub {
             Ok(())
         })?;
         self.view(id).context("Unknown session.")
+    }
+    pub fn api_profile(&self) -> Value {
+        self.0.client.api_profile()
+    }
+    pub fn profile(&self, id: &str) -> Result<Value> {
+        let data = self.0.data.lock().unwrap();
+        Ok(data
+            .sessions
+            .get(id)
+            .context("Unknown session.")?
+            .record
+            .view
+            .profile
+            .clone())
+    }
+    pub fn select_profile(&self, id: &str, expected: &Value, profile: Value) -> Result<()> {
+        self.update(id, |record| {
+            if record.view.archived || record.view.status == "ending" {
+                bail!("Session has ended. Reopen its history first.");
+            }
+            if &record.view.profile != expected {
+                bail!("This agent's connection changed. Reopen the chooser and try again.");
+            }
+            if record.view.status == "working" || record.engine.request_in_flight()
+                || record.engine.has_pending_tools() || !record.inputs.is_empty()
+                || (!record.paused && !record.inbox.is_empty()) {
+                bail!("Wait for this agent to finish, or interrupt it before changing its connection or model.");
+            }
+            record.view.profile = profile;
+            Ok(())
+        })
     }
     pub fn identity(&self, id: &str) -> Result<String> {
         let data = self.0.data.lock().unwrap();

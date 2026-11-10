@@ -258,6 +258,18 @@ impl Auth {
         self.save(&store)?;
         Ok(welcome)
     }
+    pub async fn welcome(self: &Arc<Self>, id: &str) -> Result<bool> {
+        let _lock = self.lock().await?;
+        let mut store = self.load()?;
+        let account = store
+            .accounts
+            .get_mut(id)
+            .context("Unknown ChatGPT account.")?;
+        let welcome = !account.welcomed;
+        account.welcomed = true;
+        self.save(&store)?;
+        Ok(welcome)
+    }
     pub fn begin(&self, origin: &str, selected: Option<&str>, consent: bool) -> Result<String> {
         let origin =
             reqwest::Url::parse(origin).context("Open Boid through a 127.0.0.1 URL to sign in.")?;

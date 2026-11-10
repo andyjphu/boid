@@ -317,6 +317,11 @@ impl Session {
         hub: &Hub,
         id: &str,
     ) -> Result<bool> {
+        // /login and /model may update an idle agent while its worker waits.
+        self.profile = hub.profile(id)?;
+        if let Some(model) = self.profile["model"].as_str() {
+            self.model = model.to_owned();
+        }
         if self.compact_requested && self.pending.is_empty() {
             return self.compact(client, hub, id).await;
         }

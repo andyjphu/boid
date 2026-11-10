@@ -373,50 +373,45 @@ function closeModelPicker(ui) {
   ui.input.focus({ preventScroll: true });
 }
 
+function updateProfile(ui, profile, contextWindow = ui.view.context_window) {
+  ui.view.profile = profile; ui.view.context_window = contextWindow;
+  ui.billingLabel.hidden = profile?.billing_route !== "chatgpt";
+  updateContextUsage(ui);
+}
 async function openModelPicker(ui) {
-  ui.slashSuggestion.hidden = true;
-  ui.composer.hidden = true;
-  ui.modelPicker.hidden = false;
-  clearPromptSpaceWhenHidden(ui);
-  updateActivity(ui);
-  ui.modelAvailable = false;
-  ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), element("div", "model-hint", "Loading…"));
+  ui.slashSuggestion.hidden = true; ui.composer.hidden = true; ui.modelPicker.hidden = false;
+  clearPromptSpaceWhenHidden(ui); updateActivity(ui);
+  const generation = ui.modelGeneration = (ui.modelGeneration || 0) + 1;
+  ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model"), element("div", "model-hint", "Loading…"));
   ui.modelPicker.focus({ preventScroll: true });
   try {
-    const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}`);
-    ui.view = view;
-    const config = view.profile || { model: view.model };
-    if (ui.modelPicker.hidden) return;
-    if (config.billing_route === "chatgpt") {
-      ui.modelAvailable = true;
-      const usage = element("a", null, "Manage usage");
-      usage.href = "https://chatgpt.com/settings/usage"; usage.target = "_blank"; usage.rel = "noopener";
-      ui.modelPicker.replaceChildren(element("div", "model-heading", `${config.model} · ${config.reasoning_effort || "medium"}`),
-        element("div", "model-hint", "Using ChatGPT plan"), usage,
-        element("p", "model-hint", "Use /login to choose API or subscription access for new agents."));
-      return;
+    const [view, catalog] = await Promise.all([
+      request(`/api/sessions/${encodeURIComponent(ui.id)}`),
+      request(`/api/sessions/${encodeURIComponent(ui.id)}/models`),
+    ]);
+    if (ui.modelPicker.hidden || generation !== ui.modelGeneration) return;
+    updateProfile(ui, view.profile, view.context_window);
+    const choices = element("div", "model-options"); choices.setAttribute("role", "listbox"); choices.setAttribute("aria-label", "Model");
+    for (const model of catalog.models) {
+      const current = model.slug === view.profile.model;
+      const option = element("button", "model-option", model.display_name + (current ? " (current)" : ""));
+      option.type = "button"; option.setAttribute("role", "option"); option.setAttribute("aria-selected", String(current));
+      option.addEventListener("click", async () => {
+        if (ui.modelSaving) return;
+        ui.modelSaving = true; option.disabled = true;
+        try {
+          const result = await request(`/api/sessions/${encodeURIComponent(ui.id)}/model`, "POST", { model: model.slug });
+          updateProfile(ui, result.profile, result.context_window);
+          if (generation === ui.modelGeneration) closeModelPicker(ui);
+        } catch (error) { showError(ui.error, error); }
+        finally { ui.modelSaving = false; option.disabled = false; }
+      });
+      choices.append(option);
     }
-    ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
-      && config.cyber_access_program === "daybreak_blue";
-    const option = element("div", "model-option", "GPT-6 Sol · Medium · Daybreak" + (ui.modelAvailable ? " (current)" : ""));
-    option.tabIndex = 0;
-    option.setAttribute("role", "option");
-    option.setAttribute("aria-selected", String(ui.modelAvailable));
-    option.setAttribute("aria-disabled", String(!ui.modelAvailable));
-    option.addEventListener("click", () => { if (ui.modelAvailable) closeModelPicker(ui); });
-    const choices = element("div", "model-options");
-    choices.setAttribute("role", "listbox");
-    choices.setAttribute("aria-label", "Model and effort");
-    choices.append(option);
-    ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model and effort"), choices);
-    if (!ui.modelAvailable) {
-      const current = [config.model, config.reasoning_effort, config.cyber_access_program].filter(Boolean).join(" · ");
-      ui.modelPicker.append(element("div", "model-hint", `Current: ${current}. This session retains its original profile.`));
-    }
-    ui.modelPicker.append(element("div", "model-hint", "Enter select · Esc back"));
-    option.focus({ preventScroll: true });
+    ui.modelPicker.replaceChildren(element("div", "model-heading", "Select model"), choices);
+    (choices.querySelector('[aria-selected="true"]') || choices.firstElementChild)?.focus({ preventScroll: true });
   } catch (error) {
-    if (!ui.modelPicker.hidden) { closeModelPicker(ui); showError(ui.error, error); }
+    if (!ui.modelPicker.hidden && generation === ui.modelGeneration) { closeModelPicker(ui); showError(ui.error, error); }
   }
 }
 
@@ -554,8 +549,13 @@ function addSession(view) {
     if (["Escape", "Enter", "ArrowUp", "ArrowDown", "Tab"].includes(event.key)) {
       event.preventDefault();
       event.stopPropagation();
-      if (event.key === "Escape" || (event.key === "Enter" && ui.modelAvailable)) closeModelPicker(ui);
-      else ui.modelPicker.querySelector(".model-option")?.focus({ preventScroll: true });
+      if (event.key === "Escape") closeModelPicker(ui);
+      else {
+        const options = [...ui.modelPicker.querySelectorAll(".model-option")];
+        const current = options.indexOf(document.activeElement);
+        if (event.key === "Enter") options[current]?.click();
+        else options[(current + (event.key === "ArrowUp" || event.shiftKey ? -1 : 1) + options.length) % options.length]?.focus({ preventScroll: true });
+      }
     }
   });
   ui.slashSuggestion = element("div", "slash-suggestion");
@@ -628,11 +628,9 @@ function addSession(view) {
   });
   ui.contextLabel = element("span", "context-usage");
   ui.composer.append(ui.input, ui.contextLabel);
-  if (view.profile?.billing_route === "chatgpt") {
-    const billing = element("a", "billing-route", "Using ChatGPT plan · Manage usage");
-    billing.href = "https://chatgpt.com/settings/usage"; billing.target = "_blank"; billing.rel = "noopener";
-    ui.composer.append(billing);
-  }
+  ui.billingLabel = element("span", "billing-route", "Using ChatGPT plan");
+  ui.billingLabel.hidden = view.profile?.billing_route !== "chatgpt";
+  ui.composer.append(ui.billingLabel);
   ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
@@ -1300,7 +1298,7 @@ function snapshot(views, terminalViews = []) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
     ui.view = view;
-    updateContextUsage(ui);
+    updateProfile(ui, view.profile, view.context_window);
     const follow = ui.follow;
     rememberPosition(ui);
     ui.setName(view.name || String(view.id));
@@ -1385,6 +1383,7 @@ function startEvents() {
       }
       if (!ui) return;
       if (message.type === "name") { ui.setName(message.name); return; }
+      if (message.type === "profile") { updateProfile(ui, message.profile, message.context_window); return; }
       if (message.type === "context_usage") {
         ui.view.context_usage = message.context_usage;
         ui.view.context_window = message.context_window;
@@ -2057,11 +2056,10 @@ const loginPanel = document.querySelector("#provider-login");
 const providerError = document.querySelector("#provider-login-error");
 const providerStatus = document.querySelector("#provider-login-status");
 const subscriptionAccount = document.querySelector("#subscription-account");
-const subscriptionModel = document.querySelector("#subscription-model");
 let loginOwner = null, loginTimer, loginGeneration = 0, loginStatus, loginSignature = "";
-let loginMethod = "", loginModelGeneration = 0;
+let loginMethod = "";
 function closeLogin() {
-  clearTimeout(loginTimer); loginGeneration++; loginModelGeneration++;
+  clearTimeout(loginTimer); loginGeneration++;
   const owner = loginOwner; loginOwner = null;
   loginPanel.hidden = true; document.body.append(loginPanel);
   document.querySelector("#provider-api-key").value = "";
@@ -2074,12 +2072,13 @@ function closeLogin() {
 }
 function openLogin(ui) {
   closeLogin(); loginOwner = ui; loginMethod = ""; loginSignature = ""; loginStatus = null;
+  subscriptionAccount.replaceChildren();
   if (ui.composer) {
     ui.slashSuggestion.hidden = true; ui.modelPicker.hidden = true; ui.skillPicker.hidden = true;
     ui.composer.hidden = true; clearPromptSpaceWhenHidden(ui); updateActivity(ui);
   } else { ui.form.hidden = true; ui.setupBody.hidden = true; }
   ui.pane.append(loginPanel); loginPanel.hidden = false;
-  providerError.hidden = true; providerStatus.textContent = "Loading…";
+  providerError.hidden = true; providerStatus.textContent = "";
   document.querySelector("#api-key-login").hidden = true;
   document.querySelector("#subscription-login").hidden = true;
   for (const button of loginPanel.querySelectorAll("[data-login-method]")) button.setAttribute("aria-pressed", "false");
@@ -2109,9 +2108,6 @@ async function refreshLogin() {
     const signature = JSON.stringify(status);
     if (signature !== loginSignature) {
       loginSignature = signature;
-      providerStatus.textContent = status.billing_route === "chatgpt" && status.selected_account
-        ? `New agents: ChatGPT subscription · ${status.model}`
-        : status.billing_route === "api_key" && status.api_key_available ? "New agents: API key" : "Choose a login method to get started.";
       if (loginMethod) chooseLoginMethod(loginMethod);
     }
   } catch (error) { if (generation === loginGeneration) showError(providerError, error); }
@@ -2125,15 +2121,13 @@ async function refreshSubscription() {
     const option = element("option", null, `${account.label}${account.connected ? "" : " · signed out"}`);
     option.value = account.id; subscriptionAccount.append(option);
   }
-  const preferred = previous || loginStatus.selected_account;
+  const preferred = previous || loginOwner?.view?.profile?.chatgpt_account || loginStatus.selected_account;
   if ([...subscriptionAccount.options].some(option => option.value === preferred)) subscriptionAccount.value = preferred;
   document.querySelector("#subscription-selection").hidden = !loginStatus.accounts.length;
-  await subscriptionModels();
+  subscriptionActions();
 }
-async function subscriptionModels() {
+function subscriptionActions() {
   const account = loginStatus?.accounts.find(account => account.id === subscriptionAccount.value);
-  const generation = ++loginModelGeneration;
-  subscriptionModel.replaceChildren();
   const submit = document.querySelector("#subscription-selection button"); submit.disabled = true;
   const actions = document.querySelector("#subscription-actions"); actions.replaceChildren();
   if (!account) return;
@@ -2152,20 +2146,12 @@ async function subscriptionModels() {
     if (!result.revocation_confirmed) showError(providerError, result.message);
   });
   if (account.paused) {
-    actions.append(element("p", null, "Requests paused after a usage limit. Review Manage usage before resuming."));
+    actions.append(element("p", null, "Requests paused after a usage limit. Review ChatGPT settings before resuming."));
     action("Resume requests", async () => { await request(`/api/accounts/${encodeURIComponent(account.id)}/resume`, "POST"); loginSignature = ""; await refreshLogin(); });
   }
-  if (!account.connected || !account.plan_enabled) return;
-  try {
-    const result = await request(`/api/accounts/${encodeURIComponent(account.id)}/models`);
-    if (!loginOwner || generation !== loginModelGeneration) return;
-    for (const model of result.models) {
-      const option = element("option", null, model.display_name); option.value = model.slug; subscriptionModel.append(option);
-    }
-    if ([...subscriptionModel.options].some(option => option.value === loginStatus.model)) subscriptionModel.value = loginStatus.model;
-    submit.disabled = !subscriptionModel.value;
-  } catch (error) { if (generation === loginModelGeneration) showError(providerError, error); }
+  submit.disabled = !account.connected || !account.plan_enabled || account.paused;
 }
+
 async function signInChatGPT(account = null, consent = false) {
   providerError.hidden = true;
   const popup = window.open("about:blank", "boid-chatgpt-sign-in");
@@ -2190,9 +2176,10 @@ document.querySelector("#plan-welcome form").addEventListener("submit", event =>
 });
 for (const button of loginPanel.querySelectorAll("[data-login-method]")) button.addEventListener("click", () => chooseLoginMethod(button.dataset.loginMethod));
 document.querySelector("#chatgpt-sign-in").addEventListener("click", () => signInChatGPT());
-subscriptionAccount.addEventListener("change", subscriptionModels);
+subscriptionAccount.addEventListener("change", subscriptionActions);
 document.querySelector("#api-key-login").addEventListener("submit", async event => {
   event.preventDefault(); providerError.hidden = true;
+  const owner = loginOwner, generation = loginGeneration;
   const button = event.submitter; button.disabled = true;
   const field = document.querySelector("#provider-api-key"), key = field.value.trim(); field.value = "";
   try {
@@ -2200,22 +2187,27 @@ document.querySelector("#api-key-login").addEventListener("submit", async event 
       if (!key) throw new Error("Enter an OpenAI API key.");
       await request("/api/accounts/api-key", "POST", { key });
     }
-    await request("/api/accounts/select", "POST", { billing_route: "api_key" });
+    const result = await request("/api/accounts/select", "POST", { session_id: owner.composer ? owner.id : undefined, billing_route: "api_key" });
+    if (owner.composer) updateProfile(owner, result.profile, result.context_window);
+    if (loginOwner !== owner || generation !== loginGeneration) return;
     loginSignature = ""; await refreshLogin();
-    providerStatus.textContent = "API key selected for new agents. Esc to return.";
+    providerStatus.textContent = "API key connected.";
   } catch (error) { showError(providerError, error); }
   finally { button.disabled = false; }
 });
 document.querySelector("#subscription-selection").addEventListener("submit", async event => {
   event.preventDefault(); providerError.hidden = true;
+  const owner = loginOwner, generation = loginGeneration;
   const button = event.submitter; button.disabled = true;
   try {
-    const result = await request("/api/accounts/select", "POST", { billing_route: "chatgpt", account: subscriptionAccount.value, model: subscriptionModel.value });
+    const result = await request("/api/accounts/select", "POST", { session_id: owner.composer ? owner.id : undefined, billing_route: "chatgpt", account: subscriptionAccount.value });
+    if (owner.composer) updateProfile(owner, result.profile, result.context_window);
+    if (loginOwner !== owner || generation !== loginGeneration) return;
     loginSignature = ""; await refreshLogin();
-    providerStatus.textContent = "Subscription selected for new agents. Esc to return.";
+    providerStatus.textContent = "Subscription connected.";
     if (result.welcome) document.querySelector("#plan-welcome").showModal();
   } catch (error) { showError(providerError, error); }
-  finally { button.disabled = !subscriptionModel.value; }
+  finally { if (loginOwner === owner && generation === loginGeneration) subscriptionActions(); }
 });
 
 setInterval(() => {

@@ -347,14 +347,13 @@ async fn inference(
 }
 
 #[tokio::test]
-async fn subscription_tool_loop_resume_and_limit_never_use_api_key() {
+async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_api_key() {
     use crate::{
         api::Client,
         runtime::{Create, Hub},
     };
     let f = Fixture::new().await;
     let id = f.login().await;
-    f.auth.select("chatgpt", Some(&id), "second").await.unwrap();
     let endpoint = format!("{}/responses", f.provider.origin);
     let client = || {
         let mut c = Client::test_client_at(endpoint.clone());
@@ -368,9 +367,39 @@ async fn subscription_tool_loop_resume_and_limit_never_use_api_key() {
         .create(Create {
             name: "canary".into(),
             cwd: work.path().to_string_lossy().into_owned(),
-            message: "Use the local roster tool".into(),
+            message: String::new(),
         })
         .unwrap();
+    tokio::task::yield_now().await; // The existing worker has already captured its API profile.
+    let other = hub
+        .create(Create {
+            name: "swift".into(),
+            cwd: work.path().to_string_lossy().into_owned(),
+            message: String::new(),
+        })
+        .unwrap();
+    hub.entry(&view.id, "notice", "Prior transcript remains");
+    let mut selected = view.profile.clone();
+    selected["billing_route"] = json!("chatgpt");
+    selected["chatgpt_account"] = json!(id);
+    selected["model"] = json!("second");
+    selected["cyber_access_program"] = Value::Null;
+    hub.select_profile(&view.id, &view.profile, selected.clone())
+        .unwrap();
+    assert!(
+        hub.select_profile(&view.id, &view.profile, selected.clone())
+            .is_err(),
+        "Stale selections must not overwrite a newer profile"
+    );
+    assert_eq!(hub.profile(&other.id).unwrap()["billing_route"], "api_key");
+    assert_eq!(f.auth.profile().unwrap()["billing_route"], "api_key");
+    hub.message(&view.id, "Use the local roster tool".into())
+        .unwrap();
+    assert!(
+        hub.select_profile(&view.id, &selected, view.profile.clone())
+            .is_err(),
+        "Queued or active requests must keep their selected billing route"
+    );
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.provider.requests.lock().unwrap().len() < 2
             || hub.view(&view.id).unwrap().status != "idle"
@@ -404,6 +433,41 @@ async fn subscription_tool_loop_resume_and_limit_never_use_api_key() {
             .unwrap()
             .iter()
             .any(|i| i["type"] == "function_call_output" && i["call_id"] == "fixture-tool")
+    );
+    assert!(
+        hub.view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text == "Prior transcript remains")
+    );
+    assert_eq!(
+        hub.diagnostics()["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == view.id)
+            .unwrap()["latest_response"]["billing_route"],
+        "chatgpt"
+    );
+    let mut changed_model = selected.clone();
+    changed_model["model"] = json!("first");
+    hub.select_profile(&view.id, &selected, changed_model)
+        .unwrap();
+    hub.message(&view.id, "Continue with the selected model".into())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.provider.requests.lock().unwrap().len() < 3
+            || hub.view(&view.id).unwrap().status != "idle"
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        f.provider.requests.lock().unwrap().last().unwrap()["model"],
+        "first"
     );
     let captured = hub.view(&view.id).unwrap().profile;
     hub.stop(&view.id).unwrap();

@@ -50,5 +50,6 @@ using the same operation as the `oai_compact` tool. Both wait for the current
 response and tool batch. Clearing makes no model request; queued messages then
 use the fresh context. Previous context is saved privately in `sessions/clears/`.
 
-ChatGPT plan agents use an account-specific model selected through `/login`.
+`/login` changes the connection for its agent pane. `/model` selects a model
+from the connected account's catalog.
 `/clear` remains available; `/oai-compact` currently requires the API-key route.

@@ -18,14 +18,16 @@ privately on the server, never in model messages or browser storage. API-key
 validity is checked by the provider when an agent makes its first request.
 
 Choose **ChatGPT subscription**, then **Continue with ChatGPT** and finish consent
-in the new tab. Return to `/login`, select an account and an available model,
+in the new tab. Return to `/login`, select an account,
 then **Use subscription**. Signing in alone does not change the selected route.
-Models come from that account's current catalog; Boid preserves the selected slug.
+Use `/model` to choose from that account's available models. Login keeps the
+agent's current model when available, otherwise uses the first listed model.
 **Escape** returns to the composer without interrupting the agent.
 
-Selections apply to new agents. Existing agents retain their captured billing
-route and account. `BOID_AUTH_ROUTE` can initialize the default on a new state
-directory; saved selections take precedence.
+Selections in an existing pane apply to that agent. Selections in new-agent setup
+set the default for future agents. Other agents keep their connections. Wait for
+a busy agent to finish or interrupt it before changing its connection or model.
+`BOID_AUTH_ROUTE` can initialize the default on a new state directory; saved selections take precedence.
 
 Open Boid through `http://127.0.0.1:<port>` for ChatGPT's loopback callback.
 
@@ -35,17 +37,16 @@ For a remote server, forward its loopback port before signing in. For example,
 through sign-in. Use the workspace's existing private token to authenticate to
 Boid. Neither the Boid token nor OAuth credentials belong in shared URLs or logs.
 
-Existing agents keep their captured billing route, account, and model after
-selection changes and restarts. Legacy agents keep API-key billing. The current
-model menu shows the agent's configuration; create a new agent to use a different
-account or model. Signing out stops agents using that account and removes its
+Each agent keeps its selected billing route, account, model, and history across
+restarts. Legacy agents keep API-key billing until `/login` changes that pane.
+Signing out stops agents using that account and removes its
 local tokens. Account identity remains available for reconnecting. If revocation
 could not be confirmed, disconnect Boid in ChatGPT settings too.
 
 ## Limits and recovery
 
-**Using ChatGPT plan** appears next to plan-agent composers. **Manage usage** opens
-[ChatGPT usage settings](https://chatgpt.com/settings/usage). Diagnostics retain
+**Using ChatGPT plan** appears next to plan-agent composers. Limits and credits
+are available in [ChatGPT usage settings](https://chatgpt.com/settings/usage). Diagnostics retain
 token counts but do not assign API dollar estimates to plan requests.
 
 A usage-limit error pauses further requests for that account. Review usage,
