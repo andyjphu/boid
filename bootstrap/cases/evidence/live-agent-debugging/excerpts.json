@@ -1,0 +1,90 @@
+{
+  "thread_id": "01a1a450-8944-7370-93d7-c57a2a1ee5b6",
+  "source_file": "rollout-2026-11-03T18-08-23-01a1a450-8944-7370-93d7-c57a2a1ee5b6.jsonl",
+  "events": [
+    {
+      "line": 17441,
+      "timestamp": "2026-11-09T06:21:10.423Z",
+      "role": "user",
+      "text": "reduce boid work such that its one repo; ~/boid; can be compiled with build.sh with an associated run.sh in project root; where run.sh is just boid (this is just convention from an earlier thing"
+    },
+    {
+      "line": 18576,
+      "timestamp": "2026-11-09T08:51:56.402Z",
+      "role": "user",
+      "text": "when done update the mm west code and push immediately you dont need my pr approval at this time"
+    },
+    {
+      "line": 18583,
+      "timestamp": "2026-11-09T08:52:02.057Z",
+      "role": "user",
+      "text": "just pin version before your commit"
+    },
+    {
+      "line": 18858,
+      "timestamp": "2026-11-09T19:07:29.011Z",
+      "role": "user",
+      "text": "occurs when scrolling past bottom"
+    },
+    {
+      "line": 19038,
+      "timestamp": "2026-11-09T19:14:01.078Z",
+      "role": "user",
+      "text": "lmk when restart happens and finishes also; when i open boid, i see N screens, the N agents dont consider themselves active until i personally say hi to all of them; like they dont show up in list agents how can we fix that"
+    },
+    {
+      "line": 19073,
+      "timestamp": "2026-11-09T19:15:01.515Z",
+      "role": "user",
+      "text": "remove culling for now, hotfix"
+    },
+    {
+      "line": 19167,
+      "timestamp": "2026-11-09T19:33:20.719Z",
+      "role": "user",
+      "text": "i scroll to bottom, and then i scroll up a little bit, and then it starts jamming again but if i scroll up a lot it can skip the jamming phase"
+    },
+    {
+      "line": 19301,
+      "timestamp": "2026-11-09T19:51:28.975Z",
+      "role": "user",
+      "text": "nice great job! what caused issue?"
+    },
+    {
+      "line": 19311,
+      "timestamp": "2026-11-09T20:04:12.024Z",
+      "role": "user",
+      "text": "what a complex issue, document this as a case study"
+    },
+    {
+      "line": 19348,
+      "timestamp": "2026-11-09T20:06:38.373Z",
+      "role": "user",
+      "text": "how to deal with issue where reloading means all peers are uncontactable? even if i can see their windows"
+    },
+    {
+      "line": 19678,
+      "timestamp": "2026-11-09T22:52:05.186Z",
+      "role": "user",
+      "text": "i want a /clear context tool"
+    },
+    {
+      "line": 19686,
+      "timestamp": "2026-11-09T22:52:33.386Z",
+      "role": "user",
+      "text": "i also want /oai-compact to be an explicit slash command aswell that triggers the oai-compact tool probably"
+    },
+    {
+      "line": 19934,
+      "timestamp": "2026-11-09T23:53:31.911Z",
+      "role": "user",
+      "text": "pressing esc multiple times can cause lag, maybe dedup? but also revisit how to reduce lag on web view for esc to register esp even if agents are busy; dont restart the server but look in to this"
+    },
+    {
+      "line": 20076,
+      "timestamp": "2026-11-10T01:56:36.538Z",
+      "role": "user",
+      "text": "great! you've been performing so well, please document everything in your mind so this performance can keep happening"
+    }
+  ]
+}

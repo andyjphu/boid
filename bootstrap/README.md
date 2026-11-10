@@ -18,6 +18,11 @@ project context to decide what Boid should eventually see.
 summaries and interpretations kept distinct. Use relevant cases when making
 similar decisions; topical similarity alone does not establish applicability.
 
+The [live-agent debugging case](cases/live-agent-debugging.md) connects the
+scrolling repairs, peer recovery, context commands, and Escape investigation.
+Read it when diagnosing a live workspace or deciding what a successful local
+check establishes about the running product.
+
 The [whole-interaction case](cases/whole-interaction.md) follows v0.7's default
 fields, terminal theme, and directory-update latency through repeated feedback
 and a measured repair. Andy requested its availability for Boid self-development
