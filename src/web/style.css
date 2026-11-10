@@ -293,8 +293,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .context-usage { position: absolute; top: 9px; right: 8px; color: #777; font-size: 10px; line-height: 16px; white-space: nowrap; pointer-events: none; }
 
 #open-diagnostics { display: flex; align-items: center; justify-content: center; padding: 0; }
-#diagnostics-dialog { width: min(360px, calc(100vw - 20px)); max-height: calc(100dvh - 32px); padding: 8px; overflow: auto; color: inherit; background: #222; border: 1px solid #555; border-radius: 0; }
-#diagnostics-dialog::backdrop { background: #0005; }
+#diagnostics-dialog, #accounts-dialog, #plan-welcome { width: min(360px, calc(100vw - 20px)); max-height: calc(100dvh - 32px); padding: 8px; overflow: auto; color: inherit; background: #222; border: 1px solid #555; border-radius: 0; }
+#diagnostics-dialog::backdrop, #accounts-dialog::backdrop, #plan-welcome::backdrop { background: #0005; }
 .diagnostics-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
 .diagnostics-header h1 { margin: 0; font: inherit; font-weight: 600; }
 #close-diagnostics { border: 0; background: transparent; padding: 0 3px; line-height: 16px; font-size: 16px; }
@@ -308,3 +308,12 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .diagnostics-note { margin: 7px 0 0; overflow-wrap: anywhere; }
 .diagnostics-reason { display: block; }
 #diagnostics-error { padding: 0; margin: 7px 0; }
+
+#accounts-dialog { width: min(430px, calc(100vw - 20px)); }
+#account-selection { display: grid; gap: 8px; margin: 12px 0; }
+#account-selection label { display: grid; gap: 4px; }
+#accounts-dialog select { width: 100%; background: #292929; color: inherit; border: 1px solid #555; padding: 4px; }
+.account-row { margin: 10px 0; overflow-wrap: anywhere; }
+.account-row button { margin: 4px 4px 0 0; }
+#chatgpt-sign-in { background: #111; color: #fff; padding: 8px 12px; }
+.billing-route { margin-left: 6px; color: #aaa; white-space: nowrap; }

@@ -43,6 +43,8 @@ impl Ledger {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default = "api_key_route")]
+    pub billing_route: String,
     pub attempt: u64,
     pub response_id: Option<String>,
     pub status: String,
@@ -51,6 +53,9 @@ pub struct Report {
     pub service_tier: Option<String>,
     pub usage: Value,
     pub prompt_cache_diagnostics: Value,
+}
+fn api_key_route() -> String {
+    "api_key".into()
 }
 impl Report {
     pub fn from_event(attempt: u64, event: &Value) -> Option<Self> {
@@ -63,6 +68,7 @@ impl Report {
         }
         let response = event.get("response")?.as_object()?;
         Some(Self {
+            billing_route: api_key_route(),
             attempt,
             response_id: response
                 .get("id")
@@ -128,6 +134,9 @@ impl Report {
         Ok((input, output, read, write))
     }
     pub fn estimate(&self) -> Result<f64, String> {
+        if self.billing_route == "chatgpt" {
+            return Err("ChatGPT plan/credits usage; review billing and limits in ChatGPT Settings → Usage.".into());
+        }
         if self.model.as_deref() != Some("gpt-6-sol") {
             return Err("Missing or unsupported reported model".into());
         }

@@ -38,6 +38,7 @@ impl Fixture {
             "BOID_TOKEN",
             "BOID_CWD",
             "BOID_MODEL",
+            "BOID_AUTH_ROUTE",
             "BOID_CYBER_ACCESS_PROGRAM",
         ] {
             command.env_remove(key);

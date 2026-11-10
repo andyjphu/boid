@@ -3,6 +3,7 @@ use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 const REASONING_EFFORT: &str = "medium";
@@ -19,6 +20,7 @@ pub fn context_window(model: &str) -> Option<u64> {
 pub struct Client {
     http: reqwest::Client,
     key: String,
+    pub auth: Option<Arc<crate::chatgpt::Auth>>,
     pub model: String,
     cyber_access_program: Option<String>,
     #[cfg(test)]
@@ -28,11 +30,14 @@ pub struct Client {
 impl Client {
     pub fn new() -> Result<Self> {
         let key = std::env::var("OPENAI_API_KEY")
-            .context("Set OPENAI_API_KEY before starting Boid.")?
+            .unwrap_or_default()
             .trim()
             .to_owned();
-        if key.is_empty() {
-            bail!("OPENAI_API_KEY must not be empty.");
+        let route = std::env::var("BOID_AUTH_ROUTE").unwrap_or_else(|_| "api_key".into());
+        if route == "api_key" && key.is_empty() {
+            bail!(
+                "Set OPENAI_API_KEY before starting Boid, or set BOID_AUTH_ROUTE=chatgpt to connect a ChatGPT account."
+            );
         }
         let model = match std::env::var("BOID_MODEL") {
             Ok(model) if !model.trim().is_empty() => model,
@@ -54,7 +59,16 @@ impl Client {
             .connect_timeout(Duration::from_secs(15))
             .build()
             .context("Cannot create the API client.")?;
+        let auth = crate::chatgpt::Auth::open(
+            crate::server::token_file()?
+                .parent()
+                .context("State directory has no parent.")?
+                .join("chatgpt"),
+            &route,
+            &model,
+        )?;
         Ok(Self {
+            auth: Some(Arc::new(auth)),
             http,
             key,
             model,
@@ -65,11 +79,46 @@ impl Client {
     }
 
     pub fn config(&self) -> Value {
+        let selected = match &self.auth {
+            Some(auth) => match auth.profile() {
+                Ok(profile) => profile,
+                Err(_) => {
+                    return json!({"billing_route":"unavailable","auth_error":"Cannot read saved billing settings. Repair account storage before creating agents."});
+                }
+            },
+            None => Value::Null,
+        };
+        let plan = selected["billing_route"] == "chatgpt";
         json!({
-            "model": self.model,
+            "model": if plan { selected["model"].as_str().unwrap_or(&self.model) } else { &self.model },
             "reasoning_effort": REASONING_EFFORT,
-            "cyber_access_program": self.cyber_access_program,
+            "cyber_access_program": if plan { None } else { self.cyber_access_program.as_deref() },
+            "billing_route": if plan { "chatgpt" } else { "api_key" },
+            "chatgpt_account": if plan { selected["chatgpt_account"].clone() } else { Value::Null },
         })
+    }
+    pub fn key_available(&self) -> bool {
+        !self.key.is_empty()
+    }
+    async fn credential(&self, profile: &Value) -> Result<String> {
+        match profile["billing_route"].as_str().unwrap_or("api_key") {
+            "api_key" if !self.key.is_empty() => Ok(self.key.clone()),
+            "api_key" => bail!(
+                "This agent uses API-key billing, but OPENAI_API_KEY is unavailable. No billing route was changed."
+            ),
+            "chatgpt" => {
+                let auth = self
+                    .auth
+                    .as_ref()
+                    .context("ChatGPT account storage is unavailable.")?;
+                let id = profile["chatgpt_account"]
+                    .as_str()
+                    .context("Choose a ChatGPT account for new agents in account settings.")?;
+                auth.check_inference(id)?;
+                auth.token(id).await
+            }
+            _ => bail!("Unknown agent billing route."),
+        }
     }
 
     /// Stream text and return complete API items for the next request's input.
@@ -100,23 +149,50 @@ impl Client {
         if let Some(effort) = profile["reasoning_effort"].as_str() {
             request["reasoning"]["effort"] = json!(effort);
         }
-        if let Some(program) = profile["cyber_access_program"].as_str() {
-            request["access_programs"] = json!({"cyber": program});
+        if profile["billing_route"] != "chatgpt" {
+            if let Some(program) = profile["cyber_access_program"].as_str() {
+                request["access_programs"] = json!({"cyber": program});
+            }
+        } else {
+            let functions: Vec<_> = request["tools"]
+                .as_array()
+                .context("Invalid local tool definitions.")?
+                .iter()
+                .filter(|tool| tool["name"] != "oai_compact")
+                .cloned()
+                .collect();
+            request["tools"] = json!([{"type":"namespace","name":"boid","description":"Local Boid agent tools","tools":functions}]);
         }
+        let credential = self.credential(profile).await?;
         let response = self
             .http
             .post(endpoint)
-            .bearer_auth(&self.key)
+            .bearer_auth(&credential)
             .json(&request)
             .send()
             .await
             .context("Cannot reach the OpenAI API.")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = response.json::<Value>().await.unwrap_or(Value::Null);
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unavailable")
+            .to_owned();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let error = serde_json::from_str::<Value>(&body)
+                .unwrap_or_else(|_| json!({"non_json_body":body}));
+            self.pause_for_limit(profile, &error).await?;
             bail!(
-                "OpenAI API returned {status}: {}",
-                self.redact(error_message(&error))
+                "{}",
+                self.redact(&provider_error(
+                    status.as_u16(),
+                    &request_id,
+                    &error,
+                    profile
+                ))
+                .replace(&credential, "[redacted]")
             );
         }
 
@@ -127,6 +203,7 @@ impl Client {
                 anyhow::anyhow!(
                     "Cannot read API stream: {}",
                     self.redact(&error.to_string())
+                        .replace(&credential, "[redacted]")
                 )
             })?;
             let event: Value =
@@ -144,9 +221,16 @@ impl Client {
                 }
                 Some("response.completed") => return finish(&event, completed),
                 Some("response.failed" | "response.incomplete" | "error") => {
+                    self.pause_for_limit(profile, &event).await?;
                     bail!(
                         "OpenAI response stopped: {}",
-                        self.redact(error_message(&event))
+                        self.redact(&provider_error(
+                            status.as_u16(),
+                            &request_id,
+                            &event,
+                            profile
+                        ))
+                        .replace(&credential, "[redacted]")
                     );
                 }
                 _ => {}
@@ -155,7 +239,41 @@ impl Client {
         bail!("API stream ended before the response completed.")
     }
 
-    pub async fn compact(&self, input: &[Value], model: &str, instructions: &str) -> Result<Value> {
+    async fn pause_for_limit(&self, profile: &Value, error: &Value) -> Result<()> {
+        let code = error
+            .pointer("/response/error/code")
+            .or_else(|| error.pointer("/error/code"))
+            .and_then(Value::as_str);
+        if profile["billing_route"] == "chatgpt"
+            && code == Some("subscription_sharing_usage_limit_exceeded")
+        {
+            self.auth
+                .as_ref()
+                .context("Missing ChatGPT storage.")?
+                .pause(
+                    profile["chatgpt_account"]
+                        .as_str()
+                        .context("Missing ChatGPT account.")?,
+                    true,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn compact(
+        &self,
+        input: &[Value],
+        model: &str,
+        instructions: &str,
+        profile: &Value,
+    ) -> Result<Value> {
+        if profile["billing_route"] == "chatgpt" {
+            bail!(
+                "/oai-compact is unavailable on the ChatGPT plan route in this integration. Context is retained; no API-key request was made."
+            );
+        }
+        let credential = self.credential(profile).await?;
         let endpoint = "https://api.openai.com/v1/responses/compact".to_owned();
         #[cfg(test)]
         let endpoint = self
@@ -166,7 +284,7 @@ impl Client {
         let response = self
             .http
             .post(endpoint)
-            .bearer_auth(&self.key)
+            .bearer_auth(&credential)
             .json(&json!({"model":model,"input":input,"instructions":instructions}))
             .timeout(Duration::from_secs(300))
             .send()
@@ -218,7 +336,11 @@ impl Client {
     }
 
     fn redact(&self, message: &str) -> String {
-        message.replace(&self.key, "[redacted]")
+        if self.key.is_empty() {
+            message.into()
+        } else {
+            message.replace(&self.key, "[redacted]")
+        }
     }
 
     #[cfg(test)]
@@ -226,6 +348,7 @@ impl Client {
         Self {
             http: reqwest::Client::new(),
             key: "unused-test-key".into(),
+            auth: None,
             model: "test".into(),
             cyber_access_program: None,
             endpoint: Some("http://127.0.0.1:1".into()),
@@ -245,11 +368,25 @@ fn error_message(value: &Value) -> &str {
         "/response/error/message",
         "/error/message",
         "/message",
+        "/detail",
         "/response/incomplete_details/reason",
     ]
     .iter()
     .find_map(|path| value.pointer(path).and_then(Value::as_str))
     .unwrap_or("No error detail was supplied.")
+}
+
+fn provider_error(status: u16, request_id: &str, error: &Value, profile: &Value) -> String {
+    let route = if profile["billing_route"] == "chatgpt" {
+        " ChatGPT plan request stopped; no API-key fallback was used. Manage usage: https://chatgpt.com/settings/usage."
+    } else {
+        ""
+    };
+    // Retain structured code/param, direct-admission detail, and request ID.
+    format!(
+        "OpenAI HTTP {status}, request ID {request_id}: {}. Body: {error}.{route}",
+        error_message(error)
+    )
 }
 
 fn finish(event: &Value, completed: BTreeMap<usize, Value>) -> Result<Vec<Value>> {
@@ -302,7 +439,7 @@ mod tests {
             assert_eq!(
                 client.config(),
                 json!({
-                    "model":"gpt-6-sol", "reasoning_effort":"medium", "cyber_access_program":program,
+                    "model":"gpt-6-sol", "reasoning_effort":"medium", "cyber_access_program":program, "billing_route":"api_key", "chatgpt_account":null,
                 })
             );
             client.respond(&[], json!([]), |_| {}).await.unwrap();

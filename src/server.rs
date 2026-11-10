@@ -7,11 +7,11 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
-        IntoResponse, Response, Sse,
+        Html, IntoResponse, Redirect, Response, Sse,
         sse::{Event, KeepAlive},
     },
     routing::{get, post},
@@ -34,6 +34,8 @@ struct App {
     hub: Hub,
     token: Arc<String>,
     shutdown: Arc<Notify>,
+    auth: Option<Arc<crate::chatgpt::Auth>>,
+    api_key_available: bool,
 }
 type ApiResult<T> = std::result::Result<T, (StatusCode, Json<Value>)>;
 fn invalid(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -98,6 +100,8 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .parent()
         .context("State directory has no parent.")?
         .to_path_buf();
+    let auth = client.auth.clone();
+    let api_key_available = client.key_available();
     let hub = Hub::open(client, state_dir.clone())?;
     let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
     let shutdown = Arc::new(Notify::new());
@@ -105,12 +109,20 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         hub: hub.clone(),
         token: Arc::new(token.clone()),
         shutdown: shutdown.clone(),
+        auth,
+        api_key_available,
     };
     let protected = Router::new()
         .route("/api/login", post(login))
         .route("/api/server", get(server_info))
         .route("/api/shutdown", post(shutdown_server))
         .route("/api/config", get(config))
+        .route("/api/accounts", get(accounts))
+        .route("/api/accounts/sign-in", post(account_sign_in))
+        .route("/api/accounts/select", post(account_select))
+        .route("/api/accounts/{id}/models", get(account_models))
+        .route("/api/accounts/{id}/logout", post(account_logout))
+        .route("/api/accounts/{id}/resume", post(account_resume))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/sessions", get(sessions).post(create))
         .route("/api/sessions/archived", get(archived_sessions))
@@ -127,11 +139,16 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .with_state(app.clone())
         .merge(terminals.router())
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .layer(middleware::from_fn_with_state(app, authorize));
+        .layer(middleware::from_fn_with_state(app.clone(), authorize));
+    let oauth = Router::new()
+        .route("/auth/start", get(auth_start))
+        .route("/auth/callback", get(auth_callback))
+        .with_state(app);
     let router = Router::new()
         .route("/", get(index))
         .route("/{*path}", get(asset))
         .merge(protected)
+        .merge(oauth)
         .layer(middleware::from_fn(headers));
     let display_address = if address.starts_with("0.0.0.0:") {
         address.replacen("0.0.0.0", "127.0.0.1", 1)
@@ -412,4 +429,106 @@ fn ui_asset(_name: &'static str, content_type: &'static str, _embedded: &'static
     {
         bytes(content_type, _embedded)
     }
+}
+
+fn auth(app: &App) -> ApiResult<&Arc<crate::chatgpt::Auth>> {
+    app.auth
+        .as_ref()
+        .ok_or_else(|| invalid("ChatGPT authentication is unavailable in this server."))
+}
+async fn accounts(State(app): State<App>) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        auth(&app)?.status(app.api_key_available).map_err(invalid)?,
+    ))
+}
+#[derive(Deserialize)]
+struct SignIn {
+    origin: String,
+    account: Option<String>,
+    #[serde(default)]
+    consent: bool,
+}
+async fn account_sign_in(
+    State(app): State<App>,
+    Json(input): Json<SignIn>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"start_url":auth(&app)?.begin(&input.origin,input.account.as_deref(),input.consent).map_err(invalid)?}),
+    ))
+}
+#[derive(Deserialize)]
+struct AccountSelection {
+    billing_route: String,
+    account: Option<String>,
+    #[serde(default)]
+    model: String,
+}
+async fn account_select(
+    State(app): State<App>,
+    Json(input): Json<AccountSelection>,
+) -> ApiResult<Json<Value>> {
+    if input.billing_route == "api_key" && !app.api_key_available {
+        return Err(invalid("OPENAI_API_KEY is not configured in this server."));
+    }
+    let welcome = auth(&app)?
+        .select(&input.billing_route, input.account.as_deref(), &input.model)
+        .await
+        .map_err(invalid)?;
+    Ok(Json(
+        json!({"status":"selected_for_new_agents","welcome":welcome}),
+    ))
+}
+async fn account_models(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"models":auth(&app)?.models(&id).await.map_err(invalid)?}),
+    ))
+}
+async fn account_resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    auth(&app)?.pause(&id, false).await.map_err(invalid)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn account_logout(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub.stop_account(&id).map_err(invalid)?;
+    let confirmed = auth(&app)?.logout(&id).await.map_err(invalid)?;
+    Ok(Json(
+        json!({"revocation_confirmed":confirmed,"message":if confirmed {"Signed out."} else {"Signed out locally; remote revocation was not confirmed. Disconnect Boid in ChatGPT Settings."}}),
+    ))
+}
+async fn auth_start(
+    State(app): State<App>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> ApiResult<Redirect> {
+    let url = auth(&app)?
+        .authorization(query.get("ticket").map(String::as_str).unwrap_or(""))
+        .map_err(invalid)?;
+    Ok(Redirect::to(&url))
+}
+async fn auth_callback(
+    State(app): State<App>,
+    Query(query): Query<std::collections::BTreeMap<String, String>>,
+) -> impl IntoResponse {
+    let result = match auth(&app) {
+        Ok(auth) => auth.complete(&query).await,
+        Err(_) => Err(anyhow::anyhow!("Authentication unavailable.")),
+    };
+    let (status, text) = match result {
+        Ok(()) => (
+            StatusCode::OK,
+            "ChatGPT account connected. Close this tab and choose a model and billing route in Boid account settings.".to_owned(),
+        ),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            format!("ChatGPT sign-in did not complete: {error}. Close this tab and retry from Boid account settings."),
+        ),
+    };
+    let text = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    (
+        status,
+        Html(format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Boid account</title><p>{text}</p>"
+        )),
+    )
 }

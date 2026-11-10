@@ -17,6 +17,7 @@
     <button id="open-diagnostics" type="button" aria-label="Diagnostics" title="Diagnostics" aria-haspopup="dialog" aria-controls="diagnostics-dialog" disabled>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" fill="none" stroke="currentColor"><path d="M2 10V6m4 4V2m4 8V4" stroke-width="1.5"/></svg>
     </button>
+    <button id="open-accounts" type="button" aria-label="Accounts and billing" title="Accounts and billing" aria-haspopup="dialog" aria-controls="accounts-dialog" disabled>◎</button>
   </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
@@ -35,6 +36,27 @@
     <select id="diagnostics-scope" aria-label="Agent usage"><option value="">All agents</option></select>
     <p id="diagnostics-error" class="error-banner" role="alert" hidden></p>
     <div id="diagnostics-content" aria-live="polite"></div>
+  </dialog>
+  <dialog id="accounts-dialog" aria-labelledby="accounts-title">
+    <header class="diagnostics-header"><h1 id="accounts-title">Accounts and billing</h1><button id="close-accounts" type="button" aria-label="Close accounts">×</button></header>
+    <p>Use your ChatGPT plan or credits for eligible requests, or your API key with separate API billing.</p>
+    <button id="chatgpt-sign-in" type="button" data-oai-siwc-button>Continue with ChatGPT</button>
+    <p id="accounts-error" class="error-banner" role="alert" hidden></p>
+    <div id="saved-accounts"></div>
+    <form id="account-selection">
+      <label>New agents use <select id="account-route" required></select></label>
+      <label id="account-model-label">Model <select id="account-model"></select></label>
+      <button type="submit">Use for new agents</button>
+    </form>
+    <p id="account-current" role="status"></p>
+    <p>Existing agents keep their billing route and account. Signing out stops agents using that account.</p>
+    <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
+  </dialog>
+  <dialog id="plan-welcome" aria-labelledby="plan-welcome-title">
+    <h1 id="plan-welcome-title">You're using your ChatGPT plan</h1>
+    <p>Eligible requests from new agents use your ChatGPT plan or credits. Review limits and access in ChatGPT settings.</p>
+    <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
+    <form method="dialog"><button>Got it</button></form>
   </dialog>
 </body>
 </html>

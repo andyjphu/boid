@@ -386,6 +386,15 @@ async function openModelPicker(ui) {
     ui.view = view;
     const config = view.profile || { model: view.model };
     if (ui.modelPicker.hidden) return;
+    if (config.billing_route === "chatgpt") {
+      ui.modelAvailable = true;
+      const usage = element("a", null, "Manage usage");
+      usage.href = "https://chatgpt.com/settings/usage"; usage.target = "_blank"; usage.rel = "noopener";
+      ui.modelPicker.replaceChildren(element("div", "model-heading", `${config.model} · ${config.reasoning_effort || "medium"}`),
+        element("div", "model-hint", "Using ChatGPT plan"), usage,
+        element("p", "model-hint", "Choose the account and model for new agents in Accounts and billing."));
+      return;
+    }
     ui.modelAvailable = config.model === "gpt-6-sol" && config.reasoning_effort === "medium"
       && config.cyber_access_program === "daybreak_blue";
     const option = element("div", "model-option", "GPT-6 Sol · Medium · Daybreak" + (ui.modelAvailable ? " (current)" : ""));
@@ -618,6 +627,11 @@ function addSession(view) {
   });
   ui.contextLabel = element("span", "context-usage");
   ui.composer.append(ui.input, ui.contextLabel);
+  if (view.profile?.billing_route === "chatgpt") {
+    const billing = element("a", "billing-route", "Using ChatGPT plan · Manage usage");
+    billing.href = "https://chatgpt.com/settings/usage"; billing.target = "_blank"; billing.rel = "noopener";
+    ui.composer.append(billing);
+  }
   ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
@@ -1746,7 +1760,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
     const info = await request("/api/terminals", "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
     attachTerminal(info);
   } catch (error) { showError(workspaceError, error); }
-  finally { button.disabled = false; }
+  finally { updateAccountSubmit(); }
 });
 
 
@@ -1834,6 +1848,9 @@ function renderDiagnostics(resetMissing = true) {
   diagnosticRow(totals, "Token cost", diagnosticCost(recordedCost), costCoverage);
   diagnosticRow(totals, "Rates updated", diagnosticsData.pricing?.as_of || "—");
   diagnosticsContent.append(totals);
+  const manage = element("a", null, "Manage usage in ChatGPT");
+  manage.href = "https://chatgpt.com/settings/usage"; manage.target = "_blank"; manage.rel = "noopener";
+  diagnosticsContent.append(manage);
   const coverage = [];
   if (summary.in_flight_requests) coverage.push(`${diagnosticNumber(summary.in_flight_requests)} in flight`);
   if (summary.unrecorded_requests) coverage.push(`${diagnosticNumber(summary.unrecorded_requests)} unrecorded`);
@@ -1923,6 +1940,7 @@ function requireLogin() {
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
   diagnosticsButton.disabled = true;
+  document.querySelector("#open-accounts").disabled = true;
   if (diagnosticsDialog.open) diagnosticsDialog.close();
 }
 
@@ -1939,6 +1957,7 @@ async function connect(token) {
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
   diagnosticsButton.disabled = false;
+  document.querySelector("#open-accounts").disabled = false;
   startEvents();
   for (const ui of terminals.values()) ui.reconnect();
 }
@@ -1976,7 +1995,7 @@ document.addEventListener("focusin", event => {
   selected = event.target.closest(".pane");
 });
 document.addEventListener("keydown", async event => {
-  if (diagnosticsDialog.open) return;
+  if (diagnosticsDialog.open || accountsDialog.open || document.querySelector("#plan-welcome").open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault(); closeSkillPicker(skillPicker); return;
@@ -2015,6 +2034,112 @@ document.addEventListener("keydown", async event => {
   catch (error) { showError(ui.error, error); }
   finally { ui.interrupting = false; }
 });
+const accountsDialog = document.querySelector("#accounts-dialog");
+const accountsError = document.querySelector("#accounts-error");
+const accountRoute = document.querySelector("#account-route");
+const accountModel = document.querySelector("#account-model");
+let accountsTimer, accountsSignature = "", accountsGeneration = 0;
+function updateAccountSubmit() {
+  const selected = accountRoute.selectedOptions[0];
+  document.querySelector("#account-selection button").disabled = !selected || selected.disabled || !accountRoute.value || (accountRoute.value !== "api_key" && !accountModel.value);
+}
+async function accountModels() {
+  const id = accountRoute.value;
+  document.querySelector("#account-model-label").hidden = !id || id === "api_key";
+  accountModel.replaceChildren();
+  updateAccountSubmit();
+  if (!id || id === "api_key" || accountRoute.selectedOptions[0]?.disabled) return;
+  const generation = ++accountsGeneration;
+  try {
+    const result = await request(`/api/accounts/${encodeURIComponent(id)}/models`);
+    if (generation !== accountsGeneration || id !== accountRoute.value) return;
+    for (const model of result.models) {
+      const option = element("option", null, model.display_name); option.value = model.slug; accountModel.append(option);
+    }
+    const current = accountModel.dataset.current;
+    if ([...accountModel.options].some(o => o.value === current)) accountModel.value = current;
+    updateAccountSubmit();
+  } catch (error) { showError(accountsError, error); }
+}
+async function refreshAccounts() {
+  clearTimeout(accountsTimer);
+  if (!accountsDialog.open) return;
+  try {
+    const status = await request("/api/accounts");
+    if (!accountsDialog.open) return;
+    const signature = JSON.stringify(status);
+    if (signature !== accountsSignature) {
+      accountsSignature = signature;
+      const saved = document.querySelector("#saved-accounts"); saved.replaceChildren(); accountRoute.replaceChildren();
+      const placeholder = element("option", null, "Choose an account"); placeholder.value = ""; placeholder.disabled = true; accountRoute.append(placeholder);
+      document.querySelector("#account-selection").hidden = !status.api_key_available && !status.accounts.some(a => a.connected && a.plan_enabled);
+      const key = element("option", null, "API key · separate API billing"); key.value = "api_key"; key.disabled = !status.api_key_available; accountRoute.append(key);
+      for (const account of status.accounts) {
+        const option = element("option", null, `ChatGPT · ${account.label}`); option.value = account.id;
+        option.disabled = !account.connected || !account.plan_enabled; accountRoute.append(option);
+        const row = element("div", "account-row");
+        row.append(element("div", null, `${account.label} · ${!account.connected ? "Signed out" : account.plan_enabled ? "Plan enabled" : "Plan permission needed"}`));
+        const reconnect = element("button", null, account.plan_enabled ? "Reconnect" : "Enable ChatGPT plan"); reconnect.type = "button";
+        reconnect.addEventListener("click", () => signInChatGPT(account.id, !account.plan_enabled)); row.append(reconnect);
+        if (account.connected) {
+          const logout = element("button", null, "Sign out"); logout.type = "button";
+          logout.addEventListener("click", async () => {
+            logout.disabled = true;
+            try { const result = await request(`/api/accounts/${encodeURIComponent(account.id)}/logout`, "POST");
+              accountsSignature = ""; await refreshAccounts();
+              if (!result.revocation_confirmed) showError(accountsError, result.message);
+            } catch (error) { showError(accountsError, error); logout.disabled = false; }
+          }); row.append(logout);
+        }
+        if (account.paused) {
+          const resume = element("button", null, "Resume requests"); resume.type = "button";
+          row.append(element("p", null, "Requests paused after a usage limit. Review Manage usage before resuming."), resume);
+          resume.addEventListener("click", async () => { resume.disabled = true; try {
+            await request(`/api/accounts/${encodeURIComponent(account.id)}/resume`, "POST"); accountsSignature = ""; await refreshAccounts();
+          } catch (error) { showError(accountsError, error); resume.disabled = false; } });
+        }
+        saved.append(row);
+      }
+      accountRoute.value = status.billing_route === "chatgpt" ? status.selected_account || "" : "api_key";
+      accountModel.dataset.current = status.model;
+      const selected = status.accounts.find(a => a.id === status.selected_account);
+      document.querySelector("#account-current").textContent = status.billing_route === "chatgpt"
+        ? selected?.connected && selected?.plan_enabled ? `New agents: ChatGPT plan · ${status.model}`
+          : "Connect a ChatGPT account and select a model to create agents."
+        : "New agents: API-key billing";
+      await accountModels();
+    }
+  } catch (error) { showError(accountsError, error); }
+  finally { if (accountsDialog.open) accountsTimer = setTimeout(refreshAccounts, 2000); }
+}
+async function signInChatGPT(account = null, consent = false) {
+  accountsError.hidden = true;
+  const popup = window.open("about:blank", "boid-chatgpt-sign-in");
+  try {
+    const result = await request("/api/accounts/sign-in", "POST", { origin: location.origin, account, consent });
+    if (popup) { popup.opener = null; popup.location.href = result.start_url; }
+    else { const link = element("a", null, "Continue with ChatGPT"); link.href = result.start_url; link.target = "_blank"; link.rel = "noopener";
+      accountsError.replaceChildren(link); accountsError.hidden = false; }
+  } catch (error) { popup?.close(); showError(accountsError, error); }
+}
+document.querySelector("#open-accounts").addEventListener("click", () => { accountsDialog.showModal(); accountsSignature = ""; accountsError.hidden = true; refreshAccounts(); });
+document.querySelector("#close-accounts").addEventListener("click", () => accountsDialog.close());
+accountsDialog.addEventListener("close", () => { clearTimeout(accountsTimer); accountsGeneration++; document.querySelector("#open-accounts").focus(); });
+document.querySelector("#chatgpt-sign-in").addEventListener("click", () => signInChatGPT());
+accountRoute.addEventListener("change", accountModels);
+accountModel.addEventListener("change", updateAccountSubmit);
+document.querySelector("#account-selection").addEventListener("submit", async event => {
+  event.preventDefault(); accountsError.hidden = true;
+  const button = event.submitter; button.disabled = true;
+  try {
+    const plan = accountRoute.value !== "api_key";
+    const result = await request("/api/accounts/select", "POST", { billing_route: plan ? "chatgpt" : "api_key", account: plan ? accountRoute.value : null, model: accountModel.value });
+    accountsSignature = ""; await refreshAccounts();
+    if (result.welcome) document.querySelector("#plan-welcome").showModal();
+  } catch (error) { showError(accountsError, error); }
+  finally { updateAccountSubmit(); }
+});
+
 setInterval(() => {
   for (const ui of sessions.values()) if (ui.view?.status === "working") updateActivity(ui);
 }, 1000);

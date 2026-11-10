@@ -1,4 +1,5 @@
 mod api;
+mod chatgpt;
 mod runtime;
 mod server;
 mod session;
@@ -21,7 +22,8 @@ boid stop gracefully stops the shared server and its active work.
 boid \"task\" starts or connects to the shared server and returns a new session ID.
 The server owns execution; closing a submitting command or browser leaves it running.
 
-Server: OPENAI_API_KEY required; BOID_MODEL defaults to gpt-6-sol with medium reasoning.
+Server: set OPENAI_API_KEY, or BOID_AUTH_ROUTE=chatgpt to sign in through Accounts and billing.
+BOID_MODEL defaults to gpt-6-sol with medium reasoning on the API-key route.
 BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.
 BOID_LISTEN defaults to 127.0.0.1:7734. Commands run with the server account permissions.
 Client: BOID_URL selects an existing remote server; no local server is started for it.
