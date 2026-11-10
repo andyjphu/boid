@@ -36,5 +36,36 @@
     <p id="diagnostics-error" class="error-banner" role="alert" hidden></p>
     <div id="diagnostics-content" aria-live="polite"></div>
   </dialog>
+  <section id="provider-login" class="login-picker" aria-label="Login" hidden>
+    <header class="login-heading"><strong>/login</strong><button id="close-provider-login" type="button" aria-label="Close login">×</button></header>
+    <div class="login-methods" aria-label="Login method">
+      <button type="button" data-login-method="api_key" aria-pressed="false">API key</button>
+      <button type="button" data-login-method="chatgpt" aria-pressed="false">ChatGPT subscription</button>
+    </div>
+    <p id="provider-login-error" class="error-banner" role="alert" hidden></p>
+    <form id="api-key-login" hidden>
+      <label id="api-key-label">OpenAI API key <input id="provider-api-key" type="password" autocomplete="off" spellcheck="false"></label>
+      <p id="api-key-ready" hidden>A server API key is configured.</p>
+      <button type="submit">Use API key</button>
+    </form>
+    <div id="subscription-login" hidden>
+      <button id="chatgpt-sign-in" type="button" data-oai-siwc-button>Continue with ChatGPT</button>
+      <form id="subscription-selection" hidden>
+        <label>Account <select id="subscription-account" required></select></label>
+        <label>Model <select id="subscription-model" required></select></label>
+        <button type="submit">Use subscription</button>
+      </form>
+      <div id="subscription-actions"></div>
+      <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
+    </div>
+    <p id="provider-login-status" role="status"></p>
+    <p class="model-hint">Selection applies to new agents. Existing agents keep their connection.</p>
+  </section>
+  <dialog id="plan-welcome" aria-labelledby="plan-welcome-title">
+    <h1 id="plan-welcome-title">You're using your ChatGPT plan</h1>
+    <p>Eligible requests from new agents use your ChatGPT plan or credits. Review limits and access in ChatGPT settings.</p>
+    <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
+    <form method="dialog"><button>Got it</button></form>
+  </dialog>
 </body>
 </html>

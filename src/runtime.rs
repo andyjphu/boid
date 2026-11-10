@@ -457,8 +457,12 @@ impl Hub {
             .get(id)
             .map(|h| Self::project_view(&data, &h.record.view))
     }
-    pub fn record_usage(&self, id: &str, report: crate::usage::Report) {
+    pub fn record_usage(&self, id: &str, mut report: crate::usage::Report) {
         if let Err(error) = self.update(id, |record| {
+            report.billing_route = record.engine.profile["billing_route"]
+                .as_str()
+                .unwrap_or("api_key")
+                .into();
             record.usage.record(report);
             Ok(())
         }) {
@@ -810,8 +814,28 @@ impl Hub {
         );
         let snapshot = crate::skills::discovery::scan(&cwd);
         let skills = snapshot.skills;
+        let profile = self.0.client.config();
+        let model = profile["model"].as_str().context(
+            "Billing settings are unavailable; repair account storage before creating agents.",
+        )?;
+        if profile["billing_route"] == "api_key" && !self.0.client.key_available() {
+            bail!(
+                "Use /login to connect an API key or ChatGPT subscription before creating an agent."
+            );
+        }
+        if profile["billing_route"] == "chatgpt" && profile["chatgpt_account"].as_str().is_none() {
+            bail!("Continue with ChatGPT and choose a model in /login before creating an agent.");
+        }
+        if profile["billing_route"] == "chatgpt" {
+            self.0
+                .client
+                .auth
+                .as_ref()
+                .context("ChatGPT account storage is unavailable.")?
+                .check_inference(profile["chatgpt_account"].as_str().unwrap())?;
+        }
         let mut engine = Session::new(
-            self.0.client.model.clone(),
+            model.into(),
             crate::skills::instructions(&skills),
             tool_calls::definitions(),
             identity.clone(),
@@ -824,7 +848,7 @@ impl Hub {
             crate::skills::catalog::prompt(&engine.skills, snapshot.budget, &snapshot.warnings)
         );
         engine.skill_warnings = snapshot.warnings;
-        engine.profile = self.0.client.config();
+        engine.profile = profile;
         let view = View {
             context_usage: None,
             context_window: crate::api::context_window(&engine.model),
@@ -937,6 +961,9 @@ impl Hub {
     pub fn message(&self, id: &str, text: String) -> Result<String> {
         if text.trim().is_empty() {
             bail!("Message must not be empty.");
+        }
+        if text.trim() == "/login" {
+            bail!("Open /login in the Boid web composer to select API or subscription access.");
         }
         if self.0.data.lock().unwrap().closing {
             bail!("Server is shutting down.");
@@ -1167,6 +1194,20 @@ impl Hub {
         drop(data);
         self.install(record, true)?;
         Ok(self.view(id).unwrap())
+    }
+    pub fn stop_account(&self, account: &str) -> Result<()> {
+        let ids: Vec<_> = self
+            .views()
+            .into_iter()
+            .filter(|v| {
+                v.profile["billing_route"] == "chatgpt" && v.profile["chatgpt_account"] == account
+            })
+            .map(|v| v.id)
+            .collect();
+        for id in ids {
+            self.stop(&id)?;
+        }
+        Ok(())
     }
     pub fn peers(&self) -> Value {
         let data = self.0.data.lock().unwrap();

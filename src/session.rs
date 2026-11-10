@@ -277,7 +277,7 @@ impl Session {
         hub.archive_context(id, self.model_requests)?;
         let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
         let result = client
-            .compact(&self.history, &self.model, &instructions)
+            .compact(&self.history, &self.model, &instructions, &self.profile)
             .await;
         self.compact_in_flight = false;
         let (kind, notice) = match result {
