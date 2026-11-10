@@ -818,10 +818,13 @@ impl Hub {
         let model = profile["model"].as_str().context(
             "Billing settings are unavailable; repair account storage before creating agents.",
         )?;
-        if profile["billing_route"] == "chatgpt" && profile["chatgpt_account"].as_str().is_none() {
+        if profile["billing_route"] == "api_key" && !self.0.client.key_available() {
             bail!(
-                "Continue with ChatGPT and choose a model in account settings before creating an agent."
+                "Use /login to connect an API key or ChatGPT subscription before creating an agent."
             );
+        }
+        if profile["billing_route"] == "chatgpt" && profile["chatgpt_account"].as_str().is_none() {
+            bail!("Continue with ChatGPT and choose a model in /login before creating an agent.");
         }
         if profile["billing_route"] == "chatgpt" {
             self.0
@@ -958,6 +961,9 @@ impl Hub {
     pub fn message(&self, id: &str, text: String) -> Result<String> {
         if text.trim().is_empty() {
             bail!("Message must not be empty.");
+        }
+        if text.trim() == "/login" {
+            bail!("Open /login in the Boid web composer to select API or subscription access.");
         }
         if self.0.data.lock().unwrap().closing {
             bail!("Server is shutting down.");

@@ -22,7 +22,8 @@ boid stop gracefully stops the shared server and its active work.
 boid \"task\" starts or connects to the shared server and returns a new session ID.
 The server owns execution; closing a submitting command or browser leaves it running.
 
-Server: set OPENAI_API_KEY, or BOID_AUTH_ROUTE=chatgpt to sign in through Accounts and billing.
+Server: use /login in the web composer to choose API or subscription access.
+OPENAI_API_KEY is optional; BOID_AUTH_ROUTE initializes the saved default.
 BOID_MODEL defaults to gpt-6-sol with medium reasoning on the API-key route.
 BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.
 BOID_LISTEN defaults to 127.0.0.1:7734. Commands run with the server account permissions.

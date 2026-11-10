@@ -17,7 +17,6 @@
     <button id="open-diagnostics" type="button" aria-label="Diagnostics" title="Diagnostics" aria-haspopup="dialog" aria-controls="diagnostics-dialog" disabled>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" fill="none" stroke="currentColor"><path d="M2 10V6m4 4V2m4 8V4" stroke-width="1.5"/></svg>
     </button>
-    <button id="open-accounts" type="button" aria-label="Accounts and billing" title="Accounts and billing" aria-haspopup="dialog" aria-controls="accounts-dialog" disabled>◎</button>
   </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
@@ -37,21 +36,31 @@
     <p id="diagnostics-error" class="error-banner" role="alert" hidden></p>
     <div id="diagnostics-content" aria-live="polite"></div>
   </dialog>
-  <dialog id="accounts-dialog" aria-labelledby="accounts-title">
-    <header class="diagnostics-header"><h1 id="accounts-title">Accounts and billing</h1><button id="close-accounts" type="button" aria-label="Close accounts">×</button></header>
-    <p>Use your ChatGPT plan or credits for eligible requests, or your API key with separate API billing.</p>
-    <button id="chatgpt-sign-in" type="button" data-oai-siwc-button>Continue with ChatGPT</button>
-    <p id="accounts-error" class="error-banner" role="alert" hidden></p>
-    <div id="saved-accounts"></div>
-    <form id="account-selection">
-      <label>New agents use <select id="account-route" required></select></label>
-      <label id="account-model-label">Model <select id="account-model"></select></label>
-      <button type="submit">Use for new agents</button>
+  <section id="provider-login" class="login-picker" aria-label="Login" hidden>
+    <header class="login-heading"><strong>/login</strong><button id="close-provider-login" type="button" aria-label="Close login">×</button></header>
+    <div class="login-methods" aria-label="Login method">
+      <button type="button" data-login-method="api_key" aria-pressed="false">API key</button>
+      <button type="button" data-login-method="chatgpt" aria-pressed="false">ChatGPT subscription</button>
+    </div>
+    <p id="provider-login-error" class="error-banner" role="alert" hidden></p>
+    <form id="api-key-login" hidden>
+      <label id="api-key-label">OpenAI API key <input id="provider-api-key" type="password" autocomplete="off" spellcheck="false"></label>
+      <p id="api-key-ready" hidden>A server API key is configured.</p>
+      <button type="submit">Use API key</button>
     </form>
-    <p id="account-current" role="status"></p>
-    <p>Existing agents keep their billing route and account. Signing out stops agents using that account.</p>
-    <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
-  </dialog>
+    <div id="subscription-login" hidden>
+      <button id="chatgpt-sign-in" type="button" data-oai-siwc-button>Continue with ChatGPT</button>
+      <form id="subscription-selection" hidden>
+        <label>Account <select id="subscription-account" required></select></label>
+        <label>Model <select id="subscription-model" required></select></label>
+        <button type="submit">Use subscription</button>
+      </form>
+      <div id="subscription-actions"></div>
+      <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener">Manage usage</a>
+    </div>
+    <p id="provider-login-status" role="status"></p>
+    <p class="model-hint">Selection applies to new agents. Existing agents keep their connection.</p>
+  </section>
   <dialog id="plan-welcome" aria-labelledby="plan-welcome-title">
     <h1 id="plan-welcome-title">You're using your ChatGPT plan</h1>
     <p>Eligible requests from new agents use your ChatGPT plan or credits. Review limits and access in ChatGPT settings.</p>

@@ -293,8 +293,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .context-usage { position: absolute; top: 9px; right: 8px; color: #777; font-size: 10px; line-height: 16px; white-space: nowrap; pointer-events: none; }
 
 #open-diagnostics { display: flex; align-items: center; justify-content: center; padding: 0; }
-#diagnostics-dialog, #accounts-dialog, #plan-welcome { width: min(360px, calc(100vw - 20px)); max-height: calc(100dvh - 32px); padding: 8px; overflow: auto; color: inherit; background: #222; border: 1px solid #555; border-radius: 0; }
-#diagnostics-dialog::backdrop, #accounts-dialog::backdrop, #plan-welcome::backdrop { background: #0005; }
+#diagnostics-dialog, #plan-welcome { width: min(360px, calc(100vw - 20px)); max-height: calc(100dvh - 32px); padding: 8px; overflow: auto; color: inherit; background: #222; border: 1px solid #555; border-radius: 0; }
+#diagnostics-dialog::backdrop, #plan-welcome::backdrop { background: #0005; }
 .diagnostics-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
 .diagnostics-header h1 { margin: 0; font: inherit; font-weight: 600; }
 #close-diagnostics { border: 0; background: transparent; padding: 0 3px; line-height: 16px; font-size: 16px; }
@@ -309,11 +309,15 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .diagnostics-reason { display: block; }
 #diagnostics-error { padding: 0; margin: 7px 0; }
 
-#accounts-dialog { width: min(430px, calc(100vw - 20px)); }
-#account-selection { display: grid; gap: 8px; margin: 12px 0; }
-#account-selection label { display: grid; gap: 4px; }
-#accounts-dialog select { width: 100%; background: #292929; color: inherit; border: 1px solid #555; padding: 4px; }
-.account-row { margin: 10px 0; overflow-wrap: anywhere; }
-.account-row button { margin: 4px 4px 0 0; }
+.login-picker { flex-shrink: 0; max-height: 80%; overflow: auto; border-top: 1px solid #383838; padding: 8px; }
+.login-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.login-heading button { border: 0; padding: 0 5px; }
+.login-methods { display: flex; gap: 6px; flex-wrap: wrap; }
+.login-methods button[aria-pressed="true"] { border-color: #aaa; background: #383838; }
+.login-picker form, .login-picker label { display: grid; gap: 6px; }
+.login-picker form { margin: 10px 0; }
+.login-picker select, .login-picker input { width: 100%; min-width: 0; background: #292929; color: inherit; border: 1px solid #555; padding: 4px; }
+#subscription-login { margin-top: 10px; }
+#subscription-actions button { margin: 4px 4px 6px 0; }
 #chatgpt-sign-in { background: #111; color: #fff; padding: 8px 12px; }
 .billing-route { margin-left: 6px; color: #aaa; white-space: nowrap; }

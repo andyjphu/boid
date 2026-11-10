@@ -8,23 +8,26 @@ routes after an error.
 
 ## Connect
 
-An existing API-key server can use **Accounts and billing** in the workspace
-header to add ChatGPT accounts. To start a new server without an API key:
+Type `/login` in an agent composer and press Enter. The inline chooser offers
+**API key** or **ChatGPT subscription**. With no agents yet, choose **+agent**,
+then **/login** in the new-agent setup. There is no separate account page.
 
-```sh
-BOID_AUTH_ROUTE=chatgpt boid
-```
+Boid can start without model credentials. Choose **API key** to use the server's
+configured key or enter one in the password field. A key entered here is stored
+privately on the server, never in model messages or browser storage. API-key
+validity is checked by the provider when an agent makes its first request.
 
-Keep `BOID_AUTH_ROUTE=chatgpt` in that server's environment for subsequent
-launches without an API key. The setting initializes the billing default;
-previously saved account selections take precedence. The server loads its
-credentials, so restarting only a browser does not change its environment.
+Choose **ChatGPT subscription**, then **Continue with ChatGPT** and finish consent
+in the new tab. Return to `/login`, select an account and an available model,
+then **Use subscription**. Signing in alone does not change the selected route.
+Models come from that account's current catalog; Boid preserves the selected slug.
+**Escape** returns to the composer without interrupting the agent.
 
-Open the workspace using `http://127.0.0.1:<port>`, choose **Accounts and billing**,
-then **Continue with ChatGPT**. Finish consent in the new tab. Back in Boid, select
-the account and an available model, then **Use for new agents**. Signing in alone
-does not change the selected billing route. Models come from that account's
-current catalog; Boid preserves the selected model slug.
+Selections apply to new agents. Existing agents retain their captured billing
+route and account. `BOID_AUTH_ROUTE` can initialize the default on a new state
+directory; saved selections take precedence.
+
+Open Boid through `http://127.0.0.1:<port>` for ChatGPT's loopback callback.
 
 For a remote server, forward its loopback port before signing in. For example,
 `ssh -N -L 7734:127.0.0.1:7734 mm-west-2` lets the browser use
@@ -46,7 +49,7 @@ could not be confirmed, disconnect Boid in ChatGPT settings too.
 token counts but do not assign API dollar estimates to plan requests.
 
 A usage-limit error pauses further requests for that account. Review usage,
-choose **Resume requests** in account settings, then send a message to resume the
+choose **Resume requests** under `/login` → **ChatGPT subscription**, then send a message to resume the
 agent. Boid does not infer a limit reset time. Network failures retain credentials;
 terminal refresh failures require reconnecting the saved account. Provider errors
 retain HTTP status, error details and request ID for diagnosis. Failed or
@@ -62,7 +65,7 @@ No API-key compaction request is made as a fallback.
 Credentials are stored under `$BOID_STATE_DIR/chatgpt` (by default
 `~/.local/share/boid/chatgpt`), with a private directory and owner-only atomic
 credential files. Refreshes are serialized, and a cancelled agent request does
-not discard a rotated refresh token. Browser storage contains no OAuth tokens.
+not discard a rotated refresh token. Browser storage contains no API keys or OAuth tokens.
 Treat the server account and its state directory as trusted, as with Boid's
 existing API key and command execution.
 

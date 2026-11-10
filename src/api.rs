@@ -34,11 +34,6 @@ impl Client {
             .trim()
             .to_owned();
         let route = std::env::var("BOID_AUTH_ROUTE").unwrap_or_else(|_| "api_key".into());
-        if route == "api_key" && key.is_empty() {
-            bail!(
-                "Set OPENAI_API_KEY before starting Boid, or set BOID_AUTH_ROUTE=chatgpt to connect a ChatGPT account."
-            );
-        }
         let model = match std::env::var("BOID_MODEL") {
             Ok(model) if !model.trim().is_empty() => model,
             Ok(_) => bail!("BOID_MODEL must not be empty."),
@@ -99,13 +94,25 @@ impl Client {
     }
     pub fn key_available(&self) -> bool {
         !self.key.is_empty()
+            || self
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.api_key().ok().flatten().is_some())
+    }
+    fn api_key(&self) -> Result<String> {
+        if let Some(auth) = &self.auth {
+            if let Some(key) = auth.api_key()? {
+                return Ok(key);
+            }
+        }
+        if self.key.is_empty() {
+            bail!("Use /login to connect an API key before creating API agents.");
+        }
+        Ok(self.key.clone())
     }
     async fn credential(&self, profile: &Value) -> Result<String> {
         match profile["billing_route"].as_str().unwrap_or("api_key") {
-            "api_key" if !self.key.is_empty() => Ok(self.key.clone()),
-            "api_key" => bail!(
-                "This agent uses API-key billing, but OPENAI_API_KEY is unavailable. No billing route was changed."
-            ),
+            "api_key" => self.api_key(),
             "chatgpt" => {
                 let auth = self
                     .auth
@@ -113,7 +120,7 @@ impl Client {
                     .context("ChatGPT account storage is unavailable.")?;
                 let id = profile["chatgpt_account"]
                     .as_str()
-                    .context("Choose a ChatGPT account for new agents in account settings.")?;
+                    .context("Choose a ChatGPT account for new agents in /login.")?;
                 auth.check_inference(id)?;
                 auth.token(id).await
             }
@@ -296,7 +303,10 @@ impl Client {
             .await
             .context("Cannot read OpenAI compaction response.")?;
         if !status.is_success() {
-            bail!("OpenAI compaction {status}: {}", self.redact(&body));
+            bail!(
+                "OpenAI compaction {status}: {}",
+                self.redact(&body).replace(&credential, "[redacted]")
+            );
         }
         let result: Value =
             serde_json::from_str(&body).context("Invalid compaction response JSON.")?;

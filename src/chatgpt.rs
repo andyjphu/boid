@@ -72,6 +72,8 @@ struct Store {
     selected: Option<String>,
     model: String,
     accounts: BTreeMap<String, Account>,
+    #[serde(default)]
+    api_key: String,
 }
 struct Attempt {
     state: String,
@@ -135,6 +137,7 @@ impl Auth {
                 selected: None,
                 model: model.into(),
                 accounts: BTreeMap::new(),
+                api_key: String::new(),
             })?;
         }
         auth.load()?;
@@ -184,6 +187,20 @@ impl Auth {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+    pub fn api_key(&self) -> Result<Option<String>> {
+        let key = self.load()?.api_key;
+        Ok(if key.is_empty() { None } else { Some(key) })
+    }
+    pub async fn save_api_key(&self, key: &str) -> Result<()> {
+        let key = key.trim();
+        if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_whitespace) {
+            bail!("Enter a non-empty OpenAI API key without whitespace.");
+        }
+        let _lock = self.lock().await?;
+        let mut store = self.load()?;
+        store.api_key = key.to_owned();
+        self.save(&store)
+    }
     pub fn profile(&self) -> Result<Value> {
         let store = self.load()?;
         if !matches!(store.route.as_str(), "api_key" | "chatgpt") {
@@ -200,7 +217,7 @@ impl Auth {
             "connected":!a.id_token.is_empty() || !a.refresh_token.is_empty(),"plan_enabled":a.allowed(),"paused":a.paused})).collect();
         Ok(
             json!({"billing_route":store.route,"selected_account":store.selected,"model":store.model,
-            "accounts":accounts,"api_key_available":api_key_available,"usage_url":"https://chatgpt.com/settings/usage"}),
+            "accounts":accounts,"api_key_available":api_key_available || !store.api_key.is_empty(),"usage_url":"https://chatgpt.com/settings/usage"}),
         )
     }
     pub async fn select(
@@ -426,7 +443,7 @@ impl Auth {
         };
         if query.contains_key("error") {
             bail!(
-                "ChatGPT sign-in was declined or could not finish. Previous account settings are unchanged."
+                "ChatGPT sign-in was declined or could not finish. Previous login selections are unchanged."
             );
         }
         let client = query
@@ -508,12 +525,12 @@ impl Auth {
         let account = store.accounts.get(id).context("Unknown ChatGPT account.")?;
         if account.refresh_token.is_empty() || !account.allowed() {
             bail!(
-                "Reconnect and enable this ChatGPT account in account settings; no API-key fallback was used."
+                "Reconnect and enable this ChatGPT account in /login; no API-key fallback was used."
             );
         }
         if account.paused {
             bail!(
-                "ChatGPT requests are paused after a usage limit. Review https://chatgpt.com/settings/usage, then choose Resume requests in Boid account settings. No API-key fallback was used."
+                "ChatGPT requests are paused after a usage limit. Review https://chatgpt.com/settings/usage, then choose Resume requests in Boid with /login. No API-key fallback was used."
             );
         }
         Ok(())
@@ -542,14 +559,14 @@ impl Auth {
         let account = store
             .accounts
             .get_mut(id)
-            .context("ChatGPT account is not saved. Continue with ChatGPT in account settings.")?;
+            .context("ChatGPT account is not saved. Continue with ChatGPT in /login.")?;
         if !account.allowed() {
             bail!(
-                "ChatGPT plan usage is disabled. Enable it in account settings; no API-key fallback was used."
+                "ChatGPT plan usage is disabled. Enable it in /login; no API-key fallback was used."
             );
         }
         if account.access_token.is_empty() || account.refresh_token.is_empty() {
-            bail!("Reconnect this ChatGPT account in account settings.");
+            bail!("Reconnect this ChatGPT account in /login.");
         }
         if account.expires_at > now() + 60 {
             return Ok(account.access_token.clone());
@@ -578,9 +595,7 @@ impl Auth {
             ) {
                 account.clear();
                 self.save(&store)?;
-                bail!(
-                    "ChatGPT authorization expired or was revoked. Reconnect in account settings."
-                );
+                bail!("ChatGPT authorization expired or was revoked. Reconnect in /login.");
             }
             bail!(
                 "ChatGPT token refresh failed (HTTP {status}); credentials retained. No API-key fallback was used."
@@ -597,7 +612,7 @@ impl Auth {
         let allowed = account.allowed();
         self.save(&store)?;
         if !allowed {
-            bail!("ChatGPT plan permission was removed. Enable it in account settings.");
+            bail!("ChatGPT plan permission was removed. Enable it in /login.");
         }
         Ok(access)
     }

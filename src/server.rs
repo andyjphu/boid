@@ -120,6 +120,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/accounts", get(accounts))
         .route("/api/accounts/sign-in", post(account_sign_in))
         .route("/api/accounts/select", post(account_select))
+        .route("/api/accounts/api-key", post(account_api_key))
         .route("/api/accounts/{id}/models", get(account_models))
         .route("/api/accounts/{id}/logout", post(account_logout))
         .route("/api/accounts/{id}/resume", post(account_resume))
@@ -467,8 +468,11 @@ async fn account_select(
     State(app): State<App>,
     Json(input): Json<AccountSelection>,
 ) -> ApiResult<Json<Value>> {
-    if input.billing_route == "api_key" && !app.api_key_available {
-        return Err(invalid("OPENAI_API_KEY is not configured in this server."));
+    if input.billing_route == "api_key"
+        && !app.api_key_available
+        && auth(&app)?.api_key().map_err(invalid)?.is_none()
+    {
+        return Err(invalid("Use /login to enter an API key."));
     }
     let welcome = auth(&app)?
         .select(&input.billing_route, input.account.as_deref(), &input.model)
@@ -477,6 +481,20 @@ async fn account_select(
     Ok(Json(
         json!({"status":"selected_for_new_agents","welcome":welcome}),
     ))
+}
+#[derive(Deserialize)]
+struct ApiKeyLogin {
+    key: String,
+}
+async fn account_api_key(
+    State(app): State<App>,
+    Json(input): Json<ApiKeyLogin>,
+) -> ApiResult<Json<Value>> {
+    auth(&app)?
+        .save_api_key(&input.key)
+        .await
+        .map_err(invalid)?;
+    Ok(Json(json!({"ok":true})))
 }
 async fn account_models(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(
@@ -514,11 +532,11 @@ async fn auth_callback(
     let (status, text) = match result {
         Ok(()) => (
             StatusCode::OK,
-            "ChatGPT account connected. Close this tab and choose a model and billing route in Boid account settings.".to_owned(),
+            "ChatGPT account connected. Close this tab and choose a model and billing route with /login in Boid.".to_owned(),
         ),
         Err(error) => (
             StatusCode::BAD_REQUEST,
-            format!("ChatGPT sign-in did not complete: {error}. Close this tab and retry from Boid account settings."),
+            format!("ChatGPT sign-in did not complete: {error}. Close this tab and retry with /login in Boid."),
         ),
     };
     let text = text
