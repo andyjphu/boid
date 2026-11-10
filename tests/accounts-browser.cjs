@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, '../src/web');
   try {
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     const errors = [], actions = [];
+    const profiles = { agent: { billing_route: 'api_key', model: 'first', reasoning_effort: 'medium' }, other: { billing_route: 'api_key', model: 'first' } };
     const status = { billing_route: 'api_key', selected_account: null, model: 'first', api_key_available: true,
       accounts: [{ id: 'fixture-account', label: 'fixture@example.invalid · account', connected: true, plan_enabled: true, paused: false }] };
     page.on('pageerror', error => errors.push(error.message));
@@ -25,11 +26,22 @@ const root = path.resolve(__dirname, '../src/web');
       if (url.pathname.endsWith('/messages')) { actions.push('model-message'); return route.fulfill({ json: {} }); }
       if (url.pathname === '/api/terminals' && route.request().method() === 'POST') return route.fulfill({ status: 500, json: { error: 'Fixture terminal failure' } });
       if (url.pathname === '/api/accounts') return route.fulfill({ json: status });
+      if (url.pathname === '/api/sessions/agent') return route.fulfill({ json: { id: 'agent', profile: profiles.agent } });
+      if (url.pathname === '/api/sessions/agent/model') {
+        const body = route.request().postDataJSON(); actions.push({ action: 'model', ...body });
+        profiles.agent.model = body.model; return route.fulfill({ json: { profile: profiles.agent } });
+      }
       if (url.pathname.endsWith('/models')) return route.fulfill({ json: { models: [{ slug: 'second', display_name: 'Second model' }, { slug: 'first', display_name: 'First model' }] } });
       if (url.pathname === '/api/accounts/select') {
         const body = route.request().postDataJSON(); actions.push(body);
-        Object.assign(status, { billing_route: body.billing_route, selected_account: body.account, model: body.model });
-        return route.fulfill({ json: { welcome: true } });
+        let profile;
+        if (body.session_id) {
+          profile = profiles[body.session_id]; Object.assign(profile, { billing_route: body.billing_route, chatgpt_account: body.account });
+        } else {
+          Object.assign(status, { billing_route: body.billing_route, selected_account: body.account });
+          profile = { billing_route: body.billing_route, model: status.model };
+        }
+        return route.fulfill({ json: { welcome: body.billing_route === 'chatgpt', profile } });
       }
       if (url.pathname.endsWith('/logout')) {
         status.accounts[0].connected = false;
@@ -45,8 +57,8 @@ const root = path.resolve(__dirname, '../src/web');
     });
     await page.goto('http://boid.test');
     await page.waitForFunction(() => window.testEvents);
-    await page.evaluate(() => snapshot([{ id: 'agent', name: 'canary', cwd: '/tmp', status: 'working', entries: [], pending: [], profile: { billing_route: 'chatgpt', model: 'first' } }], []));
-    assert.match(await page.locator('.billing-route').textContent(), /Using ChatGPT plan/);
+    await page.evaluate(() => snapshot([{ id: 'agent', name: 'canary', cwd: '/tmp', status: 'idle', entries: [], pending: [], profile: { billing_route: 'api_key', model: 'first' } }], []));
+    assert.equal(await page.locator('.billing-route').isVisible(), false);
     assert.equal(await page.locator('#open-accounts, #accounts-dialog').count(), 0);
     const composer = page.locator('[data-pane-key="agent:agent"] textarea');
     async function command() {
@@ -57,17 +69,24 @@ const root = path.resolve(__dirname, '../src/web');
     await command();
     assert(!actions.includes('model-message'), '/login is a local command, not a model prompt');
     await page.getByRole('button', { name: 'ChatGPT subscription', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('#subscription-model').options.length === 2);
-    assert.deepEqual(await page.locator('#subscription-model option').allTextContents(), ['Second model', 'First model']);
-    await page.locator('#subscription-model').selectOption('second');
+    assert.equal(await page.locator('#subscription-model').count(), 0);
+    assert.equal(await page.getByText('Manage usage', { exact: true }).count(), 0);
     await page.getByRole('button', { name: 'Use subscription', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#plan-welcome').open);
-    assert.deepEqual(actions[0], { billing_route: 'chatgpt', account: 'fixture-account', model: 'second' });
+    assert.deepEqual(actions[0], { session_id: 'agent', billing_route: 'chatgpt', account: 'fixture-account' });
     await page.getByRole('button', { name: 'Got it' }).click();
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => document.querySelector('#provider-login').hidden);
     assert(!actions.includes('stop'), 'Escape in /login must not interrupt an agent');
     assert.equal(await composer.isVisible(), true);
+    assert.equal(profiles.agent.billing_route, 'chatgpt'); assert.equal(profiles.other.billing_route, 'api_key');
+    assert.equal(status.billing_route, 'api_key', 'Pane selection must not change the default');
+    assert.equal(await page.locator('.billing-route').isVisible(), true);
+    await composer.fill('/model'); await composer.press('Enter');
+    await page.getByRole('option', { name: 'Second model', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.model-picker').hidden);
+    assert.equal(profiles.agent.model, 'second');
+    assert.equal(await page.evaluate(() => sessions.get('agent').view.profile.model), 'second');
     status.accounts[0].paused = true;
     await command();
     await page.getByRole('button', { name: 'ChatGPT subscription', exact: true }).click();
@@ -85,8 +104,8 @@ const root = path.resolve(__dirname, '../src/web');
     await page.getByRole('button', { name: 'API key', exact: true }).click();
     await page.locator('#provider-api-key').fill('synthetic-browser-key');
     await page.getByRole('button', { name: 'Use API key', exact: true }).click();
-    await page.waitForFunction(() => document.querySelector('#provider-login-status').textContent.includes('API key selected'));
-    assert(actions.includes('key-saved')); assert.equal(actions.at(-1).billing_route, 'api_key');
+    await page.waitForFunction(() => document.querySelector('#provider-login-status').textContent.includes('API key connected'));
+    assert(actions.includes('key-saved')); assert.equal(actions.at(-1).billing_route, 'api_key'); assert.equal(actions.at(-1).session_id, undefined);
     assert.equal(await page.locator('#provider-api-key').inputValue(), '');
     assert.equal(await page.evaluate(() => JSON.stringify({ ...sessionStorage, ...localStorage }).includes('synthetic-browser-key')), false);
     assert(!actions.includes('model-message'));

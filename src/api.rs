@@ -92,6 +92,10 @@ impl Client {
             "chatgpt_account": if plan { selected["chatgpt_account"].clone() } else { Value::Null },
         })
     }
+    pub fn api_profile(&self) -> Value {
+        json!({"model":self.model,"reasoning_effort":REASONING_EFFORT,
+            "cyber_access_program":self.cyber_access_program,"billing_route":"api_key","chatgpt_account":null})
+    }
     pub fn key_available(&self) -> bool {
         !self.key.is_empty()
             || self

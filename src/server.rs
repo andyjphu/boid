@@ -134,6 +134,8 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         )
         .route("/api/sessions/{id}/messages", post(message))
         .route("/api/sessions/{id}/skills", get(skill_catalog))
+        .route("/api/sessions/{id}/models", get(session_models))
+        .route("/api/sessions/{id}/model", post(session_model))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
@@ -459,6 +461,7 @@ async fn account_sign_in(
 }
 #[derive(Deserialize)]
 struct AccountSelection {
+    session_id: Option<String>,
     billing_route: String,
     account: Option<String>,
     #[serde(default)]
@@ -474,12 +477,114 @@ async fn account_select(
     {
         return Err(invalid("Use /login to enter an API key."));
     }
-    let welcome = auth(&app)?
-        .select(&input.billing_route, input.account.as_deref(), &input.model)
-        .await
+    let current = match &input.session_id {
+        Some(id) => app.hub.profile(id).map_err(invalid)?,
+        None => app.hub.config(),
+    };
+    let mut profile = current.clone();
+    match input.billing_route.as_str() {
+        "api_key" => {
+            profile["billing_route"] = json!("api_key");
+            profile["chatgpt_account"] = Value::Null;
+            profile["cyber_access_program"] = app.hub.api_profile()["cyber_access_program"].clone();
+        }
+        "chatgpt" => {
+            let account = input
+                .account
+                .as_deref()
+                .ok_or_else(|| invalid("Choose a ChatGPT account."))?;
+            auth(&app)?.check_inference(account).map_err(invalid)?;
+            let models = auth(&app)?.models(account).await.map_err(invalid)?;
+            let preferred = if input.model.is_empty() {
+                current["model"].as_str().unwrap_or("")
+            } else {
+                &input.model
+            };
+            let model = models
+                .iter()
+                .find(|m| m["slug"] == preferred)
+                .or_else(|| models.first())
+                .and_then(|m| m["slug"].as_str())
+                .ok_or_else(|| invalid("This account has no available models."))?;
+            profile["billing_route"] = json!("chatgpt");
+            profile["chatgpt_account"] = json!(account);
+            profile["model"] = json!(model);
+            profile["cyber_access_program"] = Value::Null;
+        }
+        _ => return Err(invalid("Unknown billing route.")),
+    }
+    let welcome = if let Some(id) = &input.session_id {
+        app.hub
+            .select_profile(id, &current, profile.clone())
+            .map_err(invalid)?;
+        if input.billing_route == "chatgpt" {
+            auth(&app)?
+                .welcome(input.account.as_deref().unwrap())
+                .await
+                .map_err(invalid)?
+        } else {
+            false
+        }
+    } else {
+        auth(&app)?
+            .select(
+                &input.billing_route,
+                input.account.as_deref(),
+                profile["model"].as_str().unwrap_or(""),
+            )
+            .await
+            .map_err(invalid)?
+    };
+    Ok(Json(
+        json!({"session_id":input.session_id,"profile":profile,"context_window":crate::api::context_window(profile["model"].as_str().unwrap_or("")),"welcome":welcome}),
+    ))
+}
+async fn available_models(app: &App, profile: &Value) -> anyhow::Result<Vec<Value>> {
+    if profile["billing_route"] == "chatgpt" {
+        let account = profile["chatgpt_account"]
+            .as_str()
+            .context("Use /login to connect a ChatGPT account.")?;
+        app.auth
+            .as_ref()
+            .context("ChatGPT authentication is unavailable.")?
+            .models(account)
+            .await
+    } else {
+        let default = app.hub.api_profile();
+        let mut models = vec![json!({"slug":default["model"],"display_name":default["model"]})];
+        if profile["model"] != default["model"] {
+            models.push(json!({"slug":profile["model"],"display_name":profile["model"]}));
+        }
+        Ok(models)
+    }
+}
+async fn session_models(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let profile = app.hub.profile(&id).map_err(invalid)?;
+    Ok(Json(
+        json!({"models":available_models(&app, &profile).await.map_err(invalid)?}),
+    ))
+}
+#[derive(Deserialize)]
+struct ModelSelection {
+    model: String,
+}
+async fn session_model(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<ModelSelection>,
+) -> ApiResult<Json<Value>> {
+    let current = app.hub.profile(&id).map_err(invalid)?;
+    let models = available_models(&app, &current).await.map_err(invalid)?;
+    if !models.iter().any(|m| m["slug"] == input.model) {
+        return Err(invalid("Choose an available model."));
+    }
+    let mut profile = current.clone();
+    profile["model"] = json!(input.model);
+    app.hub
+        .select_profile(&id, &current, profile.clone())
         .map_err(invalid)?;
     Ok(Json(
-        json!({"status":"selected_for_new_agents","welcome":welcome}),
+        json!({"profile":profile,"context_window":crate::api::context_window(&input.model)}),
     ))
 }
 #[derive(Deserialize)]
