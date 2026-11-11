@@ -55,6 +55,21 @@ terminal refresh failures require reconnecting the saved account. Provider error
 retain HTTP status, error details and request ID for diagnosis. Failed or
 interrupted streams do not count as completed responses.
 
+Before a response stream opens, Boid retries connection-establishment failures and
+HTTP 500/502/503/504/520 responses up to three times. Explicit transient
+`rate_limit_exceeded` 429 responses can also retry; subscription usage limits,
+unknown 429s, permission errors and invalid requests do not. Delays use exponential
+backoff with jitter and honor `Retry-After` seconds or dates, with at most 30
+seconds of total waiting. A longer requested delay stops the turn rather than
+retrying early. Escape, Stop and shutdown cancel the waiting request. Once a
+stream opens, Boid does not replay it or its tools after an error.
+
+Failed HTTP attempts and stream failures retain timestamps, status, error code,
+request ID when supplied, and scheduled retry delay in the private session record.
+`/api/diagnostics` exposes each agent's failure count and latest failure. These
+records are separate from reported token usage; a failed request is not assigned
+zero cost. Quota guidance appears only for actual subscription usage-limit errors.
+
 The plan route sends explicit history with `store:false` and `stream:true` to the
 public Responses API. Local tools use the `boid` namespace. API-key access-program
 settings are omitted. `/clear` works on either route. `/oai-compact` and its model

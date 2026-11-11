@@ -348,6 +348,11 @@ impl Session {
                     &instructions,
                     &self.profile,
                     |event| {
+                        if let Some(failure) =
+                            crate::usage::RequestFailure::from_event(attempt, event)
+                        {
+                            hub.record_request_failure(id, failure);
+                        }
                         if let Some(report) = crate::usage::Report::from_event(attempt, event) {
                             hub.record_usage(id, report);
                         }
