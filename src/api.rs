@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REASONING_EFFORT: &str = "medium";
 
@@ -174,87 +174,174 @@ impl Client {
                 .collect();
             request["tools"] = json!([{"type":"namespace","name":"boid","description":"Local Boid agent tools","tools":functions}]);
         }
-        let credential = self.credential(profile).await?;
-        let response = self
-            .http
-            .post(endpoint)
-            .bearer_auth(&credential)
-            .json(&request)
-            .send()
-            .await
-            .context("Cannot reach the OpenAI API.")?;
-        let status = response.status();
-        let request_id = response
-            .headers()
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unavailable")
-            .to_owned();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+        let mut http_attempt = 0;
+        let mut waited = Duration::ZERO;
+        let (response, credential, request_id) = loop {
+            // Recheck the same account after backoff; another request may have paused it.
+            let credential = self.credential(profile).await?;
+            http_attempt += 1;
+            let sent = self
+                .http
+                .post(endpoint)
+                .bearer_auth(&credential)
+                .json(&request)
+                .send()
+                .await;
+            let response = match sent {
+                Ok(response) => response,
+                Err(error) => {
+                    // Only connection establishment failures are safe to retry here.
+                    // An ambiguous send/read timeout may already have reached inference.
+                    let delay = error
+                        .is_connect()
+                        .then(|| retry_delay(http_attempt, waited, None))
+                        .flatten();
+                    let message = self
+                        .redact(&format!("Cannot reach the OpenAI API: {error}"))
+                        .replace(&credential, "[redacted]");
+                    on_event(&failure_event(
+                        model,
+                        profile,
+                        http_attempt,
+                        if error.is_connect() {
+                            "connect"
+                        } else {
+                            "send"
+                        },
+                        None,
+                        None,
+                        None,
+                        &message,
+                        None,
+                        delay,
+                    ));
+                    if let Some(delay) = delay {
+                        waited += delay;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    bail!("{message} (after {http_attempt} HTTP attempts)");
+                }
+            };
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if response.status().is_success() {
+                break (response, credential, request_id);
+            }
+            let status = response.status().as_u16();
+            let advised = retry_after(response.headers(), SystemTime::now());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("Cannot read error body: {error}"));
             let error = serde_json::from_str::<Value>(&body)
                 .unwrap_or_else(|_| json!({"non_json_body":body}));
-            self.pause_for_limit(profile, &error).await?;
-            bail!(
-                "{}",
-                self.redact(&provider_error(
-                    status.as_u16(),
-                    &request_id,
+            let delay = retryable_status(status, &error)
+                .then(|| retry_delay(http_attempt, waited, advised))
+                .flatten();
+            let message = self
+                .redact(&provider_error(
+                    status,
+                    request_id.as_deref().unwrap_or("unavailable"),
                     &error,
-                    profile
+                    profile,
                 ))
-                .replace(&credential, "[redacted]")
-            );
-        }
-
-        let mut stream = response.bytes_stream().eventsource();
-        let mut completed = BTreeMap::new();
-        while let Some(event) = stream.next().await {
-            let event = event.map_err(|error| {
-                anyhow::anyhow!(
-                    "Cannot read API stream: {}",
-                    self.redact(&error.to_string())
-                        .replace(&credential, "[redacted]")
-                )
-            })?;
-            let event: Value =
-                serde_json::from_str(&event.data).context("Invalid JSON in the API stream.")?;
-            on_event(&event);
-            match event["type"].as_str() {
-                Some("response.output_item.done") => {
-                    let index = event["output_index"]
-                        .as_u64()
-                        .context("Missing completed output index.")?;
-                    let item = event
-                        .get("item")
-                        .context("Missing completed output item.")?;
-                    completed.insert(index as usize, item.clone());
-                }
-                Some("response.completed") => return finish(&event, completed),
-                Some("response.failed" | "response.incomplete" | "error") => {
-                    self.pause_for_limit(profile, &event).await?;
-                    bail!(
-                        "OpenAI response stopped: {}",
-                        self.redact(&provider_error(
-                            status.as_u16(),
-                            &request_id,
-                            &event,
-                            profile
-                        ))
-                        .replace(&credential, "[redacted]")
-                    );
-                }
-                _ => {}
+                .replace(&credential, "[redacted]");
+            // Diagnostics retain timestamps and retries even if the next attempt succeeds.
+            on_event(&failure_event(
+                model,
+                profile,
+                http_attempt,
+                "http",
+                Some(status),
+                request_id.as_deref(),
+                error_code(&error),
+                &message,
+                advised,
+                delay,
+            ));
+            self.pause_for_limit(profile, &error).await?;
+            if let Some(delay) = delay {
+                waited += delay;
+                tokio::time::sleep(delay).await;
+                continue;
             }
+            bail!("{message} (after {http_attempt} HTTP attempts)");
+        };
+        let status = response.status();
+        let request_id = request_id.as_deref().unwrap_or("unavailable");
+        let mut stream_error_code = None;
+        let result: Result<Vec<Value>> = async {
+            let mut stream = response.bytes_stream().eventsource();
+            let mut completed = BTreeMap::new();
+            while let Some(event) = stream.next().await {
+                let event = event.map_err(|error| {
+                    anyhow::anyhow!(
+                        "Cannot read API stream: {}",
+                        self.redact(&error.to_string())
+                            .replace(&credential, "[redacted]")
+                    )
+                })?;
+                let event: Value =
+                    serde_json::from_str(&event.data).context("Invalid JSON in the API stream.")?;
+                on_event(&event);
+                match event["type"].as_str() {
+                    Some("response.output_item.done") => {
+                        let index = event["output_index"]
+                            .as_u64()
+                            .context("Missing completed output index.")?;
+                        let item = event
+                            .get("item")
+                            .context("Missing completed output item.")?;
+                        completed.insert(index as usize, item.clone());
+                    }
+                    Some("response.completed") => return finish(&event, completed),
+                    Some("response.failed" | "response.incomplete" | "error") => {
+                        stream_error_code = error_code(&event).map(str::to_owned);
+                        self.pause_for_limit(profile, &event).await?;
+                        bail!(
+                            "OpenAI response stopped: {}",
+                            self.redact(&provider_error(
+                                status.as_u16(),
+                                &request_id,
+                                &event,
+                                profile
+                            ))
+                            .replace(&credential, "[redacted]")
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            bail!("API stream ended before the response completed.")
         }
-        bail!("API stream ended before the response completed.")
+        .await;
+        // Never replay an opened stream, including failures before its first event.
+        if let Err(error) = &result {
+            let message = self
+                .redact(&format!("{error:#}"))
+                .replace(&credential, "[redacted]");
+            on_event(&failure_event(
+                model,
+                profile,
+                http_attempt,
+                "stream",
+                Some(status.as_u16()),
+                (request_id != "unavailable").then_some(request_id),
+                stream_error_code.as_deref(),
+                &message,
+                None,
+                None,
+            ));
+        }
+        result
     }
 
     async fn pause_for_limit(&self, profile: &Value, error: &Value) -> Result<()> {
-        let code = error
-            .pointer("/response/error/code")
-            .or_else(|| error.pointer("/error/code"))
-            .and_then(Value::as_str);
+        let code = error_code(error);
         if profile["billing_route"] == "chatgpt"
             && code == Some("subscription_sharing_usage_limit_exceeded")
         {
@@ -377,6 +464,79 @@ impl Client {
     }
 }
 
+const MAX_HTTP_ATTEMPTS: u32 = 4;
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+fn error_code(value: &Value) -> Option<&str> {
+    value
+        .pointer("/response/error/code")
+        .or_else(|| value.pointer("/error/code"))
+        .and_then(Value::as_str)
+}
+fn retryable_status(status: u16, error: &Value) -> bool {
+    if matches!(
+        error_code(error),
+        Some(
+            "subscription_sharing_usage_limit_exceeded"
+                | "insufficient_quota"
+                | "subscription_sharing_user_not_eligible"
+                | "subscription_sharing_route_not_supported"
+                | "chatpass_v2_scope_not_authorized"
+                | "chatpass_v2_invalid_authorization_context"
+                | "subscription_sharing_invalid_user"
+                | "subscription_sharing_unsupported_capability"
+        )
+    ) {
+        return false;
+    }
+    matches!(status, 500 | 502 | 503 | 504 | 520)
+        || (status == 429 && error_code(error) == Some("rate_limit_exceeded"))
+}
+fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .map(|date| date.duration_since(now).unwrap_or_default())
+}
+fn retry_delay(attempt: u32, waited: Duration, advised: Option<Duration>) -> Option<Duration> {
+    if attempt >= MAX_HTTP_ATTEMPTS {
+        return None;
+    }
+    let base_ms = 1000u64 << attempt.saturating_sub(1);
+    let jitter_ms = (uuid::Uuid::new_v4().as_u128() % (base_ms as u128 / 4 + 1)) as u64;
+    let delay = Duration::from_millis(base_ms + jitter_ms).max(advised.unwrap_or_default());
+    // Never shorten a server-requested delay to fit the budget.
+    (delay <= MAX_RETRY_WAIT.saturating_sub(waited)).then_some(delay)
+}
+#[allow(clippy::too_many_arguments)]
+fn failure_event(
+    model: &str,
+    profile: &Value,
+    http_attempt: u32,
+    phase: &str,
+    status: Option<u16>,
+    request_id: Option<&str>,
+    code: Option<&str>,
+    message: &str,
+    advised: Option<Duration>,
+    delay: Option<Duration>,
+) -> Value {
+    json!({"type":"boid.request_failure","failure":{
+        "observed_at_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        "billing_route":profile["billing_route"].as_str().unwrap_or("api_key"),"model":model,
+        "http_attempt":http_attempt,"phase":phase,"http_status":status,"request_id":request_id,
+        "error_code":code,"message":message,"retry_after_ms":advised.map(|d| d.as_millis().min(u64::MAX as u128) as u64),
+        "retry_delay_ms":delay.map(|d| d.as_millis() as u64)
+    }})
+}
+
 fn error_message(value: &Value) -> &str {
     [
         "/response/error/message",
@@ -384,22 +544,32 @@ fn error_message(value: &Value) -> &str {
         "/message",
         "/detail",
         "/response/incomplete_details/reason",
+        "/non_json_body",
     ]
     .iter()
-    .find_map(|path| value.pointer(path).and_then(Value::as_str))
+    .find_map(|path| {
+        value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+    })
     .unwrap_or("No error detail was supplied.")
 }
 
 fn provider_error(status: u16, request_id: &str, error: &Value, profile: &Value) -> String {
     let route = if profile["billing_route"] == "chatgpt" {
-        " ChatGPT plan request stopped; no API-key fallback was used. Manage usage: https://chatgpt.com/settings/usage."
+        if error_code(error) == Some("subscription_sharing_usage_limit_exceeded") {
+            " ChatGPT plan requests paused after a usage limit. Review https://chatgpt.com/settings/usage. No API-key fallback was used."
+        } else {
+            " ChatGPT plan request failed; no API-key fallback was used."
+        }
     } else {
         ""
     };
     // Retain structured code/param, direct-admission detail, and request ID.
     format!(
         "OpenAI HTTP {status}, request ID {request_id}: {}. Body: {error}.{route}",
-        error_message(error)
+        error_message(error).trim().trim_end_matches('.')
     )
 }
 
@@ -524,3 +694,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "api_retry_tests.rs"]
+mod retry_tests;

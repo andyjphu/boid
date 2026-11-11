@@ -1,6 +1,6 @@
 [package]
 name = "boid"
-version = "1.1.9"
+version = "1.1.10"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -12,6 +12,7 @@ jsonwebtoken = "9.3"
 axum = { version = "0.8", features = ["ws"] }
 eventsource-stream = "0.2"
 futures-util = "0.3"
+httpdate = "1"
 libc = "0.2"
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

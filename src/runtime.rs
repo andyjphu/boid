@@ -469,6 +469,14 @@ impl Hub {
             self.persistence_fault(id, error);
         }
     }
+    pub fn record_request_failure(&self, id: &str, failure: crate::usage::RequestFailure) {
+        if let Err(error) = self.update(id, |record| {
+            record.usage.failures.push(failure);
+            Ok(())
+        }) {
+            self.persistence_fault(id, error);
+        }
+    }
     pub fn diagnostics(&self) -> Value {
         // Clone only accounting and display metadata. Price calculation does not hold the catalog lock.
         let records: Vec<_> = {
@@ -503,6 +511,7 @@ impl Hub {
             json!({"id":r.0,"name":r.1,"archived":r.2,"status":r.3,
                 "summary":crate::usage::summarize([(&r.4,r.5,r.6)]),
                 "latest_response":response.map(|report|report.view(&r.0,&r.1)),
+                "request_failure_count":r.4.failures.len(),"latest_request_failure":r.4.failures.last(),
                 "latest_context":r.7.as_ref().map(|context|json!({"input_tokens":context.input_tokens,
                     "output_tokens":context.output_tokens,"context_window":r.8}))})
         }).collect();

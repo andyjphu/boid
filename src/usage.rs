@@ -20,6 +20,8 @@ pub struct Ledger {
     #[serde(default)]
     pub records: Vec<Report>,
     #[serde(default)]
+    pub failures: Vec<RequestFailure>,
+    #[serde(default)]
     pub complete_since_creation: bool,
 }
 impl Ledger {
@@ -41,6 +43,33 @@ impl Ledger {
         self.records.iter().any(|r| r.attempt == attempt)
     }
 }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RequestFailure {
+    pub attempt: u64,
+    pub observed_at_ms: u64,
+    pub billing_route: String,
+    pub model: String,
+    pub http_attempt: u32,
+    pub phase: String,
+    pub http_status: Option<u16>,
+    pub request_id: Option<String>,
+    pub error_code: Option<String>,
+    pub message: String,
+    pub retry_after_ms: Option<u64>,
+    // Scheduled delay, not a claim that cancellation allowed another attempt.
+    pub retry_delay_ms: Option<u64>,
+}
+impl RequestFailure {
+    pub fn from_event(attempt: u64, event: &Value) -> Option<Self> {
+        if event["type"] != "boid.request_failure" {
+            return None;
+        }
+        let mut value = event["failure"].clone();
+        value["attempt"] = json!(attempt);
+        serde_json::from_value(value).ok()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Report {
     #[serde(default = "api_key_route")]

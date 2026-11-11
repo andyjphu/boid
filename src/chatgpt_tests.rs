@@ -1,4 +1,5 @@
 use super::*;
+use axum::response::IntoResponse;
 use axum::{
     Form, Json, Router,
     extract::State,
@@ -325,6 +326,19 @@ async fn inference(
 ) -> impl axum::response::IntoResponse {
     assert_eq!(headers["authorization"], "Bearer fixture-access-rotated");
     p.requests.lock().unwrap().push(body.clone());
+    if p.failure.lock().unwrap().as_str() == "transient-once"
+        && p.requests.lock().unwrap().len() == 1
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("x-request-id", "subscription-retry-check")],
+            "upstream reset",
+        )
+            .into_response();
+    }
+    if p.failure.lock().unwrap().as_str() == "http-limit" {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"Fixture limit"}}))).into_response();
+    }
     let event = if p.failure.lock().unwrap().as_str() == "limit" {
         json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","param":null,"message":"Fixture account limit"}}})
     } else if body["input"]
@@ -344,6 +358,7 @@ async fn inference(
         ],
         format!("data: {event}\n\n"),
     )
+        .into_response()
 }
 
 #[tokio::test]
@@ -500,4 +515,90 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
         "chatgpt"
     );
     restored.shutdown().await;
+}
+
+#[tokio::test]
+async fn subscription_retry_persists_failure_without_changing_billing_or_replaying_tools() {
+    use crate::{
+        api::Client,
+        runtime::{Create, Hub},
+    };
+    let f = Fixture::new().await;
+    let account = f.login().await;
+    f.auth
+        .select("chatgpt", Some(&account), "first")
+        .await
+        .unwrap();
+    *f.provider.failure.lock().unwrap() = "transient-once".into();
+    let client = || {
+        let mut c = Client::test_client_at(format!("{}/responses", f.provider.origin));
+        c.auth = Some(f.auth.clone());
+        c
+    };
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(client(), state.path().into()).unwrap();
+    let view = hub
+        .create(Create {
+            name: "retry-check".into(),
+            cwd: work.path().to_string_lossy().into_owned(),
+            message: "Use the roster tool".into(),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.provider.requests.lock().unwrap().len() < 3
+            || hub.view(&view.id).unwrap().status != "idle"
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.provider.requests.lock().unwrap().len(), 3);
+    assert_eq!(
+        hub.view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == "tool_call")
+            .count(),
+        1
+    );
+    let diagnostics = hub.diagnostics();
+    let d = &diagnostics["sessions"][0];
+    assert_eq!(d["request_failure_count"], 1);
+    assert_eq!(d["latest_request_failure"]["http_status"], 503);
+    assert_eq!(d["latest_request_failure"]["billing_route"], "chatgpt");
+    assert_eq!(
+        d["latest_request_failure"]["request_id"],
+        "subscription-retry-check"
+    );
+    assert_eq!(d["latest_response"]["billing_route"], "chatgpt");
+    assert_eq!(d["summary"]["recorded_requests"], 2);
+    let failure = d["latest_request_failure"].clone();
+    hub.shutdown().await;
+    drop(hub);
+    let restored = Hub::open(client(), state.path().into()).unwrap();
+    assert_eq!(
+        restored.diagnostics()["sessions"][0]["latest_request_failure"],
+        failure
+    );
+    restored.shutdown().await;
+    *f.provider.failure.lock().unwrap() = "http-limit".into();
+    let previous = f.provider.requests.lock().unwrap().len();
+    let c = client();
+    let mut events = vec![];
+    let error = c
+        .respond_with(&[], json!([]), "first", "", &view.profile, |e| {
+            events.push(e.clone())
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("settings/usage"));
+    assert_eq!(f.provider.requests.lock().unwrap().len(), previous + 1);
+    assert!(f.auth.load().unwrap().accounts[&account].paused);
+    assert_eq!(
+        events[0]["failure"]["error_code"],
+        "subscription_sharing_usage_limit_exceeded"
+    );
 }
