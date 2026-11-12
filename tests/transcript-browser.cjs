@@ -16,6 +16,8 @@ views.forEach(view => view.communications = [message]);
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     const errors = [];
     const submitted = [];
+    let interrupts = 0;
+    let failInterrupt = false;
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       window.EventSource = class { constructor() { window.testEvents = this; } close() {} };
@@ -24,6 +26,11 @@ views.forEach(view => view.communications = [message]);
       const url = new URL(route.request().url());
       if (url.hostname !== 'boid.test') return route.abort();
       if (url.pathname === '/api/config') return route.fulfill({ json: { cwd: '/tmp', next_agent_name: 'canary', agent_names: ['canary', 'swift'] } });
+      if (url.pathname.endsWith('/interrupt')) {
+        interrupts++;
+        return route.fulfill({ status: failInterrupt ? 500 : 202,
+          json: failInterrupt ? { error: 'Fixture failure' } : { status: 'interrupt_requested' } });
+      }
       if (url.pathname.endsWith('/messages')) {
         submitted.push(route.request().postDataJSON().text);
         return route.fulfill({ json: {} });
@@ -208,6 +215,37 @@ views.forEach(view => view.communications = [message]);
     await composer.press('Enter');
     await page.waitForFunction(() => !sessions.get('sender').sending);
     assert.equal(submitted.at(-1), '/clear explanation');
+    // Acceptance is not interruption completion. Repeat presses must wait for status.
+    await page.evaluate(() => setStatus(sessions.get('sender'), 'working', Date.now()));
+    for (let i = 0; i < 5; i++) {
+      await composer.press('Escape');
+      await page.waitForFunction(() => !sessions.get('sender').interrupting);
+    }
+    assert.equal(interrupts, 1);
+    assert.match(await page.locator('[data-pane-key="agent:sender"] .working-status').textContent(), /Interrupt requested/);
+    await page.evaluate(() => {
+      const ui = sessions.get('sender');
+      setStatus(ui, 'stopped');
+      setStatus(ui, 'working', Date.now());
+      ui.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', repeat: true, bubbles: true }));
+    });
+    assert.equal(interrupts, 1); // A held key must not interrupt the next task.
+    await composer.press('Escape');
+    await page.waitForFunction(() => !sessions.get('sender').interrupting);
+    assert.equal(interrupts, 2);
+    await page.evaluate(() => { const ui = sessions.get('sender'); setStatus(ui, 'stopped'); setStatus(ui, 'working', Date.now()); });
+    failInterrupt = true;
+    await composer.press('Escape');
+    await page.waitForFunction(() => !sessions.get('sender').interrupting);
+    assert.equal(await page.evaluate(() => sessions.get('sender').interruptRequested), false);
+    failInterrupt = false;
+    await composer.press('Escape');
+    await page.waitForFunction(() => !sessions.get('sender').interrupting);
+    assert.equal(interrupts, 4);
+    await composer.fill('/');
+    await composer.press('Escape');
+    assert.equal(await page.locator('.slash-option:visible').count(), 0);
+    assert.equal(interrupts, 4); // Dismissing a picker does not interrupt.
     assert.deepEqual(errors, []);
     console.log('PASS: full history, peer navigation, targeted updates, expanded tools, selection/streaming, large entries, hidden reasoning, reconnect, bottom wheel/streaming, small upward gestures, follow resumption, retained composer space');
   } finally { await browser.close(); }

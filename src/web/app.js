@@ -312,6 +312,14 @@ function withRenderSelection(render) {
 function rememberPosition(ui) {
   if (ui.follow) { ui.anchor = null; return; }
   const top = ui.trace.getBoundingClientRect().top;
+  const anchor = ui.anchor?.node;
+  if (anchor?.isConnected && !anchor.hidden) {
+    const bounds = anchor.getBoundingClientRect();
+    if (bounds.top <= top && bounds.bottom > top) {
+      ui.anchor.offset = bounds.top - top;
+      return;
+    }
+  }
   const node = [...ui.trace.querySelectorAll(".entry")].find(node =>
     !node.hidden && node.getBoundingClientRect().bottom > top);
   ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
@@ -783,11 +791,14 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const hint = pickerOpen(ui) ? "" : "Esc to interrupt";
+  const hint = ui.interruptRequested ? "Interrupt requested" : pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
 }
 
 function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
+  if (status !== "working") {
+    ui.interruptRequested = false;
+  }
   if (ui.view) {
     ui.view.status = status;
     ui.view.working_since_ms = status === "working" ? workingSince : null;
@@ -1132,15 +1143,21 @@ function scheduleTranscript(ui) {
     if (sessions.get(ui.id) !== ui) return;
     withRenderSelection(() => {
       rememberPosition(ui);
-      mountTranscript(ui);
+      if (ui.structureDirty) {
+        mountTranscript(ui);
+        ui.structureDirty = false;
+        ui.groupDirty = true;
+      }
       for (const item of ui.dirty) {
         if (!ui.mounted.has(item)) { item.rendered = false; continue; }
         if (selectedWithin(item.node)) { item.deferred = true; continue; }
+        const hidden = item.node.hidden;
         renderEntry(ui, item);
+        if (hidden !== item.node.hidden) ui.groupDirty = true;
         item.rendered = true;
       }
       ui.dirty.clear();
-      groupUserEntries(ui);
+      if (ui.groupDirty) groupUserEntries(ui);
       activatePromptSpace(ui);
       restorePosition(ui);
     });
@@ -1175,6 +1192,7 @@ function renderEntry(ui, item) {
 }
 
 function groupUserEntries(ui) {
+  ui.groupDirty = false;
   let previous;
   for (const item of ui.mounted) {
     item.node.classList.remove("user-joined-before", "user-joined-after");
@@ -1223,9 +1241,11 @@ function putEntry(ui, entry, delta = false) {
     }
     item = { id, node, body, kind, text: "", suppressed: node.hidden };
     ui.entries.set(id, item);
+    ui.structureDirty = true;
     if (kind === "user") ui.pending.add(id);
   }
   const batchChanged = !delta && item.inputBatch !== entry.input_batch;
+  if (batchChanged && item.kind === "user") ui.groupDirty = true;
   if (!delta) item.inputBatch = entry.input_batch;
   const text = delta ? item.text + (entry.text || "") : (entry.text || "");
   if (text !== item.text || !item.rendered || batchChanged) {
@@ -1293,6 +1313,8 @@ function snapshot(views, terminalViews = []) {
   for (const view of views) {
     const ui = sessions.get(String(view.id));
     if (!ui) { addSession(view); continue; }
+    // Reconcile after a reconnect even if the interrupt's status event was lost.
+    if (!ui.interrupting) ui.interruptRequested = false;
     ui.view = view;
     updateProfile(ui, view.profile, view.context_window);
     const follow = ui.follow;
@@ -1313,6 +1335,7 @@ function snapshot(views, terminalViews = []) {
         ui.entries.delete(id);
         ui.mounted.delete(entry);
         ui.dirty.delete(entry);
+        ui.structureDirty = true;
       }
     }
     for (const [heading, pair] of ui.toolPairs) {
@@ -2037,15 +2060,22 @@ document.addEventListener("keydown", async event => {
   }
   if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
   const ui = [...sessions.values()].find(ui => ui.pane === selected);
-  if (!ui || ui.interrupting || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
+  if (!ui || (ui.pane.dataset.status !== "working" && !ui.pending.size)) return;
   event.preventDefault();
+  if (event.repeat || ui.interrupting || ui.interruptRequested) return;
   ui.interrupting = true;
+  ui.interruptRequested = true;
+  updateActivity(ui);
   ui.error.hidden = true;
   try {
     await ui.submission?.catch(() => {});
     await request(`/api/sessions/${encodeURIComponent(ui.id)}/interrupt`, "POST");
   }
-  catch (error) { showError(ui.error, error); }
+  catch (error) {
+    ui.interruptRequested = false;
+    updateActivity(ui);
+    showError(ui.error, error);
+  }
   finally { ui.interrupting = false; }
 });
 const loginPanel = document.querySelector("#provider-login");
