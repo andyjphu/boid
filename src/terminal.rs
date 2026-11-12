@@ -1050,22 +1050,34 @@ async fn connect(
     State(hub): State<TerminalHub>,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
+    lease: Option<axum::Extension<crate::browser_auth::BrowserLease>>,
 ) -> Result<Response, Error> {
     let terminal = hub.find(&id)?;
     Ok(ws
         .max_message_size(64 * 1024)
-        .on_upgrade(move |socket| connected(terminal, socket)))
+        .on_upgrade(move |socket| connected(terminal, socket, lease)))
 }
 
-async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
+async fn connected(
+    terminal: Arc<Terminal>,
+    socket: WebSocket,
+    lease: Option<axum::Extension<crate::browser_auth::BrowserLease>>,
+) {
     let client_id = uuid::Uuid::new_v4().to_string();
+    tokio::select! {
+        biased;
+        _ = crate::browser_auth::revoked(lease) => {},
+        _ = connected_inner(terminal.clone(), socket, client_id.clone()) => {},
+    }
+    terminal.release_control(&client_id);
+}
+async fn connected_inner(terminal: Arc<Terminal>, mut socket: WebSocket, client_id: String) {
     let hello = Message::Text(
         serde_json::json!({"type":"hello", "id":client_id})
             .to_string()
             .into(),
     );
     if socket.send(hello).await.is_err() {
-        terminal.release_control(&client_id);
         return;
     }
     let (replay, mut output, controller) = terminal.attach();
@@ -1075,11 +1087,9 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
         .await
         .is_err()
     {
-        terminal.release_control(&client_id);
         return;
     }
     if replay_to(&mut socket, replay, controller).await.is_err() {
-        terminal.release_control(&client_id);
         return;
     }
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -1161,7 +1171,6 @@ async fn connected(terminal: Arc<Terminal>, mut socket: WebSocket) {
             }
         }
     }
-    terminal.release_control(&client_id);
 }
 
 async fn replay_to(

@@ -16,7 +16,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -36,6 +36,7 @@ struct App {
     shutdown: Arc<Notify>,
     auth: Option<Arc<crate::chatgpt::Auth>>,
     api_key_available: bool,
+    browser_auth: Arc<crate::browser_auth::BrowserAuth>,
 }
 type ApiResult<T> = std::result::Result<T, (StatusCode, Json<Value>)>;
 fn invalid(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
@@ -103,6 +104,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
     let auth = client.auth.clone();
     let api_key_available = client.key_available();
     let hub = Hub::open(client, state_dir.clone())?;
+    let browser_auth = crate::browser_auth::BrowserAuth::open(state_dir.clone(), token.clone())?;
     let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
     let shutdown = Arc::new(Notify::new());
     let app = App {
@@ -111,6 +113,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         shutdown: shutdown.clone(),
         auth,
         api_key_available,
+        browser_auth: browser_auth.clone(),
     };
     let protected = Router::new()
         .route("/api/login", post(login))
@@ -153,6 +156,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/{*path}", get(asset))
         .merge(protected)
         .merge(oauth)
+        .merge(browser_auth.router())
         .layer(middleware::from_fn(headers));
     let display_address = if address.starts_with("0.0.0.0:") {
         address.replacen("0.0.0.0", "127.0.0.1", 1)
@@ -195,7 +199,7 @@ async fn terminate() {
         std::future::pending::<()>().await;
     }
 }
-async fn authorize(State(app): State<App>, request: Request, next: Next) -> Response {
+async fn authorize(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let headers = request.headers();
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) {
         let host = headers
@@ -221,16 +225,20 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
             v.split(';')
                 .find_map(|part| part.trim().strip_prefix("boid_token="))
         });
-    if ![bearer, cookie]
+    let token_authorized = [bearer, cookie]
         .into_iter()
         .flatten()
-        .any(|value| value == app.token.as_str())
-    {
+        .any(|value| value == app.token.as_str());
+    if !token_authorized && !app.browser_auth.authorized(headers) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"Connect with the token from the Boid server."})),
+            Json(json!({"error":"Sign in to Boid."})),
         )
             .into_response();
+    }
+    if !token_authorized {
+        let lease = app.browser_auth.lease(headers);
+        request.extensions_mut().insert(lease);
     }
     next.run(request).await
 }
@@ -246,7 +254,17 @@ async fn headers(request: Request, next: Next) -> Response {
     headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"));
     response
 }
-async fn login(State(app): State<App>) -> impl IntoResponse {
+async fn login(State(app): State<App>, request_headers: HeaderMap) -> Response {
+    // A passkey session cannot be upgraded into the unrevocable shared token.
+    let bearer = request_headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    if bearer != Some(app.token.as_str())
+        && crate::browser_auth::cookie(&request_headers, "boid_token") != Some(app.token.as_str())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -256,7 +274,7 @@ async fn login(State(app): State<App>) -> impl IntoResponse {
         ))
         .unwrap(),
     );
-    (headers, Json(json!({"ok":true})))
+    (headers, Json(json!({"ok":true}))).into_response()
 }
 async fn diagnostics(State(app): State<App>) -> Json<Value> {
     Json(app.hub.diagnostics())
@@ -403,6 +421,7 @@ async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> ApiResult<
 }
 async fn events(
     State(app): State<App>,
+    lease: Option<axum::Extension<crate::browser_auth::BrowserLease>>,
     Query(query): Query<EventsQuery>,
 ) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
     let recent = query.history.as_deref() == Some("recent");
@@ -434,7 +453,8 @@ async fn events(
             Some((Ok(event), (None, receiver, hub, recent)))
         },
     );
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream.take_until(crate::browser_auth::revoked(lease)))
+        .keep_alive(KeepAlive::default())
 }
 async fn index() -> Response {
     ui_asset(

@@ -1,8 +1,8 @@
 [package]
 name = "boid"
-version = "1.1.11"
+version = "1.1.12"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 publish = false
 
 [dependencies]
@@ -26,3 +26,4 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25.1"
 uuid = { version = "1", features = ["v4"] }
+webauthn-rs = { version = "0.6.2", default-features = false }

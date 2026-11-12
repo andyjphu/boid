@@ -253,6 +253,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 }
 #login { padding: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 #login span { color: #aaa; }
+#token-fallback { display: contents; }
 #token { background: #252525; border: 1px solid #555; color: inherit; padding: 5px; }
 .session-setup-grid { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr); gap: 10px; min-height: 0; overflow: auto; }
 .setup-pane .session-setup-grid { padding: 8px; flex: 1; align-content: start; }
