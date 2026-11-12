@@ -320,3 +320,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 #subscription-login { margin-top: 10px; }
 #subscription-actions button { margin: 4px 4px 6px 0; }
 #chatgpt-sign-in { background: #111; color: #fff; padding: 8px 12px; }
+
+.history-spacer { pointer-events: none; overflow-anchor: none; }
+.history-more { display: block; width: 100%; padding: 8px; color: #aaa; background: transparent; border: 0; cursor: pointer; }
+.history-more[hidden], .history-latest[hidden] { display: none; }
+.history-latest { position: absolute; right: 12px; top: 8px; z-index: 4; padding: 4px 8px; color: #ddd; background: #292929; border: 1px solid #555; border-radius: 4px; cursor: pointer; }

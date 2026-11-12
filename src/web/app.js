@@ -360,6 +360,10 @@ document.addEventListener("selectionchange", () => {
     }
     groupUserEntries(ui);
     restorePosition(ui);
+    if (ui.deferredNavigation && !selectedWithin(ui.trace)) {
+      const { direction, entryId } = ui.deferredNavigation; ui.deferredNavigation = null;
+      loadHistory(ui, direction, entryId);
+    }
   }
 });
 
@@ -393,7 +397,7 @@ async function openModelPicker(ui) {
   ui.modelPicker.focus({ preventScroll: true });
   try {
     const [view, catalog] = await Promise.all([
-      request(`/api/sessions/${encodeURIComponent(ui.id)}`),
+      request(`/api/sessions/${encodeURIComponent(ui.id)}/history`),
       request(`/api/sessions/${encodeURIComponent(ui.id)}/models`),
     ]);
     if (ui.modelPicker.hidden || generation !== ui.modelGeneration) return;
@@ -523,6 +527,8 @@ function addSession(view) {
   if (sessions.has(id)) return sessions.get(id);
   const ui = makePane(view.name || id, view.cwd, "agent", id);
   ui.view = view;
+  ui.history = view.history ? { ...view.history } : null;
+  ui.historyGeneration = 0;
   for (const message of view.communications || []) rememberCommunication(message);
   ui.id = id;
   enablePaneRename(ui, "agent");
@@ -542,7 +548,17 @@ function addSession(view) {
   ui.lastScrollTop = 0;
   ui.trace.setAttribute("aria-label", "Live agent trace");
   ui.content = element("div", "trace-content");
+  ui.historyBefore = element("button", "history-more", "Load earlier messages");
+  ui.historyAfter = element("button", "history-more", "Load newer messages");
+  ui.historyLatest = element("button", "history-latest", "Latest messages");
+  for (const button of [ui.historyBefore, ui.historyAfter, ui.historyLatest]) { button.type = "button"; button.hidden = true; }
+  ui.spacerBefore = element("div", "history-spacer");
+  ui.spacerAfter = element("div", "history-spacer");
+  ui.content.append(ui.historyBefore, ui.spacerBefore, ui.spacerAfter, ui.historyAfter);
   ui.trace.append(ui.content);
+  ui.historyBefore.onclick = () => loadHistory(ui, "before");
+  ui.historyAfter.onclick = () => loadHistory(ui, "after");
+  ui.historyLatest.onclick = () => { if (selectedWithin(ui.trace)) getSelection().removeAllRanges(); loadHistory(ui, "latest"); };
   ui.activity = element("div", "working-status");
   ui.activity.setAttribute("role", "status");
   ui.activity.append(element("span", "working-label", "Working"), " · Esc to interrupt");
@@ -609,19 +625,24 @@ function addSession(view) {
     if (ui.reflow || ui.trace.clientHeight !== ui.traceHeight) return;
     const wasFollowing = ui.follow;
     ui.follow = (wasFollowing ? atBottom(ui) : movedDown && atTraceEnd(ui))
-      && !selectedWithin(ui.trace);
+      && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total);
     ui.followClearance = ui.follow && promptVisible(ui)
       ? Math.min(ui.overlay.getBoundingClientRect().height + composerPadding,
         Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
     rememberPosition(ui);
     if (ui.follow && !wasFollowing) scheduleTranscript(ui);
+    if (ui.history) {
+      scheduleViewport(ui);
+      if (top < 240 && ui.history.start > 0) loadHistory(ui, "before");
+      else if (movedDown && atTraceEnd(ui) && ui.history.end < ui.history.total) loadHistory(ui, "after");
+    }
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
     if (event.deltaY < 0) {
       ui.follow = false;
       ui.lastScrollTop = ui.trace.scrollTop;
       rememberPosition(ui);
-    } else if (event.deltaY > 0 && !ui.follow && atTraceEnd(ui) && !selectedWithin(ui.trace)) {
+    } else if (event.deltaY > 0 && !ui.follow && atTraceEnd(ui) && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total)) {
       ui.follow = true;
       scheduleTranscript(ui);
     }
@@ -640,7 +661,7 @@ function addSession(view) {
   const overlay = element("div", "composer-overlay");
   ui.overlay = overlay;
   overlay.append(ui.slashSuggestion, ui.composer);
-  stream.append(ui.trace, overlay);
+  stream.append(ui.trace, overlay, ui.historyLatest);
   ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker, ui.skillPicker);
   const overlayResize = new ResizeObserver(() => {
     const height = Math.ceil(overlay.getBoundingClientRect().height);
@@ -780,7 +801,7 @@ function addSession(view) {
   sessions.set(id, ui);
   updateContextUsage(ui);
   setStatus(ui, view.status);
-  for (const entry of view.entries || []) putEntry(ui, entry);
+  for (const [index, entry] of (view.entries || []).entries()) putEntry(ui, { ...entry, history_index: (view.history?.start || 0) + index });
   setPending(ui, view.pending || []);
   followLatest(ui);
   layout();
@@ -913,11 +934,14 @@ function toolOutput(tool) {
 function renderToolEntry(ui, item) {
   const tool = toolEntry(item.text);
   const counterpartKind = item.kind === "tool_call" ? "tool_result" : "tool_call";
-  const counterpart = tool.callId && ui.toolPairs.get(tool.heading)?.[counterpartKind];
+  const related = tool.callId && ui.toolPairs.get(tool.heading)?.[counterpartKind];
+  const counterpart = related && !related.partial ? related : null;
   const call = item.kind === "tool_call" ? item : counterpart;
   const result = item.kind === "tool_result" ? item : counterpart;
-  const owner = call || result;
-  const command = toolEntry(owner.text);
+  const owner = call && ui.mounted.has(call) ? call : result;
+  const expandedTool = Boolean(call?.expandedTool || result?.expandedTool);
+  if (!owner) return;
+  const command = toolEntry((call || owner).text);
   const outcome = toolOutcome(result ? toolEntry(result.text) : null);
   const text = call ? toolCommand(command) : "";
   const newline = text.indexOf("\n");
@@ -940,7 +964,7 @@ function renderToolEntry(ui, item) {
     return;
   }
   owner.body.replaceChildren();
-  if (result && result !== owner) result.body.replaceChildren();
+  if (result && result !== owner && !result.partial) result.body.replaceChildren();
   const header = element(expandable ? "summary" : "div", "tool-header");
   header.append(element("span", "tool-name", command.name === "exec_command" ? "$" : command.name));
   if (firstLine) header.append(element("span", "tool-command", firstLine));
@@ -948,7 +972,7 @@ function renderToolEntry(ui, item) {
   let details;
   if (expandable) {
     details = element("details", "activity-details tool-operation");
-    details.open = Boolean(owner.expandedTool);
+    details.open = expandedTool;
     header.title = "Expand or collapse tool call and result";
     details.append(header);
     if (rest) details.append(element("pre", "tool-text activity-full", rest));
@@ -971,19 +995,19 @@ function renderToolEntry(ui, item) {
     output.hidden = !open;
     preview.hidden = open;
   }
-  showResult(Boolean(owner.expandedTool));
+  showResult(expandedTool);
   if (details) {
     header.addEventListener("click", event => {
       event.preventDefault();
       rememberPosition(ui);
       details.open = !details.open;
-      owner.expandedTool = details.open;
+      for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
       showResult(owner.expandedTool);
       restorePosition(ui);
     });
     details.addEventListener("toggle", () => {
       if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
-      owner.expandedTool = details.open;
+      for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
       showResult(details.open);
       restorePosition(ui);
     });
@@ -1033,23 +1057,21 @@ function communicationFor(ui, item) {
 
 async function locateCommunication(ui, message, otherId) {
   try {
-    const startedAt = catalogRevision;
-    const view = await request(`/api/sessions/${encodeURIComponent(otherId)}`);
-    for (const entry of view.communications || []) rememberCommunication(entry);
-    const target = acceptSessionResponse(view, startedAt);
+    const target = sessions.get(String(otherId));
+    if (!target) throw new Error("This agent is no longer open.");
     const entryId = String(otherId === message.recipient_id ? message.id : message.sender_entry);
+    if (selectedWithin(target.trace)) getSelection().removeAllRanges();
     target.follow = false;
+    if (!await loadHistory(target, "around", entryId)) return;
     await new Promise(resolve => requestAnimationFrame(resolve));
     const item = target.entries.get(entryId);
-    if (!item) throw new Error("Message is unavailable in this session.");
+    if (!item?.node.isConnected) throw new Error("Message is unavailable in this session.");
     selected = target.pane;
-    target.follow = false;
-    target.autoClearance = false;
+    target.follow = false; target.autoClearance = false;
     target.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
     scrollTrace(target, target.trace.scrollTop + item.node.getBoundingClientRect().top
       - target.trace.getBoundingClientRect().top);
-    item.node.tabIndex = -1;
-    item.node.focus({ preventScroll: true });
+    item.node.tabIndex = -1; item.node.focus({ preventScroll: true });
     rememberPosition(target);
   } catch (error) { showError(ui.error, error); }
 }
@@ -1104,35 +1126,154 @@ function receiveCommunication(message) {
   }
 }
 
-// Render the complete transcript; viewport virtualization remains v2 work.
+// Keep the loaded history in memory, but mount only the viewport and overscan.
+// Spacer heights preserve geometry when old nodes leave the DOM.
 function mountTranscript(ui) {
   const history = [...ui.entries.values()].filter(item =>
     !item.suppressed && (!item.superseded || selectedWithin(item.node)));
-  const wanted = new Set(history);
-  const heightBeforeRemoval = ui.retainedPromptEnd ? ui.content.offsetHeight : 0;
+  let visible = history;
+  let before = 0, after = 0;
+  if (ui.history && history.length) {
+    const heights = history.map(item => item.node.isConnected ? measuredHeight(item) : (item.height || 60));
+    let start = 0, end = history.length;
+    if (ui.follow) start = Math.max(0, end - 35);
+    else {
+      const top = Math.max(0, ui.trace.scrollTop - 700);
+      const bottom = ui.trace.scrollTop + ui.trace.clientHeight + 700;
+      let position = ui.historyBefore.hidden ? 0 : ui.historyBefore.offsetHeight;
+      start = history.length - 1; end = history.length;
+      for (let i = 0; i < history.length; i++) {
+        if (position + heights[i] >= top) { start = i; break; }
+        position += heights[i];
+      }
+      end = start;
+      while (end < history.length && position < bottom && end - start < 100) position += heights[end++];
+      end = Math.max(start + 1, end);
+    }
+    if (ui.historyRebase && ui.anchor?.node) {
+      const index = history.findIndex(item => item.node === ui.anchor.node);
+      if (index >= 0) { start = Math.max(0, index - 8); end = Math.min(history.length, index + 35); }
+    }
+    ui.historyRebase = false;
+    // Selection and a focused peer-link destination stay mounted until released.
+    for (let i = 0; i < history.length; i++) if (selectedWithin(history[i].node) || history[i].node.contains(document.activeElement)) {
+      start = Math.min(start, i); end = Math.max(end, i + 1);
+    }
+    if (ui.jumpEntry) {
+      const index = history.findIndex(item => item.id === ui.jumpEntry);
+      if (index >= 0) { start = Math.max(0, index - 10); end = Math.min(history.length, index + 15); }
+      ui.jumpEntry = null;
+    }
+    before = heights.slice(0, start).reduce((a,b) => a+b, 0);
+    after = heights.slice(end).reduce((a,b) => a+b, 0);
+    visible = history.slice(start, end);
+  }
+  const wanted = new Set(visible);
   for (const item of ui.mounted) {
     if (wanted.has(item)) continue;
-    item.node.remove();
-    item.body.replaceChildren();
-    item.rendered = false;
+    item.height = measuredHeight(item);
+    item.node.remove(); item.body.replaceChildren(); item.rendered = false;
     item.communicationSignature = undefined;
   }
-  if (heightBeforeRemoval) {
-    ui.retainedPromptEnd = Math.max(0,
-      ui.retainedPromptEnd - (heightBeforeRemoval - ui.content.offsetHeight));
-  }
-  let next = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const item = history[i];
-    if (!wanted.has(item)) continue;
-    if (item.node.parentNode !== ui.content) {
-      ui.content.insertBefore(item.node, next);
-      ui.dirty.add(item);
+  ui.spacerBefore.style.height = `${before}px`;
+  ui.spacerAfter.style.height = `${after}px`;
+  let next = ui.spacerAfter;
+  for (let i = visible.length - 1; i >= 0; i--) {
+    const item = visible[i];
+    if (item.node.parentNode !== ui.content || item.node.nextSibling !== next) {
+      ui.content.insertBefore(item.node, next); ui.dirty.add(item);
     }
     next = item.node;
   }
-  ui.mounted = new Set(history.filter(item => wanted.has(item)));
-
+  ui.mounted = wanted;
+  updateHistoryControls(ui);
+}
+function measuredHeight(item) {
+  if (item.node.hidden) return 0;
+  const style = getComputedStyle(item.node);
+  return item.node.getBoundingClientRect().height + parseFloat(style.marginTop || 0) + parseFloat(style.marginBottom || 0);
+}
+function updateHistoryControls(ui) {
+  ui.historyBefore.hidden = !ui.history || ui.history.start === 0;
+  ui.historyAfter.hidden = !ui.history || ui.history.end >= ui.history.total;
+  ui.historyLatest.hidden = !ui.history || (ui.follow && ui.history.end >= ui.history.total);
+  ui.historyBefore.disabled = ui.historyAfter.disabled = Boolean(ui.historyLoading);
+}
+function scheduleViewport(ui) {
+  if (ui.viewportScheduled) return;
+  ui.viewportScheduled = true;
+  requestAnimationFrame(() => {
+    ui.viewportScheduled = false;
+    if (!ui.history || sessions.get(ui.id) !== ui) return;
+    ui.structureDirty = true; scheduleTranscript(ui);
+  });
+}
+function mergeHistory(ui, view, replace = false) {
+  if (!view.history) return;
+  rememberPosition(ui);
+  const savedAnchor = !ui.follow && ui.anchor ? { id: ui.anchor.node.dataset.entryId, offset: ui.anchor.offset } : null;
+  if (replace) {
+    const keep = new Set(view.entries.map(entry => String(entry.id)));
+    for (const [id, item] of ui.entries) {
+      if (!keep.has(id)) { item.node.remove(); ui.entries.delete(id); ui.mounted.delete(item); ui.dirty.delete(item); }
+      else item.rendered = false;
+    }
+    ui.toolPairs.clear(); ui.messageResults.clear();
+    ui.anchor = null;
+  }
+  const old = ui.history;
+  ui.history = { ...view.history, total: replace ? view.history.total : Math.max(old?.total || 0, view.history.total) };
+  for (const message of view.communications || []) rememberCommunication(message);
+  for (const [index, entry] of view.entries.entries()) {
+    const item = ui.entries.get(String(entry.id));
+    if (item && item.eventSeq > view.history.seq) continue;
+    putEntry(ui, { ...entry, history_index: view.history.start + index });
+    ui.entries.get(String(entry.id)).eventSeq = entry.history_seq ?? view.history.seq;
+  }
+  ui.entries = new Map([...ui.entries].sort((a,b) => a[1].index - b[1].index));
+  const indices = [...ui.entries.values()].map(item => item.index).filter(Number.isFinite);
+  if (indices.length) { ui.history.start = Math.min(...indices); ui.history.end = Math.max(...indices) + 1; }
+  if (savedAnchor && ui.entries.has(savedAnchor.id)) ui.anchor = { node: ui.entries.get(savedAnchor.id).node, offset: savedAnchor.offset };
+  ui.historyRebase = true; ui.structureDirty = true; scheduleTranscript(ui); updateHistoryControls(ui);
+}
+async function loadHistory(ui, direction, entryId = null) {
+  if (sessions.get(ui.id) !== ui) return false;
+  if (["latest", "around", "restore"].includes(direction) && selectedWithin(ui.trace)) {
+    ui.deferredNavigation = { direction, entryId }; return false;
+  }
+  if (ui.historyLoading) {
+    if (!["latest", "around", "restore"].includes(direction)) return false;
+    ui.historyGeneration++; ui.historyLoading = false;
+  }
+  const generation = ui.historyGeneration;
+  ui.historyLoading = true; ui.historyUpdates = []; updateHistoryControls(ui);
+  try {
+    const query = entryId ? `?around=${encodeURIComponent(entryId)}` : direction === "before" ? `?before=${ui.history.start}` : direction === "after" ? `?after=${ui.history.end}` : "";
+    const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}/history${query}`);
+    if (sessions.get(ui.id) !== ui || ui.historyGeneration !== generation) return;
+    if (view.archived) throw new Error("This agent has ended.");
+    // Rehydrate an already-expanded tall anchor before restoring its pixel offset.
+    if (direction === "restore" && entryId && ui.entries.get(entryId)?.partial === false) {
+      const anchor = view.entries.find(entry => String(entry.id) === entryId);
+      if (anchor?.text_complete === false) {
+        const full = await request(`/api/sessions/${encodeURIComponent(ui.id)}/history?entry=${encodeURIComponent(entryId)}`);
+        if (sessions.get(ui.id) !== ui || ui.historyGeneration !== generation) return false;
+        Object.assign(anchor, full.entries[0], { text_complete: true, history_seq: full.history.seq });
+        view.communications = [...(view.communications || []), ...(full.communications || [])];
+      }
+    }
+    if (["latest", "around", "restore"].includes(direction) && selectedWithin(ui.trace)) {
+      ui.deferredNavigation = { direction, entryId }; return false;
+    }
+    if (direction === "latest") ui.follow = true;
+    if (view.history) mergeHistory(ui, view, ["latest", "around", "restore"].includes(direction));
+    else { for (const entry of view.entries || []) putEntry(ui, entry); scheduleTranscript(ui); }
+    for (const message of ui.historyUpdates) if (message.seq > (view.history?.seq || 0)) applyTranscriptEvent(ui, message);
+    if (entryId && direction === "around") ui.jumpEntry = entryId;
+    if (ui.follow) followLatest(ui);
+    return true;
+  } catch (error) { showError(ui.error, error); }
+  finally { if (ui.historyGeneration === generation) { ui.historyLoading = false; updateHistoryControls(ui); } }
 }
 
 function scheduleTranscript(ui) {
@@ -1156,10 +1297,12 @@ function scheduleTranscript(ui) {
         if (hidden !== item.node.hidden) ui.groupDirty = true;
         item.rendered = true;
       }
+      for (const item of ui.mounted) item.height = measuredHeight(item);
       ui.dirty.clear();
       if (ui.groupDirty) groupUserEntries(ui);
       activatePromptSpace(ui);
       restorePosition(ui);
+      if (ui.history && ui.history.start > 0 && ui.content.offsetHeight < ui.trace.clientHeight) loadHistory(ui, "before");
     });
   });
 }
@@ -1169,6 +1312,25 @@ function renderEntry(ui, item) {
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
+  if (item.partial) {
+    const load = element("button", "history-more", "Load full message"); load.type = "button";
+    body.replaceChildren(element("pre", "tool-text", text), load);
+    load.onclick = async () => {
+      const generation = ui.historyGeneration;
+      load.disabled = true;
+      try {
+        const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}/history?entry=${encodeURIComponent(item.id)}`);
+        if (sessions.get(ui.id) !== ui || generation !== ui.historyGeneration || ui.entries.get(item.id) !== item) return;
+        const entry = view.entries[0];
+        for (const message of view.communications || []) rememberCommunication(message);
+        // A streaming update that raced this read requires another fresh read.
+        if ((item.eventSeq || 0) > view.history.seq) { load.disabled = false; return; }
+        putEntry(ui, { ...entry, history_index: item.index });
+        item.eventSeq = view.history.seq;
+      } catch (error) { showError(ui.error, error); load.disabled = false; }
+    };
+    return;
+  }
   const communication = communicationFor(ui, item);
   if (communication) { renderCommunication(ui, item, communication); return; }
   if (kind === "tool_result") {
@@ -1216,6 +1378,7 @@ function putEntry(ui, entry, delta = false) {
     const kind = entry.kind || "notice";
     const node = element("article", "entry");
     node.dataset.kind = kind;
+    node.dataset.entryId = id;
     const body = element("div", "entry-body");
     if (kind === "context" && ui.entries.size === 0) {
       const details = element("details", "session-context");
@@ -1239,11 +1402,17 @@ function putEntry(ui, entry, delta = false) {
         if (!selectedWithin(replaced.node)) replaced.node.hidden = true;
       }
     }
-    item = { id, node, body, kind, text: "", suppressed: node.hidden };
+    item = { id, node, body, kind, text: "", suppressed: node.hidden, index: entry.history_index ?? ui.entries.size };
+    if (entry.superseded) { item.superseded = true; item.node.hidden = true; }
     ui.entries.set(id, item);
     ui.structureDirty = true;
     if (kind === "user") ui.pending.add(id);
   }
+  if (!delta) {
+    item.partial = entry.text_complete === false;
+    if (entry.superseded !== undefined) { item.superseded = entry.superseded; if (!selectedWithin(item.node)) item.node.hidden = item.suppressed || item.superseded; }
+  }
+  if (delta && item.partial) { item.textBytes = (item.textBytes || item.text.length) + (entry.text || "").length; return; }
   const batchChanged = !delta && item.inputBatch !== entry.input_batch;
   if (batchChanged && item.kind === "user") ui.groupDirty = true;
   if (!delta) item.inputBatch = entry.input_batch;
@@ -1316,6 +1485,22 @@ function snapshot(views, terminalViews = []) {
     // Reconcile after a reconnect even if the interrupt's status event was lost.
     if (!ui.interrupting) ui.interruptRequested = false;
     ui.view = view;
+    if (view.history) {
+      if (selectedWithin(ui.trace)) ui.follow = false;
+      const anchor = !ui.follow && ui.anchor?.node?.dataset.entryId;
+      ui.historyGeneration++; ui.historyLoading = false;
+      for (const item of ui.entries.values()) item.eventSeq = 0;
+      if (ui.follow) mergeHistory(ui, view, true);
+      else {
+        ui.history.total = view.history.total;
+        if (anchor) loadHistory(ui, "restore", anchor);
+        else mergeHistory(ui, view);
+      }
+      updateProfile(ui, view.profile, view.context_window);
+      ui.setName(view.name || String(view.id));
+      setPending(ui, view.pending || []); setStatus(ui, view.status);
+      continue;
+    }
     updateProfile(ui, view.profile, view.context_window);
     const follow = ui.follow;
     rememberPosition(ui);
@@ -1358,9 +1543,32 @@ function snapshot(views, terminalViews = []) {
   refreshChoices();
 }
 
+function applyTranscriptEvent(ui, message) {
+  const id = String(message.type === "entry" ? message.entry.id : message.entry_id);
+  const current = ui.entries.get(id);
+  if (current && current.eventSeq >= message.seq) return;
+  if (message.type === "entry") {
+    const index = message.entry_index;
+        if (ui.history && Number.isFinite(index)) {
+          ui.history.total = Math.max(ui.history.total, index + 1);
+          if (index > ui.history.end) { updateHistoryControls(ui); return; }
+          ui.history.end = Math.max(ui.history.end, index + 1);
+        }
+        putEntry(ui, { ...message.entry, history_index: index });
+        ui.entries.get(String(message.entry.id)).eventSeq = message.seq;
+      }
+  if (message.type === "delta") {
+        const item = ui.entries.get(String(message.entry_id));
+        if (!ui.history || item) {
+          putEntry(ui, { id: message.entry_id, text: message.text }, true);
+          ui.entries.get(String(message.entry_id)).eventSeq = message.seq;
+        }
+      }
+ }
+
 function startEvents() {
   events?.close();
-  events = new EventSource("/api/events");
+  events = new EventSource("/api/events?history=recent");
   events.onopen = () => { document.body.classList.remove("disconnected"); };
   events.onerror = () => {
     document.body.classList.add("disconnected");
@@ -1415,8 +1623,10 @@ function startEvents() {
         ui.pending.delete(String(message.id));
         setPending(ui, ui.pending);
       }
-      if (message.type === "entry") putEntry(ui, message.entry);
-      if (message.type === "delta") putEntry(ui, { id: message.entry_id, text: message.text }, true);
+      if (["entry", "delta"].includes(message.type)) {
+        if (ui.historyLoading) ui.historyUpdates.push(message);
+        applyTranscriptEvent(ui, message);
+      }
       if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null);
     } catch (error) { showError(workspaceError, error); }
   };
@@ -1745,7 +1955,7 @@ function renderAgentChoices(ui, active, inactive) {
         ui.error.hidden = true;
         try {
           const startedAt = catalogRevision;
-          const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen" : ""}`, archived ? "POST" : "GET");
+          const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen?history=recent" : "/history"}`, archived ? "POST" : "GET");
           const attached = sessions.has(String(view.id));
           const agent = acceptSessionResponse(view, startedAt);
           if (archived || !attached) discardSetup(ui, agent);
@@ -1766,7 +1976,7 @@ function refreshChoices() {
   choicesTimer = setTimeout(async () => {
     try {
       const [active, inactive, config] = await Promise.all([
-        request("/api/sessions"), request("/api/sessions/archived"), request("/api/config"),
+        request("/api/sessions?history=recent"), request("/api/sessions/archived?history=recent"), request("/api/config"),
       ]);
       if (version !== choicesVersion) return;
       agentDefaults.name = config.next_agent_name;
