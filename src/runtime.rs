@@ -431,14 +431,37 @@ impl Hub {
             .collect()
     }
     fn project_view(data: &Data, source: &View) -> View {
-        let mut view = source.clone();
+        Self::project_entries(data, source, &source.entries)
+    }
+    fn project_entries(data: &Data, source: &View, entries: &[Entry]) -> View {
+        let mut view = View {
+            context_usage: None,
+            context_window: None,
+            communications: vec![],
+            id: source.id.clone(),
+            name: source.name.clone(),
+            profile: source.profile.clone(),
+            cwd: source.cwd.clone(),
+            status: source.status.clone(),
+            working_since_ms: source.working_since_ms,
+            entries: entries.to_vec(),
+            pending: source.pending.clone(),
+            archived: source.archived,
+        };
         let engine = &data.sessions[&source.id].record.engine;
         view.context_usage = engine.context_usage.clone();
         view.context_window = crate::api::context_window(&engine.model);
         view.communications = data
             .messages
             .values()
-            .filter(|m| m.sender_id == source.id || m.recipient_id == source.id)
+            .filter(|m| {
+                entries.len() == source.entries.len()
+                    && (m.sender_id == source.id || m.recipient_id == source.id)
+                    || entries.iter().any(|e| {
+                        (m.sender_id == source.id && m.sender_entry == e.id)
+                            || (m.recipient_id == source.id && m.id == e.id)
+                    })
+            })
             .cloned()
             .map(|mut m| {
                 m.blocked = m.state == "queued"
@@ -518,17 +541,34 @@ impl Hub {
         json!({"schema_version":1,"pricing":crate::usage::pricing(),"aggregate":aggregate,
             "sessions":sessions,"latest_response":latest.map(|(_,response)|response)})
     }
+    #[cfg(test)]
     pub fn subscribe(&self) -> (Value, broadcast::Receiver<Value>) {
+        self.subscribe_history(false)
+    }
+    pub fn subscribe_history(&self, recent: bool) -> (Value, broadcast::Receiver<Value>) {
         let data = self.0.data.lock().unwrap();
         let receiver = self.0.events.subscribe();
         (
-            json!({"seq":data.seq,"type":"snapshot","sessions":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| Self::project_view(&data, &h.record.view)).collect::<Vec<_>>(),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
+            json!({"seq":data.seq,"type":"snapshot","sessions":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| if recent { Self::history_view(&data, &h.record.view, None, None, None).expect("latest history") } else { json!(Self::project_view(&data, &h.record.view)) }).collect::<Vec<_>>(),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
             receiver,
         )
     }
     fn emit(&self, data: &mut Data, mut event: Value) {
         data.seq += 1;
         event["seq"] = json!(data.seq);
+        if event["type"] == "entry" {
+            if let (Some(id), Some(entry)) =
+                (event["session_id"].as_str(), event["entry"]["id"].as_str())
+            {
+                if let Some(index) = data
+                    .sessions
+                    .get(id)
+                    .and_then(|h| h.record.view.entries.iter().rposition(|e| e.id == entry))
+                {
+                    event["entry_index"] = json!(index);
+                }
+            }
+        }
         let _ = self.0.events.send(event);
     }
     pub fn terminal_upsert(&self, summary: Value) {
@@ -2994,3 +3034,6 @@ mod peer_tests;
 #[cfg(test)]
 #[path = "compaction_tests.rs"]
 mod compaction_tests;
+
+#[path = "history.rs"]
+mod history;

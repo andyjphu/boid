@@ -133,6 +133,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
             get(session).patch(rename_session).delete(close_session),
         )
         .route("/api/sessions/{id}/messages", post(message))
+        .route("/api/sessions/{id}/history", get(history))
         .route("/api/sessions/{id}/skills", get(skill_catalog))
         .route("/api/sessions/{id}/models", get(session_models))
         .route("/api/sessions/{id}/model", post(session_model))
@@ -263,16 +264,38 @@ async fn diagnostics(State(app): State<App>) -> Json<Value> {
 async fn config(State(app): State<App>) -> Json<Value> {
     Json(app.hub.config())
 }
-async fn sessions(State(app): State<App>) -> Json<Value> {
-    Json(json!(app.hub.views()))
+async fn sessions(State(app): State<App>, Query(query): Query<EventsQuery>) -> Json<Value> {
+    Json(if query.history.as_deref() == Some("recent") {
+        json!(app.hub.history_list(false))
+    } else {
+        json!(app.hub.views())
+    })
 }
-async fn archived_sessions(State(app): State<App>) -> Json<Value> {
-    Json(json!(app.hub.archived_views()))
+async fn archived_sessions(
+    State(app): State<App>,
+    Query(query): Query<EventsQuery>,
+) -> Json<Value> {
+    Json(if query.history.as_deref() == Some("recent") {
+        json!(app.hub.history_list(true))
+    } else {
+        json!(app.hub.archived_views())
+    })
 }
-async fn reopen_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn reopen_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> ApiResult<Json<Value>> {
     app.hub
         .reopen(&id)
-        .map(|view| Json(json!(view)))
+        .and_then(|view| {
+            if query.history.as_deref() == Some("recent") {
+                app.hub.history(&id, None, None, None)
+            } else {
+                Ok(json!(view))
+            }
+        })
+        .map(Json)
         .map_err(invalid)
 }
 async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -285,6 +308,34 @@ async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Js
                 Json(json!({"error":"Unknown session."})),
             )
         })
+}
+#[derive(Default, Deserialize)]
+struct HistoryQuery {
+    before: Option<usize>,
+    after: Option<usize>,
+    around: Option<String>,
+    entry: Option<String>,
+}
+async fn history(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> ApiResult<Json<Value>> {
+    if let Some(entry) = query.entry {
+        return app
+            .hub
+            .history_entry(&id, &entry)
+            .map(Json)
+            .map_err(invalid);
+    }
+    app.hub
+        .history(&id, query.before, query.after, query.around.as_deref())
+        .map(Json)
+        .map_err(invalid)
+}
+#[derive(Default, Deserialize)]
+struct EventsQuery {
+    history: Option<String>,
 }
 async fn skill_catalog(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(move || app.hub.skill_catalog(&id))
@@ -352,17 +403,25 @@ async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> ApiResult<
 }
 async fn events(
     State(app): State<App>,
+    Query(query): Query<EventsQuery>,
 ) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
-    let (snapshot, receiver) = app.hub.subscribe();
+    let recent = query.history.as_deref() == Some("recent");
+    let (snapshot, receiver) = app.hub.subscribe_history(recent);
     let stream = stream::unfold(
-        (Some(snapshot), receiver, app.hub),
-        |(initial, mut receiver, hub)| async move {
+        (Some(snapshot), receiver, app.hub, recent),
+        |(initial, mut receiver, hub, recent)| async move {
             let value = match initial {
                 Some(value) => value,
                 None => match receiver.recv().await {
-                    Ok(value) => value,
+                    Ok(value) => {
+                        if recent {
+                            Hub::recent_event(value)
+                        } else {
+                            value
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let (snapshot, new_receiver) = hub.subscribe();
+                        let (snapshot, new_receiver) = hub.subscribe_history(recent);
                         receiver = new_receiver;
                         snapshot
                     }
@@ -372,7 +431,7 @@ async fn events(
             let event = Event::default()
                 .id(value["seq"].to_string())
                 .data(value.to_string());
-            Some((Ok(event), (None, receiver, hub)))
+            Some((Ok(event), (None, receiver, hub, recent)))
         },
     );
     Sse::new(stream).keep_alive(KeepAlive::default())

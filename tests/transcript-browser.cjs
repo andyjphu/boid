@@ -35,7 +35,7 @@ views.forEach(view => view.communications = [message]);
         submitted.push(route.request().postDataJSON().text);
         return route.fulfill({ json: {} });
       }
-      if (url.pathname.startsWith('/api/sessions/')) return route.fulfill({ json: views.find(view => url.pathname.endsWith('/' + view.id)) });
+      if (url.pathname.startsWith('/api/sessions/')) return route.fulfill({ json: views.find(view => url.pathname.split('/')[3] === view.id) });
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: [] });
       const file = path.join(root, url.pathname === '/' ? 'index.html' : url.pathname);
       return route.fulfill({ body: fs.readFileSync(file), contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html' });
