@@ -9,7 +9,7 @@ improve with experience and make effective use of agents working together.
 Boid's code and intended agent guidance belong in [src/](src/).
 [bootstrap/](bootstrap/) holds temporary context for agents developing Boid.
 
-Build and run from the canonical checkout at `~/boid` (Rust 1.88 or newer):
+Build and run from the canonical checkout at `~/boid` (Rust 1.89 or newer):
 
 ```sh
 cd ~/boid
@@ -29,6 +29,8 @@ also print the URL only. Closing the shell or browser leaves agents running.
 conversations. `boid serve` runs in the foreground for debugging. New panes use
 the directory where `boid` was invoked; existing agents keep their directories.
 State and background server logs live under `~/.local/share/boid` by default.
+For browser access without copying a server token, use
+[SSH-authorized passkey enrollment](docs/passkeys.md).
 
 After a restart, idle agents return ready for peer messages without a greeting.
 Explicitly stopped agents and interrupted or failed work remain paused until
@@ -36,8 +38,8 @@ operator input. Already accepted peer messages can run after recovery; simply
 restoring an idle agent does not start a model request. `list_agents` reports
 whether each open agent is listening. Browser reloads do not change availability.
 
-Agent panes render the complete retained transcript. Temporary transcript
-culling is disabled; full transcript virtualization remains v2 work.
+Agent panes retain the complete transcript and load recent history first.
+[Earlier history loads on demand](docs/history.md); rendering follows the viewport.
 
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 

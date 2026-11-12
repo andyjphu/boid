@@ -20,9 +20,13 @@
   </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
-    <label>Server token <input id="token" type="password" autocomplete="off" required></label>
-    <button type="submit">Connect</button>
-    <span>Use the token printed by the Boid server.</span>
+    <button id="passkey-sign-in" type="button" hidden>Sign in with passkey</button>
+    <button id="passkey-enroll" type="button" hidden>Create passkey</button>
+    <div id="token-fallback">
+      <label>Server token <input id="token" type="password" autocomplete="off" required></label>
+      <button type="submit">Connect</button>
+      <span>Use the token printed by the Boid server.</span>
+    </div>
   </form>
   <main id="workspace" aria-label="Agent and terminal workspace">
     <p id="empty">Start an agent or open a terminal.</p>

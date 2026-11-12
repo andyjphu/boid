@@ -2177,8 +2177,74 @@ diagnosticsDialog.addEventListener("click", event => {
   if (event.target === diagnosticsDialog && diagnosticsOutside && outsideDiagnostics(event)) diagnosticsDialog.close();
 });
 
+let enrollmentCapability = "";
+const passkeySignIn = document.querySelector("#passkey-sign-in");
+const passkeyEnroll = document.querySelector("#passkey-enroll");
+
+function fromBase64url(value) {
+  const raw = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+function toBase64url(value) {
+  return btoa(String.fromCharCode(...new Uint8Array(value))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function passkeyOptions(options, registration) {
+  const publicKey = options.publicKey;
+  publicKey.challenge = fromBase64url(publicKey.challenge);
+  if (registration) publicKey.user.id = fromBase64url(publicKey.user.id);
+  for (const item of publicKey[registration ? "excludeCredentials" : "allowCredentials"] || []) item.id = fromBase64url(item.id);
+  return { publicKey };
+}
+function passkeyResponse(credential) {
+  const response = { clientDataJSON: toBase64url(credential.response.clientDataJSON) };
+  for (const key of ["attestationObject", "authenticatorData", "signature", "userHandle"]) {
+    if (credential.response[key]) response[key] = toBase64url(credential.response[key]);
+  }
+  if (credential.response.getTransports) response.transports = credential.response.getTransports();
+  return { id: credential.id, rawId: toBase64url(credential.rawId), type: credential.type, response,
+    extensions: credential.getClientExtensionResults() };
+}
+async function refreshPasskeyActions() {
+  passkeyEnroll.hidden = !enrollmentCapability;
+  document.querySelector("#token-fallback").hidden = !!enrollmentCapability;
+  passkeySignIn.hidden = true;
+  if (!window.PublicKeyCredential || !window.isSecureContext) {
+    if (enrollmentCapability) showError(workspaceError, "Passkeys are unavailable at this address or in this browser.");
+    passkeyEnroll.disabled = true;
+    document.querySelector("#token-fallback").hidden = false;
+    return;
+  }
+  try {
+    const status = await request("/auth/passkey/status");
+    passkeySignIn.hidden = !status.available || !!enrollmentCapability;
+  } catch { /* Token fallback stays available if passkeys are unavailable. */ }
+}
+async function usePasskey(registration) {
+  passkeyEnroll.disabled = passkeySignIn.disabled = true;
+  workspaceError.hidden = true;
+  try {
+    const prefix = registration ? "/auth/passkey/register" : "/auth/passkey/sign-in";
+    const capability = enrollmentCapability;
+    if (registration) enrollmentCapability = "";
+    const options = await request(`${prefix}/start`, "POST", registration ? { capability } : undefined);
+    const credential = registration
+      ? await navigator.credentials.create(passkeyOptions(options, true))
+      : await navigator.credentials.get(passkeyOptions(options, false));
+    if (!credential) throw new Error("Passkey operation was cancelled.");
+    await request(`${prefix}/finish`, "POST", passkeyResponse(credential));
+    await connect();
+  } catch (error) {
+    requireLogin();
+    const message = error.name === "NotAllowedError" ? "Passkey operation was cancelled or timed out." : error.message;
+    showError(workspaceError, message + (registration ? " Create a new enrollment link through SSH to try again." : ""));
+  } finally { passkeyEnroll.disabled = passkeySignIn.disabled = false; }
+}
+passkeySignIn.addEventListener("click", () => usePasskey(false));
+passkeyEnroll.addEventListener("click", () => usePasskey(true));
+
 function requireLogin() {
   login.hidden = false;
+  refreshPasskeyActions();
   document.body.classList.add("disconnected");
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
@@ -2217,12 +2283,14 @@ login.addEventListener("submit", async event => {
 async function initialize() {
   const parameters = new URLSearchParams(location.hash.slice(1));
   const token = parameters.get("token");
+  enrollmentCapability = parameters.get("enroll") || "";
   try {
     launchCwd = parameters.has("cwd") ? parameters.get("cwd")
       : token ? "" : sessionStorage.getItem("boid:launch-cwd") || "";
     sessionStorage.setItem("boid:launch-cwd", launchCwd);
   } catch { launchCwd = parameters.get("cwd") || ""; }
   if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  if (enrollmentCapability) { requireLogin(); return; }
   try { await connect(token); }
   catch (error) {
     requireLogin();
@@ -2449,6 +2517,7 @@ document.querySelector("#subscription-selection").addEventListener("submit", asy
 setInterval(() => {
   for (const ui of sessions.values()) if (ui.view?.status === "working") updateActivity(ui);
 }, 1000);
+window.addEventListener("hashchange", initialize);
 initialize();
 window.addEventListener("resize", layout, { passive: true });
 layout();

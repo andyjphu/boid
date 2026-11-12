@@ -1,4 +1,5 @@
 mod api;
+mod browser_auth;
 mod chatgpt;
 mod runtime;
 mod server;
@@ -19,6 +20,8 @@ boid reuses the shared server or starts it in the background, then opens its web
 --no-open prints the URL without opening a browser. SSH sessions also print the URL only.
 boid serve runs the server in the foreground. Ctrl-C stops that server.
 boid stop gracefully stops the shared server and its active work.
+boid passkey enroll --output PRIVATE_FILE creates a one-use browser enrollment link.
+boid passkey list / boid passkey revoke ID manage browser credentials and sessions.
 boid \"task\" starts or connects to the shared server and returns a new session ID.
 The server owns execution; closing a submitting command or browser leaves it running.
 
@@ -59,6 +62,9 @@ async fn run() -> Result<()> {
     }
     if args == ["stop"] {
         return startup::stop().await;
+    }
+    if args.first().is_some_and(|arg| arg == "passkey") {
+        return browser_auth::command(&args[1..]).await;
     }
     let connection = startup::connect().await?;
     if args.is_empty() || args == ["--no-open"] {
