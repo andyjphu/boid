@@ -1,0 +1,54 @@
+{
+  "initial": {
+    "ms": 1152.699999988079,
+    "entries": 19576,
+    "mounted": 12996
+  },
+  "repeated_requests_for_10_presses": 10,
+  "streaming": {
+    "frames": {
+      "median": 24.5,
+      "max": 40.30000001192093,
+      "sum": 542.7000000476837
+    },
+    "input_wait": {
+      "median": 24.100000023841858,
+      "max": 40.200000047683716,
+      "sum": 507.700000166893
+    },
+    "timing": {
+      "rememberPosition": {
+        "count": 154,
+        "median": 0,
+        "max": 0.10000002384185791,
+        "sum": 0.10000002384185791
+      },
+      "mountTranscript": {
+        "count": 140,
+        "median": 0.3999999761581421,
+        "max": 3.599999964237213,
+        "sum": 74.19999969005585
+      },
+      "renderEntry": {
+        "count": 140,
+        "median": 0,
+        "max": 0.10000002384185791,
+        "sum": 2.8000001311302185
+      },
+      "groupUserEntries": {
+        "count": 140,
+        "median": 0.5,
+        "max": 2.599999964237213,
+        "sum": 88.30000013113022
+      },
+      "restorePosition": {
+        "count": 160,
+        "median": 0.9000000357627869,
+        "max": 4.200000047683716,
+        "sum": 159.59999972581863
+      }
+    },
+    "requests": 17
+  },
+  "errors": []
+}
