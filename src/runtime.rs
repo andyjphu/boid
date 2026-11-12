@@ -457,9 +457,21 @@ impl Hub {
             .get(id)
             .map(|h| Self::project_view(&data, &h.record.view))
     }
-    pub fn record_usage(&self, id: &str, report: crate::usage::Report) {
+    pub fn record_usage(&self, id: &str, mut report: crate::usage::Report) {
         if let Err(error) = self.update(id, |record| {
+            report.billing_route = record.engine.profile["billing_route"]
+                .as_str()
+                .unwrap_or("api_key")
+                .into();
             record.usage.record(report);
+            Ok(())
+        }) {
+            self.persistence_fault(id, error);
+        }
+    }
+    pub fn record_request_failure(&self, id: &str, failure: crate::usage::RequestFailure) {
+        if let Err(error) = self.update(id, |record| {
+            record.usage.failures.push(failure);
             Ok(())
         }) {
             self.persistence_fault(id, error);
@@ -499,6 +511,7 @@ impl Hub {
             json!({"id":r.0,"name":r.1,"archived":r.2,"status":r.3,
                 "summary":crate::usage::summarize([(&r.4,r.5,r.6)]),
                 "latest_response":response.map(|report|report.view(&r.0,&r.1)),
+                "request_failure_count":r.4.failures.len(),"latest_request_failure":r.4.failures.last(),
                 "latest_context":r.7.as_ref().map(|context|json!({"input_tokens":context.input_tokens,
                     "output_tokens":context.output_tokens,"context_window":r.8}))})
         }).collect();
@@ -557,6 +570,11 @@ impl Hub {
         }
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
+        // Connection selection belongs to the record, not an older worker clone.
+        next.engine.profile = next.view.profile.clone();
+        if let Some(model) = next.view.profile["model"].as_str() {
+            next.engine.model = model.to_owned();
+        }
         next.view.working_since_ms = if next.view.status == "working" {
             let previous = if handle.record.view.status == "working" {
                 handle.record.view.working_since_ms
@@ -597,6 +615,12 @@ impl Hub {
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         let mut events = vec![];
+        if current.view.profile != previous.view.profile {
+            events.push(
+                json!({"type":"profile","session_id":id,"profile":current.view.profile,
+                "context_window":crate::api::context_window(&current.engine.model)}),
+            );
+        }
         if current.view.name != previous.view.name {
             events.push(json!({"type":"name","session_id":id,"name":current.view.name}));
         }
@@ -810,8 +834,28 @@ impl Hub {
         );
         let snapshot = crate::skills::discovery::scan(&cwd);
         let skills = snapshot.skills;
+        let profile = self.0.client.config();
+        let model = profile["model"].as_str().context(
+            "Billing settings are unavailable; repair account storage before creating agents.",
+        )?;
+        if profile["billing_route"] == "api_key" && !self.0.client.key_available() {
+            bail!(
+                "Use /login to connect an API key or ChatGPT subscription before creating an agent."
+            );
+        }
+        if profile["billing_route"] == "chatgpt" && profile["chatgpt_account"].as_str().is_none() {
+            bail!("Continue with ChatGPT and choose a model in /login before creating an agent.");
+        }
+        if profile["billing_route"] == "chatgpt" {
+            self.0
+                .client
+                .auth
+                .as_ref()
+                .context("ChatGPT account storage is unavailable.")?
+                .check_inference(profile["chatgpt_account"].as_str().unwrap())?;
+        }
         let mut engine = Session::new(
-            self.0.client.model.clone(),
+            model.into(),
             crate::skills::instructions(&skills),
             tool_calls::definitions(),
             identity.clone(),
@@ -824,7 +868,7 @@ impl Hub {
             crate::skills::catalog::prompt(&engine.skills, snapshot.budget, &snapshot.warnings)
         );
         engine.skill_warnings = snapshot.warnings;
-        engine.profile = self.0.client.config();
+        engine.profile = profile;
         let view = View {
             context_usage: None,
             context_window: crate::api::context_window(&engine.model),
@@ -901,6 +945,37 @@ impl Hub {
         })?;
         self.view(id).context("Unknown session.")
     }
+    pub fn api_profile(&self) -> Value {
+        self.0.client.api_profile()
+    }
+    pub fn profile(&self, id: &str) -> Result<Value> {
+        let data = self.0.data.lock().unwrap();
+        Ok(data
+            .sessions
+            .get(id)
+            .context("Unknown session.")?
+            .record
+            .view
+            .profile
+            .clone())
+    }
+    pub fn select_profile(&self, id: &str, expected: &Value, profile: Value) -> Result<()> {
+        self.update(id, |record| {
+            if record.view.archived || record.view.status == "ending" {
+                bail!("Session has ended. Reopen its history first.");
+            }
+            if &record.view.profile != expected {
+                bail!("This agent's connection changed. Reopen the chooser and try again.");
+            }
+            if record.view.status == "working" || record.engine.request_in_flight()
+                || record.engine.has_pending_tools() || !record.inputs.is_empty()
+                || (!record.paused && !record.inbox.is_empty()) {
+                bail!("Wait for this agent to finish, or interrupt it before changing its connection or model.");
+            }
+            record.view.profile = profile;
+            Ok(())
+        })
+    }
     pub fn identity(&self, id: &str) -> Result<String> {
         let data = self.0.data.lock().unwrap();
         Ok(session_identity(
@@ -937,6 +1012,9 @@ impl Hub {
     pub fn message(&self, id: &str, text: String) -> Result<String> {
         if text.trim().is_empty() {
             bail!("Message must not be empty.");
+        }
+        if text.trim() == "/login" {
+            bail!("Open /login in the Boid web composer to select API or subscription access.");
         }
         if self.0.data.lock().unwrap().closing {
             bail!("Server is shutting down.");
@@ -1167,6 +1245,20 @@ impl Hub {
         drop(data);
         self.install(record, true)?;
         Ok(self.view(id).unwrap())
+    }
+    pub fn stop_account(&self, account: &str) -> Result<()> {
+        let ids: Vec<_> = self
+            .views()
+            .into_iter()
+            .filter(|v| {
+                v.profile["billing_route"] == "chatgpt" && v.profile["chatgpt_account"] == account
+            })
+            .map(|v| v.id)
+            .collect();
+        for id in ids {
+            self.stop(&id)?;
+        }
+        Ok(())
     }
     pub fn peers(&self) -> Value {
         let data = self.0.data.lock().unwrap();

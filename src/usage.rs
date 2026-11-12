@@ -20,6 +20,8 @@ pub struct Ledger {
     #[serde(default)]
     pub records: Vec<Report>,
     #[serde(default)]
+    pub failures: Vec<RequestFailure>,
+    #[serde(default)]
     pub complete_since_creation: bool,
 }
 impl Ledger {
@@ -42,7 +44,36 @@ impl Ledger {
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
+pub struct RequestFailure {
+    pub attempt: u64,
+    pub observed_at_ms: u64,
+    pub billing_route: String,
+    pub model: String,
+    pub http_attempt: u32,
+    pub phase: String,
+    pub http_status: Option<u16>,
+    pub request_id: Option<String>,
+    pub error_code: Option<String>,
+    pub message: String,
+    pub retry_after_ms: Option<u64>,
+    // Scheduled delay, not a claim that cancellation allowed another attempt.
+    pub retry_delay_ms: Option<u64>,
+}
+impl RequestFailure {
+    pub fn from_event(attempt: u64, event: &Value) -> Option<Self> {
+        if event["type"] != "boid.request_failure" {
+            return None;
+        }
+        let mut value = event["failure"].clone();
+        value["attempt"] = json!(attempt);
+        serde_json::from_value(value).ok()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Report {
+    #[serde(default = "api_key_route")]
+    pub billing_route: String,
     pub attempt: u64,
     pub response_id: Option<String>,
     pub status: String,
@@ -51,6 +82,9 @@ pub struct Report {
     pub service_tier: Option<String>,
     pub usage: Value,
     pub prompt_cache_diagnostics: Value,
+}
+fn api_key_route() -> String {
+    "api_key".into()
 }
 impl Report {
     pub fn from_event(attempt: u64, event: &Value) -> Option<Self> {
@@ -63,6 +97,7 @@ impl Report {
         }
         let response = event.get("response")?.as_object()?;
         Some(Self {
+            billing_route: api_key_route(),
             attempt,
             response_id: response
                 .get("id")
@@ -128,6 +163,9 @@ impl Report {
         Ok((input, output, read, write))
     }
     pub fn estimate(&self) -> Result<f64, String> {
+        if self.billing_route == "chatgpt" {
+            return Err("ChatGPT plan/credits usage; review billing and limits in ChatGPT Settings → Usage.".into());
+        }
         if self.model.as_deref() != Some("gpt-6-sol") {
             return Err("Missing or unsupported reported model".into());
         }

@@ -182,3 +182,12 @@ work remains open: live validation of PR #20 after authorization, isolated
 measurement of server interrupt persistence, and the deferred transcript
 virtualization design. Creating this document is not evidence that future
 performance has improved.
+
+## 2026-11-11 update
+
+Andy subsequently authorized merging PR #20. It merged as `18ad92e` after
+Chrome regression checks passed against current main. The merged tree matched
+the tested tree. Deployment and live validation remain pending; the original
+account above describes the state when the case was written. The original
+request prohibited restarting, while leaving the PR unmerged was the agent’s
+scope interpretation, not an explicit no-merge instruction.

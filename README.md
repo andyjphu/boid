@@ -19,8 +19,8 @@ cd ~/boid
 
 `build.sh` builds the release binary and links `~/.local/bin/boid` to it.
 Keep `~/.local/bin` on `PATH`. `run.sh` simply executes `boid`, forwarding any
-arguments; `boid --help` lists the options. Set `OPENAI_API_KEY` in the server's
-environment before the first launch. `boid` starts one background server or
+arguments; `boid --help` lists the options. Use `/login` to choose an API key or
+[ChatGPT subscription](docs/chatgpt.md); an existing `OPENAI_API_KEY` also works. `boid` starts one background server or
 reuses the running server, opens its web workspace, and returns to the shell.
 Use `boid --no-open` to print the URL without opening a browser; SSH sessions
 also print the URL only. Closing the shell or browser leaves agents running.
@@ -49,3 +49,7 @@ identity, and configuration. `/oai-compact` directly runs OpenAI compaction,
 using the same operation as the `oai_compact` tool. Both wait for the current
 response and tool batch. Clearing makes no model request; queued messages then
 use the fresh context. Previous context is saved privately in `sessions/clears/`.
+
+`/login` changes the connection for its agent pane. `/model` selects a model
+from the connected account's catalog.
+`/clear` remains available; `/oai-compact` currently requires the API-key route.

@@ -455,7 +455,12 @@ async fn live_provider_smoke() {
         {"role":"user","content":"Remember the codeword for the next turn."}
     ]);
     let result = client
-        .compact(history.as_array().unwrap(), &client.model, instructions)
+        .compact(
+            history.as_array().unwrap(),
+            &client.model,
+            instructions,
+            &client.config(),
+        )
         .await
         .unwrap();
     let mut input = result["output"].as_array().unwrap().clone();

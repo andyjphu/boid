@@ -38,6 +38,7 @@ impl Fixture {
             "BOID_TOKEN",
             "BOID_CWD",
             "BOID_MODEL",
+            "BOID_AUTH_ROUTE",
             "BOID_CYBER_ACCESS_PROGRAM",
         ] {
             command.env_remove(key);
@@ -214,17 +215,63 @@ async fn unrelated_port_owner_is_not_started_over_or_stopped() {
     task.abort();
 }
 
-#[test]
-fn missing_key_and_corrupt_state_fail_without_leaving_a_server() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_login_without_key_and_corrupt_state_recovery() {
     let fixture = Fixture::new();
     let output = fixture
         .command(&["--no-open"])
         .env_remove("OPENAI_API_KEY")
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("OPENAI_API_KEY"));
-    assert!(TcpListener::bind(&fixture.address).is_ok());
+    assert!(output.status.success());
+    assert_eq!(
+        fixture.get("/api/accounts").await["api_key_available"],
+        false
+    );
+    let client = reqwest::Client::new();
+    let token = std::fs::read_to_string(fixture.state().join("token")).unwrap();
+    let endpoint = format!("http://{}", fixture.address);
+    let denied = client
+        .post(format!("{endpoint}/api/sessions"))
+        .bearer_auth(&token)
+        .json(&json!({"name":"canary","cwd":fixture.directory.path()}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!denied.status().is_success());
+    assert!(denied.text().await.unwrap().contains("/login"));
+    let synthetic = "synthetic-login-key-no-provider-call";
+    client
+        .post(format!("{endpoint}/api/accounts/api-key"))
+        .bearer_auth(&token)
+        .json(&json!({"key":synthetic}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let accounts = fixture.get("/api/accounts").await;
+    assert_eq!(accounts["api_key_available"], true);
+    assert!(!accounts.to_string().contains(synthetic));
+    assert!(
+        !fixture
+            .get("/api/config")
+            .await
+            .to_string()
+            .contains(synthetic)
+    );
+    fixture.ok(&["stop"]);
+    let output = fixture
+        .command(&["--no-open"])
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        fixture.get("/api/accounts").await["api_key_available"],
+        true
+    );
+    fixture.ok(&["stop"]);
     mkdir(&fixture.state().join("sessions"));
     let broken = fixture.state().join("sessions/broken.json");
     std::fs::write(&broken, "invalid json").unwrap();

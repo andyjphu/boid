@@ -435,6 +435,8 @@ load from disk on refresh. See [tools](tools.md) for current behavior and the
 
 ### v2 backlog
 
+- **TODO: redesign the login flow and screen.** Andy, 2026-11-10: "add a note for TODO to fix this flow and screen because it fucking sucks". The current repair makes `/login` target its pane, removes the unwanted status/help text, and keeps model selection under `/model`. Revisit the overall interaction, account connection steps, visual hierarchy, and confirmation behavior. This repair does not settle the design.
+
 - Multiple agent/terminal views per pane, selected through tabs. A right-aligned
   + control appears on hover to create another view. Andy explicitly deferred
   this until after initial Boid validation; v0.6 only changes the tab appearance.

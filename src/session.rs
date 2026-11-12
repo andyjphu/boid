@@ -277,7 +277,7 @@ impl Session {
         hub.archive_context(id, self.model_requests)?;
         let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
         let result = client
-            .compact(&self.history, &self.model, &instructions)
+            .compact(&self.history, &self.model, &instructions, &self.profile)
             .await;
         self.compact_in_flight = false;
         let (kind, notice) = match result {
@@ -317,6 +317,11 @@ impl Session {
         hub: &Hub,
         id: &str,
     ) -> Result<bool> {
+        // /login and /model may update an idle agent while its worker waits.
+        self.profile = hub.profile(id)?;
+        if let Some(model) = self.profile["model"].as_str() {
+            self.model = model.to_owned();
+        }
         if self.compact_requested && self.pending.is_empty() {
             return self.compact(client, hub, id).await;
         }
@@ -343,6 +348,11 @@ impl Session {
                     &instructions,
                     &self.profile,
                     |event| {
+                        if let Some(failure) =
+                            crate::usage::RequestFailure::from_event(attempt, event)
+                        {
+                            hub.record_request_failure(id, failure);
+                        }
                         if let Some(report) = crate::usage::Report::from_event(attempt, event) {
                             hub.record_usage(id, report);
                         }
