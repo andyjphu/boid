@@ -176,7 +176,7 @@ impl Client {
         }
         let mut http_attempt = 0;
         let mut waited = Duration::ZERO;
-        let (response, credential, request_id) = loop {
+        loop {
             // Recheck the same account after backoff; another request may have paused it.
             let credential = self.credential(profile).await?;
             http_attempt += 1;
@@ -190,24 +190,27 @@ impl Client {
             let response = match sent {
                 Ok(response) => response,
                 Err(error) => {
-                    // Only connection establishment failures are safe to retry here.
-                    // An ambiguous send/read timeout may already have reached inference.
-                    let delay = error
-                        .is_connect()
+                    // No output has been delivered and local tools run only after completion.
+                    // A lost response can still mean the provider performed inference twice.
+                    let delay = retryable_transport(&error)
                         .then(|| retry_delay(http_attempt, waited, None))
                         .flatten();
+                    let phase = if error.is_connect() {
+                        "connect"
+                    } else {
+                        "send"
+                    };
                     let message = self
-                        .redact(&format!("Cannot reach the OpenAI API: {error}"))
+                        .redact(&format!(
+                            "Cannot reach the OpenAI API: {:#}",
+                            anyhow::Error::new(error)
+                        ))
                         .replace(&credential, "[redacted]");
                     on_event(&failure_event(
                         model,
                         profile,
                         http_attempt,
-                        if error.is_connect() {
-                            "connect"
-                        } else {
-                            "send"
-                        },
+                        phase,
                         None,
                         None,
                         None,
@@ -228,116 +231,160 @@ impl Client {
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
-            if response.status().is_success() {
-                break (response, credential, request_id);
-            }
-            let status = response.status().as_u16();
-            let advised = retry_after(response.headers(), SystemTime::now());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|error| format!("Cannot read error body: {error}"));
-            let error = serde_json::from_str::<Value>(&body)
-                .unwrap_or_else(|_| json!({"non_json_body":body}));
-            let delay = retryable_status(status, &error)
-                .then(|| retry_delay(http_attempt, waited, advised))
-                .flatten();
-            let message = self
-                .redact(&provider_error(
-                    status,
-                    request_id.as_deref().unwrap_or("unavailable"),
-                    &error,
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let advised = retry_after(response.headers(), SystemTime::now());
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|error| format!("Cannot read error body: {error}"));
+                let error = serde_json::from_str::<Value>(&body)
+                    .unwrap_or_else(|_| json!({"non_json_body":body}));
+                let delay = retryable_status(status, &error)
+                    .then(|| retry_delay(http_attempt, waited, advised))
+                    .flatten();
+                let message = self
+                    .redact(&provider_error(
+                        status,
+                        request_id.as_deref().unwrap_or("unavailable"),
+                        &error,
+                        profile,
+                    ))
+                    .replace(&credential, "[redacted]");
+                // Diagnostics retain timestamps and retries even if the next attempt succeeds.
+                on_event(&failure_event(
+                    model,
                     profile,
-                ))
-                .replace(&credential, "[redacted]");
-            // Diagnostics retain timestamps and retries even if the next attempt succeeds.
-            on_event(&failure_event(
-                model,
-                profile,
-                http_attempt,
-                "http",
-                Some(status),
-                request_id.as_deref(),
-                error_code(&error),
-                &message,
-                advised,
-                delay,
-            ));
-            self.pause_for_limit(profile, &error).await?;
-            if let Some(delay) = delay {
-                waited += delay;
-                tokio::time::sleep(delay).await;
-                continue;
+                    http_attempt,
+                    "http",
+                    Some(status),
+                    request_id.as_deref(),
+                    error_code(&error),
+                    &message,
+                    advised,
+                    delay,
+                ));
+                self.pause_for_limit(profile, &error).await?;
+                if let Some(delay) = delay {
+                    waited += delay;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                bail!("{message} (after {http_attempt} HTTP attempts)");
             }
-            bail!("{message} (after {http_attempt} HTTP attempts)");
-        };
-        let status = response.status();
-        let request_id = request_id.as_deref().unwrap_or("unavailable");
-        let mut stream_error_code = None;
-        let result: Result<Vec<Value>> = async {
-            let mut stream = response.bytes_stream().eventsource();
-            let mut completed = BTreeMap::new();
-            while let Some(event) = stream.next().await {
-                let event = event.map_err(|error| {
-                    anyhow::anyhow!(
-                        "Cannot read API stream: {}",
-                        self.redact(&error.to_string())
-                            .replace(&credential, "[redacted]")
-                    )
-                })?;
-                let event: Value =
-                    serde_json::from_str(&event.data).context("Invalid JSON in the API stream.")?;
-                on_event(&event);
-                match event["type"].as_str() {
-                    Some("response.output_item.done") => {
-                        let index = event["output_index"]
-                            .as_u64()
-                            .context("Missing completed output index.")?;
-                        let item = event
-                            .get("item")
-                            .context("Missing completed output item.")?;
-                        completed.insert(index as usize, item.clone());
-                    }
-                    Some("response.completed") => return finish(&event, completed),
-                    Some("response.failed" | "response.incomplete" | "error") => {
-                        stream_error_code = error_code(&event).map(str::to_owned);
+            let status = response.status();
+            let advised = retry_after(response.headers(), SystemTime::now());
+            let request_id = request_id.as_deref().unwrap_or("unavailable");
+            let mut terminal_event = None;
+            let mut output_started = false;
+            let mut retryable_stream = false;
+            let result: Result<Vec<Value>> = async {
+                let mut stream = response.bytes_stream().eventsource();
+                let mut completed = BTreeMap::new();
+                while let Some(event) = stream.next().await {
+                    let event = event.map_err(|error| {
+                        retryable_stream = true;
+                        anyhow::anyhow!(
+                            "Cannot read API stream: {}",
+                            self.redact(&error.to_string())
+                                .replace(&credential, "[redacted]")
+                        )
+                    })?;
+                    let event: Value = serde_json::from_str(&event.data)
+                        .context("Invalid JSON in the API stream.")?;
+                    let kind = event["type"].as_str();
+                    if matches!(
+                        kind,
+                        Some("response.failed" | "response.incomplete" | "error")
+                    ) {
+                        // A failed event may itself contain output or reported usage.
+                        // Preserve that attempt instead of hiding it behind a retry.
+                        output_started |= event
+                            .pointer("/response/output")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| !items.is_empty());
+                        let has_usage = event
+                            .pointer("/response/usage")
+                            .is_some_and(|v| !v.is_null());
+                        retryable_stream = kind != Some("response.incomplete")
+                            && !has_usage
+                            && retryable_stream_error(&event);
                         self.pause_for_limit(profile, &event).await?;
-                        bail!(
-                            "OpenAI response stopped: {}",
-                            self.redact(&provider_error(
+                        let message = self
+                            .redact(&provider_error(
                                 status.as_u16(),
-                                &request_id,
+                                request_id,
                                 &event,
-                                profile
+                                profile,
                             ))
-                            .replace(&credential, "[redacted]")
-                        );
+                            .replace(&credential, "[redacted]");
+                        terminal_event = Some(event);
+                        bail!("OpenAI response stopped: {message}");
                     }
-                    _ => {}
+                    // Unknown event kinds are conservative: only lifecycle notifications
+                    // are known to be safe before output, including provider-side tool work.
+                    output_started |= !matches!(
+                        kind,
+                        Some("response.created" | "response.in_progress" | "response.queued")
+                    );
+                    on_event(&event);
+                    match kind {
+                        Some("response.output_item.done") => {
+                            let index = event["output_index"]
+                                .as_u64()
+                                .context("Missing completed output index.")?;
+                            let item = event
+                                .get("item")
+                                .context("Missing completed output item.")?;
+                            completed.insert(index as usize, item.clone());
+                        }
+                        Some("response.completed") => return finish(&event, completed),
+                        _ => {}
+                    }
+                }
+                retryable_stream = true;
+                bail!("API stream ended before the response completed.")
+            }
+            .await;
+            match result {
+                Ok(output) => return Ok(output),
+                Err(error) => {
+                    let delay = (retryable_stream && !output_started)
+                        .then(|| retry_delay(http_attempt, waited, advised))
+                        .flatten();
+                    // Retry diagnostics are durable, but only a final failure reaches
+                    // usage accounting. A successful replacement owns this model turn.
+                    if delay.is_none() {
+                        if let Some(event) = &terminal_event {
+                            on_event(event);
+                        }
+                    }
+                    let message = self
+                        .redact(&format!("{error:#}"))
+                        .replace(&credential, "[redacted]");
+                    let mut failure = failure_event(
+                        model,
+                        profile,
+                        http_attempt,
+                        "stream",
+                        Some(status.as_u16()),
+                        (request_id != "unavailable").then_some(request_id),
+                        terminal_event.as_ref().and_then(error_code),
+                        &message,
+                        advised,
+                        delay,
+                    );
+                    failure["failure"]["output_started"] = json!(output_started);
+                    on_event(&failure);
+                    if let Some(delay) = delay {
+                        waited += delay;
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    bail!("{message} (after {http_attempt} HTTP attempts)");
                 }
             }
-            bail!("API stream ended before the response completed.")
         }
-        .await;
-        // Never replay an opened stream, including failures before its first event.
-        if let Err(error) = &result {
-            let message = self
-                .redact(&format!("{error:#}"))
-                .replace(&credential, "[redacted]");
-            on_event(&failure_event(
-                model,
-                profile,
-                http_attempt,
-                "stream",
-                Some(status.as_u16()),
-                (request_id != "unavailable").then_some(request_id),
-                stream_error_code.as_deref(),
-                &message,
-                None,
-                None,
-            ));
-        }
-        result
     }
 
     async fn pause_for_limit(&self, profile: &Value, error: &Value) -> Result<()> {
@@ -471,10 +518,11 @@ fn error_code(value: &Value) -> Option<&str> {
     value
         .pointer("/response/error/code")
         .or_else(|| value.pointer("/error/code"))
+        .or_else(|| value.get("code"))
         .and_then(Value::as_str)
 }
-fn retryable_status(status: u16, error: &Value) -> bool {
-    if matches!(
+fn terminal_provider_error(error: &Value) -> bool {
+    matches!(
         error_code(error),
         Some(
             "subscription_sharing_usage_limit_exceeded"
@@ -485,12 +533,52 @@ fn retryable_status(status: u16, error: &Value) -> bool {
                 | "chatpass_v2_invalid_authorization_context"
                 | "subscription_sharing_invalid_user"
                 | "subscription_sharing_unsupported_capability"
+                | "invalid_api_key"
+                | "invalid_grant"
+                | "billing_hard_limit_reached"
+                | "context_length_exceeded"
         )
-    ) {
-        return false;
-    }
-    matches!(status, 500 | 502 | 503 | 504 | 520)
-        || (status == 429 && error_code(error) == Some("rate_limit_exceeded"))
+    ) || matches!(
+        error_type(error),
+        Some(
+            "authentication_error"
+                | "permission_error"
+                | "invalid_request_error"
+                | "insufficient_quota"
+        )
+    )
+}
+fn error_type(value: &Value) -> Option<&str> {
+    value
+        .pointer("/response/error/type")
+        .or_else(|| value.pointer("/error/type"))
+        .and_then(Value::as_str)
+}
+fn retryable_status(status: u16, error: &Value) -> bool {
+    !terminal_provider_error(error)
+        && (matches!(status, 408 | 409 | 429) || (500..600).contains(&status))
+}
+fn retryable_transport(error: &reqwest::Error) -> bool {
+    !error.is_builder() && (error.is_connect() || error.is_timeout() || error.is_request())
+}
+fn retryable_stream_error(error: &Value) -> bool {
+    !terminal_provider_error(error)
+        && (matches!(
+            error_code(error),
+            Some(
+                "server_error"
+                    | "internal_error"
+                    | "server_is_overloaded"
+                    | "rate_limit_exceeded"
+                    | "rate_limit_error"
+                    | "slow_down"
+                    | "subscription_sharing_usage_unavailable"
+                    | "subscription_sharing_user_unavailable"
+            )
+        ) || matches!(
+            error_type(error),
+            Some("server_error" | "service_unavailable_error" | "rate_limit_error")
+        ))
 }
 fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers

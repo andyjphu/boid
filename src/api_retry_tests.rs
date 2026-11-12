@@ -147,7 +147,7 @@ async fn exhausted_retries_stop_after_four_attempts() {
 }
 
 #[tokio::test]
-async fn permission_quota_and_unknown_429_fail_without_retry() {
+async fn permission_quota_and_invalid_requests_fail_without_retry() {
     for (status, body) in [
         (403, r#"{"detail":"Serving region not allowed"}"#),
         (
@@ -155,7 +155,7 @@ async fn permission_quota_and_unknown_429_fail_without_retry() {
             r#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"Limit reached"}}"#,
         ),
         (429, r#"{"error":{"code":"insufficient_quota"}}"#),
-        (429, "Unclassified limit"),
+        (400, "Invalid request"),
         (401, "Invalid identity"),
     ] {
         let mock = Mock::new(vec![response(status, body, Some("1"))]).await;
@@ -232,12 +232,10 @@ fn retry_after_dates_and_total_wait_budget() {
 }
 
 #[tokio::test]
-async fn opened_or_partial_streams_are_never_replayed() {
+async fn partial_streams_and_invalid_responses_are_never_replayed() {
     for body in [
-        "",
         "data: not-json\n\n",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
-        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"subscription_sharing_user_unavailable\",\"message\":\"temporary\"}}}\n\n",
     ] {
         let mock = Mock::new(vec![response(200, body, None)]).await;
         let mut events = vec![];
@@ -291,4 +289,198 @@ async fn connect_failure_is_recorded_and_retried_with_a_bound() {
     assert_eq!(events.len(), 4);
     assert!(events.iter().all(|e| e["failure"]["phase"] == "connect"));
     assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+}
+
+#[tokio::test]
+async fn broad_http_failures_and_empty_stream_share_one_retry_budget() {
+    let mock = Mock::new(vec![
+        response(408, "Request timeout", None),
+        response(409, "Conflict", None),
+        response(524, "Proxy timeout", None),
+        response(200, "", None),
+    ])
+    .await;
+    let mut events = vec![];
+    assert!(
+        mock.client()
+            .respond(&[], json!([]), |e| events.push(e.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(mock.count.load(Ordering::SeqCst), 4);
+    assert_eq!(events.last().unwrap()["failure"]["phase"], "stream");
+    assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+
+    let mock = Mock::new(vec![
+        response(
+            429,
+            r#"{"error":{"type":"rate_limit_error","code":"slow_down"}}"#,
+            None,
+        ),
+        response(429, "Proxy rate limit", None),
+        success(),
+    ])
+    .await;
+    mock.client().respond(&[], json!([]), |_| {}).await.unwrap();
+    assert_eq!(mock.count.load(Ordering::SeqCst), 3);
+    assert!(!retryable_status(
+        503,
+        &json!({"error":{"code":"insufficient_quota"}})
+    ));
+    assert!(!retryable_status(
+        429,
+        &json!({"error":{"type":"insufficient_quota"}})
+    ));
+}
+
+#[tokio::test]
+async fn early_stream_failure_recovers_without_leaking_failed_usage_or_changing_input() {
+    let mock = Mock::new(vec![
+        response(200, "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"error\",\"error\":{\"code\":\"server_is_overloaded\",\"type\":\"service_unavailable_error\"}}\n\n", None),
+        response(200, "", None),
+        success(),
+    ]).await;
+    let mut events = vec![];
+    mock.client()
+        .respond(
+            &[json!({"role":"user","content":"same task"})],
+            json!([]),
+            |e| events.push(e.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mock.count.load(Ordering::SeqCst), 3);
+    let requests = mock.requests.lock().unwrap();
+    assert!(requests.windows(2).all(|r| r[0] == r[1]));
+    let failures: Vec<_> = events
+        .iter()
+        .filter_map(|e| crate::usage::RequestFailure::from_event(1, e))
+        .collect();
+    assert_eq!(failures.len(), 2);
+    assert_eq!(
+        failures[0].error_code.as_deref(),
+        Some("server_is_overloaded")
+    );
+    assert!(retryable_stream_error(
+        &json!({"type":"error","error":{"type":"service_unavailable_error","code":"future_temporary_failure"}})
+    ));
+    assert!(retryable_stream_error(
+        &json!({"type":"error","code":"server_is_overloaded"})
+    ));
+    assert!(
+        failures
+            .iter()
+            .all(|f| f.output_started == Some(false) && f.retry_delay_ms.is_some())
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|e| crate::usage::Report::from_event(1, e))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|e| e["type"] == "error"));
+}
+
+#[tokio::test]
+async fn output_tools_usage_and_terminal_errors_prevent_stream_replay() {
+    let overload =
+        json!({"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}});
+    for (prefix, terminal) in [
+        (
+            Some(json!({"type":"response.output_text.delta","delta":"partial"})),
+            overload.clone(),
+        ),
+        (
+            Some(json!({"type":"response.function_call_arguments.delta","delta":"{}"})),
+            overload.clone(),
+        ),
+        (
+            Some(json!({"type":"response.output_item.added","item":{"type":"function_call"}})),
+            overload.clone(),
+        ),
+        (
+            None,
+            json!({"type":"response.failed","response":{"output":[{"type":"function_call"}],"error":{"code":"server_is_overloaded"}}}),
+        ),
+        (
+            None,
+            json!({"type":"response.failed","response":{"usage":{"input_tokens":3},"error":{"code":"server_is_overloaded"}}}),
+        ),
+        (
+            None,
+            json!({"type":"error","code":"subscription_sharing_usage_limit_exceeded"}),
+        ),
+        (None, json!({"type":"error","code":"unknown_error"})),
+        (
+            None,
+            json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
+        ),
+    ] {
+        let body = format!(
+            "{}data: {terminal}\n\n",
+            prefix.map(|p| format!("data: {p}\n\n")).unwrap_or_default()
+        );
+        let mock = Mock::new(vec![response(200, &body, None)]).await;
+        let mut events = vec![];
+        assert!(
+            mock.client()
+                .respond(&[], json!([]), |e| events.push(e.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(mock.count.load(Ordering::SeqCst), 1);
+        assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+        assert!(events.contains(&terminal));
+    }
+}
+
+#[tokio::test]
+async fn reset_and_timeout_before_headers_recover() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for timeout in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client =
+            Client::test_client_at(format!("http://{}", listener.local_addr().unwrap()));
+        client.http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 8192];
+            assert!(first.read(&mut bytes).await.unwrap() > 0);
+            if timeout {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            drop(first);
+            let (mut second, _) = listener.accept().await.unwrap();
+            assert!(second.read(&mut bytes).await.unwrap() > 0);
+            let body = "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n";
+            second
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let mut events = vec![];
+        client
+            .respond(&[], json!([]), |e| events.push(e.clone()))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let failures: Vec<_> = events
+            .iter()
+            .filter_map(|e| crate::usage::RequestFailure::from_event(1, e))
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].phase, "send");
+        assert!(failures[0].retry_delay_ms.is_some());
+        assert!(!failures[0].message.contains("unused-test-key"));
+    }
 }

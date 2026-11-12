@@ -336,6 +336,14 @@ async fn inference(
         )
             .into_response();
     }
+    if p.failure.lock().unwrap().as_str() == "transient-once"
+        && p.requests.lock().unwrap().len() == 2
+    {
+        return (
+            [("x-request-id", "subscription-stream-check")],
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_is_overloaded\"}}}\n\n",
+        ).into_response();
+    }
     if p.failure.lock().unwrap().as_str() == "http-limit" {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"Fixture limit"}}))).into_response();
     }
@@ -546,7 +554,7 @@ async fn subscription_retry_persists_failure_without_changing_billing_or_replayi
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while f.provider.requests.lock().unwrap().len() < 3
+        while f.provider.requests.lock().unwrap().len() < 4
             || hub.view(&view.id).unwrap().status != "idle"
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -554,7 +562,7 @@ async fn subscription_retry_persists_failure_without_changing_billing_or_replayi
     })
     .await
     .unwrap();
-    assert_eq!(f.provider.requests.lock().unwrap().len(), 3);
+    assert_eq!(f.provider.requests.lock().unwrap().len(), 4);
     assert_eq!(
         hub.view(&view.id)
             .unwrap()
@@ -566,12 +574,12 @@ async fn subscription_retry_persists_failure_without_changing_billing_or_replayi
     );
     let diagnostics = hub.diagnostics();
     let d = &diagnostics["sessions"][0];
-    assert_eq!(d["request_failure_count"], 1);
-    assert_eq!(d["latest_request_failure"]["http_status"], 503);
+    assert_eq!(d["request_failure_count"], 2);
+    assert_eq!(d["latest_request_failure"]["http_status"], 200);
     assert_eq!(d["latest_request_failure"]["billing_route"], "chatgpt");
     assert_eq!(
         d["latest_request_failure"]["request_id"],
-        "subscription-retry-check"
+        "subscription-stream-check"
     );
     assert_eq!(d["latest_response"]["billing_route"], "chatgpt");
     assert_eq!(d["summary"]["recorded_requests"], 2);

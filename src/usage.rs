@@ -58,6 +58,8 @@ pub struct RequestFailure {
     pub retry_after_ms: Option<u64>,
     // Scheduled delay, not a claim that cancellation allowed another attempt.
     pub retry_delay_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_started: Option<bool>,
 }
 impl RequestFailure {
     pub fn from_event(attempt: u64, event: &Value) -> Option<Self> {
