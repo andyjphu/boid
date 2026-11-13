@@ -10,6 +10,59 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn terminal_screen_validation_wait_leaves_networking_responsive() {
+    let state = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/", get(|| async { "ready" })),
+        )
+        .await
+        .unwrap();
+    });
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let holder = hub.clone();
+    let holding = std::thread::spawn(move || {
+        let _data = holder.0.data.lock().unwrap();
+        locked.send(()).unwrap();
+        wait.recv().unwrap();
+    });
+    ready.await.unwrap();
+    let started = Arc::new(Notify::new());
+    let signal = started.clone();
+    let reader = hub.clone();
+    let validating = tokio::spawn(async move {
+        signal.notify_one();
+        reader.validate_screen(1)
+    });
+    started.notified().await;
+    let releasing = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(700));
+        release.send(()).unwrap();
+    });
+    let begin = Instant::now();
+    assert_eq!(
+        reqwest::get(url).await.unwrap().text().await.unwrap(),
+        "ready"
+    );
+    let latency = begin.elapsed();
+    validating.await.unwrap().unwrap();
+    releasing.join().unwrap();
+    holding.join().unwrap();
+    server.abort();
+    hub.shutdown().await;
+    println!("HTTP latency during terminal screen validation wait: {latency:?}");
+    assert!(
+        latency < Duration::from_millis(350),
+        "network stalled for {latency:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistence_and_lock_wait_leave_networking_responsive() {
     let state = tempfile::tempdir().unwrap();

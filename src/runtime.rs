@@ -685,7 +685,7 @@ impl Hub {
         })
     }
     pub fn validate_screen(&self, screen: u32) -> Result<()> {
-        self.0.data.lock().unwrap().screens.validate(screen)
+        crate::blocking::run(|| self.0.data.lock().unwrap().screens.validate(screen))
     }
     fn assign_screen_locked(&self, data: &mut Data, key: &str, screen: u32) -> Result<()> {
         data.screens.validate(screen)?;

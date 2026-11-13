@@ -343,14 +343,23 @@ function storeScreenSelection() {
 function captureAgentState(ui) {
   if (ui.restoringScreen) return;
   rememberPosition(ui);
+  const expanded = [];
+  for (const [id, item] of ui.entries) {
+    let flags;
+    for (const key of Object.keys(item)) {
+      if (key.startsWith("expanded") && item[key] === true) {
+        if (!flags) flags = {};
+        flags[key] = true;
+      }
+    }
+    if (flags) expanded.push([id, flags]);
+  }
   agentScreenState[ui.id] = {
     input: ui.input.value, inputRevision: ui.messageState.revision, follow: ui.follow,
     questions: { drafts: Object.fromEntries(ui.questionDrafts), selected: ui.questionId,
       open: !ui.questionPanel.hidden, known: ui.questions.map(q => q.id) },
     anchor: ui.anchor ? { id: ui.anchor.node.dataset.entryId, offset: ui.anchor.offset } : null,
-    expanded: Object.fromEntries([...ui.entries].map(([id, item]) => [id,
-      Object.fromEntries(Object.entries(item).filter(([key, value]) => key.startsWith("expanded") && value === true))
-    ]).filter(([, value]) => Object.keys(value).length)),
+    expanded: Object.fromEntries(expanded),
   };
 }
 async function restoreAgentState(ui) {
