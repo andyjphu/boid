@@ -524,3 +524,41 @@ fn disk_progress_does_not_depend_on_available_tokio_blocking_workers() {
         );
     });
 }
+
+// Synthetic gate check of clock boundaries, not a measurement of live-user latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admission_timings_separate_roster_wait_from_locked_work() {
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::new(Client::test_client()).unwrap();
+    let target = idle_agent(&hub, work.path(), "timing-boundaries").await;
+    let locking = hub.clone();
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let gate = WriterGate(Some(release));
+    let holder = tokio::task::spawn_blocking(move || {
+        let _guard = locking.0.data.lock().unwrap();
+        locked.send(()).unwrap();
+        let _ = wait.recv();
+    });
+    ready.await.unwrap();
+    let accepting = hub.clone();
+    let id = target.id.clone();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let admission = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        accepting.message_timed(&id, "synthetic timing check".into())
+    });
+    ready.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    gate.release();
+    holder.await.unwrap();
+    let (result, timings) = admission.await.unwrap();
+    let message_id = result.unwrap();
+    assert!(hub.view(&target.id).unwrap().pending.contains(&message_id));
+    assert!(timings.lock_wait.unwrap() >= Duration::from_millis(20));
+    assert!(timings.admission >= timings.lock_wait.unwrap() + timings.mutation.unwrap());
+    let (result, timings) = hub.message_timed(&target.id, " ".into());
+    assert!(result.is_err());
+    assert!(timings.lock_wait.is_none() && timings.mutation.is_none());
+    hub.shutdown().await;
+}

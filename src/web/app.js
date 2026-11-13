@@ -7,6 +7,103 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 // Requests outlive pane DOM when switching screens.
 const questionSubmissions = new Map();
+// Opt-in, local-only input timing: boidInputTiming.enable(); then .samples().
+// Measures handler/transport/DOM milestones, not physical display scan-out.
+const inputTiming = (() => {
+  const limit = 64, records = [], entries = new Map();
+  let enabled = new URLSearchParams(location.search).get("input-timing") === "1";
+  let serial = 0, evictedRecords = 0, evictedEntries = 0;
+  const key = (session, message) => JSON.stringify([session, message]);
+  const current = record => enabled && record && !record.ended && records.includes(record);
+  const elapsed = (record, at) => at == null || at < record.startedAt ? null : at - record.startedAt;
+  function correlate(record) {
+    if (record.ended || (record.domAt != null && record.ackAt != null)) return;
+    const entry = entries.get(key(record.sessionId, record.messageId));
+    if (!entry) return;
+    record.entryAt = entry.receivedAt; record.entrySource = entry.source;
+    record.domAt = entry.domAt; record.inViewport = entry.inViewport;
+    record.documentVisible = entry.documentVisible;
+  }
+  function copy(record) {
+    const entryMs = elapsed(record, record.entryAt), domMs = elapsed(record, record.domAt);
+    return {
+      sample: record.serial, sessionId: record.sessionId, messageId: record.messageId,
+      outcome: record.failure || (record.ended ? "observation_disabled" : record.ackAt == null ? "awaiting_http"
+        : entryMs == null ? "accepted_waiting_server_entry" : domMs == null ? "accepted_waiting_dom" : "rendered"),
+      httpStatus: record.httpStatus,
+      submitToHeadersMs: elapsed(record, record.headersAt),
+      submitToAcknowledgmentMs: elapsed(record, record.ackAt),
+      submitToServerEntryMs: entryMs, submitToDOMRenderMs: domMs,
+      submitToComposerClearMs: elapsed(record, record.clearAt),
+      entrySource: record.entrySource, inViewport: record.inViewport,
+      documentVisible: record.documentVisible, serverTimingMs: { ...record.serverTiming },
+    };
+  }
+  const stats = () => ({ enabled, capacity: limit, retained: records.length, evictedRecords, evictedEntries });
+  window.boidInputTiming = Object.freeze({
+    enable() { enabled = true; return stats(); },
+    disable() { enabled = false; for (const record of records) record.ended = record.domAt == null || record.ackAt == null; entries.clear(); return stats(); },
+    clear() { records.length = 0; entries.clear(); evictedRecords = evictedEntries = 0; },
+    samples() { return records.map(copy); }, stats,
+  });
+  return {
+    startedAt: () => enabled ? performance.now() : null,
+    begin(sessionId, startedAt) {
+      if (!enabled || startedAt == null) return null;
+      const record = { serial: ++serial, sessionId, startedAt, messageId: null,
+        httpStatus: null, headersAt: null, ackAt: null, clearAt: null,
+        entryAt: null, entrySource: null, domAt: null, inViewport: null,
+        documentVisible: null, serverTiming: {}, failure: null, ended: false };
+      records.push(record);
+      if (records.length > limit) { records.shift(); evictedRecords++; }
+      return record;
+    },
+    response(record, response, headersAt) {
+      if (!current(record)) return;
+      record.httpStatus = response.status; record.headersAt = headersAt;
+      for (const metric of (response.headers.get("Server-Timing") || "").split(",")) {
+        const match = metric.trim().match(/^(boid_(?:lock|mutate|admit|handler))\s*;\s*dur=([0-9]+(?:\.[0-9]+)?)(?:\s*;|\s*$)/);
+        if (match && Number.isFinite(Number(match[2]))) record.serverTiming[match[1]] = Number(match[2]);
+      }
+    },
+    acknowledge(record, result) {
+      if (!current(record)) return;
+      record.ackAt = performance.now();
+      if (typeof result?.message_id !== "string") { record.failure = "missing_message_id"; return; }
+      record.messageId = result.message_id; correlate(record);
+    },
+    cleared(record) { if (current(record)) record.clearAt = performance.now(); },
+    failed(record, error) {
+      if (current(record)) record.failure = Number.isFinite(error?.status) ? "http_error" : "network_error";
+    },
+    entry(sessionId, messageId, source) {
+      if (!enabled) return;
+      sessionId = String(sessionId); messageId = String(messageId);
+      const id = key(sessionId, messageId);
+      if (!entries.has(id)) {
+        entries.set(id, { sessionId, messageId, receivedAt: performance.now(), source,
+          domAt: null, inViewport: null, documentVisible: null });
+        if (entries.size > limit) { entries.delete(entries.keys().next().value); evictedEntries++; }
+      }
+      for (const record of records) if (record.sessionId === sessionId && record.messageId === messageId) correlate(record);
+    },
+    rendered(ui) {
+      if (!enabled) return;
+      const at = performance.now();
+      let bounds;
+      for (const entry of entries.values()) {
+        if (entry.sessionId !== ui.id || entry.domAt != null) continue;
+        const item = ui.entries.get(entry.messageId);
+        if (!item?.rendered || !ui.mounted.has(item) || !item.node.isConnected || item.node.hidden) continue;
+        bounds ||= ui.trace.getBoundingClientRect();
+        const box = item.node.getBoundingClientRect();
+        entry.domAt = at; entry.inViewport = box.bottom > bounds.top && box.top < bounds.bottom;
+        entry.documentVisible = document.visibilityState === "visible";
+        for (const record of records) if (record.sessionId === ui.id && record.messageId === entry.messageId) correlate(record);
+      }
+    },
+  };
+})();
 const communications = new Map();
 const communicationEntries = new Map();
 const composerPadding = 8;
@@ -320,13 +417,15 @@ function showError(node, error) {
   node.hidden = false;
 }
 
-async function request(path, method = "GET", body, headers = {}) {
+async function request(path, method = "GET", body, headers = {}, observeResponse = null) {
   const options = { method, credentials: "same-origin", headers };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
   const response = await fetch(path, options);
+  const headersAt = observeResponse ? performance.now() : null;
+  if (observeResponse) observeResponse(response, headersAt);
   const text = await response.text();
   let result;
   try { result = text ? JSON.parse(text) : {}; } catch { result = { error: text }; }
@@ -1390,6 +1489,7 @@ function addSession(view) {
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
     if (ui.sending || !ui.input.value.trim()) return;
+    const submittedAt = inputTiming.startedAt();
     const text = ui.input.value;
     activatePromptSpace(ui);
     if (text.trim() === "/login" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/login")) {
@@ -1415,10 +1515,13 @@ function addSession(view) {
     }
     ui.sending = true;
     ui.error.hidden = true;
+    const timing = inputTiming.begin(id, submittedAt);
     try {
       const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
-      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted });
-      await ui.submission;
+      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted }, {},
+        timing ? (response, headersAt) => inputTiming.response(timing, response, headersAt) : null);
+      const acknowledgment = await ui.submission;
+      inputTiming.acknowledge(timing, acknowledgment);
       if (agentScreenState[id]?.input === text) agentScreenState[id].input = "";
       try {
         const saved = JSON.parse(sessionStorage.getItem(ui.orderKey));
@@ -1426,13 +1529,14 @@ function addSession(view) {
           saved.agents[id].input = ""; sessionStorage.setItem(ui.orderKey, JSON.stringify(saved));
         }
       } catch {}
-      if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
+      if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); if (ui.pane.isConnected) inputTiming.cleared(timing); }
       const current = sessions.get(id);
       if (current && current !== ui && current.input.value === text) {
         current.input.value = "";
         current.input.dispatchEvent(new Event("input"));
+        inputTiming.cleared(timing);
       }
-    } catch (error) { showError(ui.error, error); }
+    } catch (error) { inputTiming.failed(timing, error); showError(ui.error, error); }
     finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
@@ -1966,6 +2070,7 @@ function scheduleTranscript(ui) {
             || (after.height > 0 && after.top < bounds.bottom - 10)) scheduleViewport(ui);
       }
       if (ui.history && ui.history.start > 0 && ui.content.offsetHeight < ui.trace.clientHeight) loadHistory(ui, "before");
+      inputTiming.rendered(ui);
     });
   });
 }
@@ -2049,6 +2154,7 @@ function isSkillCatalog(entry) {
 
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
+  if (!delta && entry.kind === "user") inputTiming.entry(ui.id, id, "history");
   let item = ui.entries.get(id);
   if (!item) {
     const kind = entry.kind || "notice";
@@ -2292,6 +2398,7 @@ function startEvents() {
         return;
       }
       if (message.type === "communication") { receiveCommunication(message.message); return; }
+      if (message.type === "entry" && message.entry?.kind === "user") inputTiming.entry(message.session_id, message.entry.id, "sse");
       const ui = sessions.get(String(message.session_id));
       if (message.type === "closed") {
         reportUnsavedEnd(message);

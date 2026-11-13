@@ -73,3 +73,33 @@ paused recovery behavior; they do not restart a question's timer or agent work.
 `/login` changes the connection for its agent pane. `/model` selects a model
 from the connected account's catalog.
 `/clear` remains available; `/oai-compact` currently requires the API-key route.
+
+### Measuring message admission
+
+Browser input diagnostics are off by default. Open the page with
+`?input-timing=1`, or call `boidInputTiming.enable()` in the browser console.
+Send a normal message, then inspect
+`boidInputTiming.samples()`. Use `boidInputTiming.clear()` to remove retained
+samples and `boidInputTiming.disable()` to stop recording. Diagnostics retain
+at most 64 samples in memory and do not retain message contents or write disk
+logs. Correlation uses the server's message ID and local monotonic durations;
+it does not subtract clocks from different machines.
+
+Message responses retain their existing JSON and include `Server-Timing`
+durations in milliseconds:
+
+- `boid_lock`: waiting to acquire the server's session-state mutex.
+- `boid_mutate`: work while that mutex is held, including history copies,
+  mutation, persistence enqueueing, event publication, and worker notification.
+- `boid_admit`: runtime method entry through mutex release and the return from
+  the synchronous admission wrapper. This does not wait for background saving.
+- `boid_handler`: HTTP handler entry after Axum extraction through response-body
+  construction. It excludes authentication, request-body extraction, final
+  timing-header formatting, socket flush, and client receipt.
+
+These intervals overlap; do not add them together. Handler-level failures also
+include timing for stages reached. Authentication and extraction failures do
+not reach this handler and have no admission metrics. Browser rendering timings
+report DOM work, not when pixels became visible. No latency figure in the test
+fixtures establishes production speed: inspect samples from actual messages to
+measure the current browser and server.
