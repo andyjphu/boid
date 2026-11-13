@@ -23,6 +23,9 @@ an archived conversation.
 - The record's `view.entries` preserves the transcript, while `engine` contains
   saved model state. Referenced `skill-snapshots/` and existing context archives
   under `sessions/compactions/` and `sessions/clears/` are retained too.
+- Attached images remain in `images/<session-id>/`. Preserve these files with
+  the archived record when copying or reconstructing a conversation; the record
+  contains references rather than embedded image bytes. See [images](images.md).
 - `archived-receipts/<sender-session-id>.json` contains compact send receipts
   and message-text hashes, not message bodies. This separate index prevents a
   retried send from being delivered twice. Normal runtime memory does not load

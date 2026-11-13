@@ -62,6 +62,11 @@ A draft clears only when the server acknowledges that exact draft revision.
 Unconfirmed submissions remain available for manual review and retry after a
 failure or reload; recovery storage does not block sending.
 
+Paste an image into the agent composer with Command-V (Ctrl-V on other systems).
+Blue `[Image #1]` markers identify attachments; use their × to remove them.
+Send images with text or on their own. Uploads run while typing continues, and
+sending waits for the attachments. [Image formats and storage](docs/images.md).
+
 Agent panes retain the complete transcript and load recent history first.
 [Earlier history loads on demand](docs/history.md); rendering follows the viewport.
 The main agent button creates an agent immediately. Each pane's trailing `+`
