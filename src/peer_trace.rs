@@ -177,6 +177,9 @@ fn trace_entry(
         "text_start":start,"text_end":end,"text_bytes":entry.text.len(),
         "text_complete":start == 0 && end == entry.text.len(),
         "next_offset":(end < entry.text.len()).then_some(end)});
+    if !entry.images.is_empty() {
+        value["images"] = json!(entry.images);
+    }
     // Attribute peer exchanges without duplicating the message body in the result.
     if let Some(message) = data.messages.values().find(|message| {
         (message.recipient_id == view.id && message.id == entry.id)
