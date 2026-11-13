@@ -1080,7 +1080,16 @@ impl Hub {
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
             let result = (|| -> Result<()> {
-                let mut permit = self.reserve_persistence(session, 1)?;
+                let bytes = persistence::delta_bytes(entry, text);
+                let capacity = {
+                    let data = self.0.data.lock().unwrap();
+                    data.sessions
+                        .get(session)
+                        .context("Unknown session")?
+                        .persistence
+                        .capacity()
+                };
+                let mut permit = capacity.reserve_delta(bytes)?;
                 let mut data = self.0.data.lock().unwrap();
                 let handle = data.sessions.get_mut(session).context("Unknown session")?;
                 if handle.storage_error.is_some() {
@@ -1114,7 +1123,14 @@ impl Hub {
                     json!({"type":"delta","session_id":session,"entry_id":entry,"text":text}),
                 );
                 drop(data);
-                receipt.wait()
+                // Completed responses and side effects retain their FIFO
+                // checkpoint fences. An unfinished stream can lose this tail
+                // on a crash. Oversized chunks exclude other deltas and
+                // wait here rather than building an unbounded queue.
+                if bytes > persistence::DELTA_BYTES {
+                    receipt.wait()?;
+                }
+                Ok(())
             })();
             if let Err(error) = result {
                 self.fault(session, error);
@@ -3468,6 +3484,7 @@ mod tests {
         // Reproduce a crash between atomic checkpoint replacement and journal
         // truncation by retaining a delta already included in the checkpoint.
         let record = hub.0.data.lock().unwrap().sessions[&view.id].record.clone();
+        hub.checkpoint(&view.id, &record.engine).unwrap();
         hub.0.store.save(&view.id, &record).unwrap();
         hub.shutdown().await;
         drop(hub);
