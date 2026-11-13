@@ -355,6 +355,13 @@ function createPaneGroup(record) {
   plus.addEventListener('click', () => createAgent(group, plus));
   plus.addEventListener('contextmenu', event => { event.preventDefault(); openSessionHistory(group); });
   strip.append(plus); header.append(strip); pane.append(header, body); workspace.append(pane);
+  strip.addEventListener('wheel', event => {
+    if (event.ctrlKey || !event.deltaY || strip.scrollWidth <= strip.clientWidth) return;
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? strip.clientWidth : 1;
+    event.preventDefault(); event.stopPropagation();
+    strip.scrollLeft += event.deltaY * unit;
+  }, { passive: false });
   header.draggable = true;
   header.addEventListener('dragstart', event => {
     if (event.target.closest('.pane-tab, button')) return;
