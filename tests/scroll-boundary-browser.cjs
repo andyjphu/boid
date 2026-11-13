@@ -18,6 +18,10 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
       const url = new URL(route.request().url());
       if (url.hostname !== 'boid.test') return route.abort();
       if (url.pathname === '/api/config') return route.fulfill({ json: { cwd: '/tmp', agent_names: [] } });
+      if (url.pathname === '/api/sessions/a/history' && url.searchParams.get('after') === '300') {
+        return route.fulfill({ json: { id: 'a', entries: [{ id: '300', kind: 'assistant', text: 'Next history page' }],
+          history: { start: 300, end: 301, total: 301, seq: 2 } } });
+      }
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: [] });
       const file = path.join(root, url.pathname === '/' ? 'index.html' : url.pathname);
       return route.fulfill({ body: fs.readFileSync(file), contentType: file.endsWith('.js')
@@ -100,8 +104,16 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
     });
     assert.deepEqual(defaults, { bottom: true, zoom: false, horizontal: false, interior: false,
       topCrossing: true, top: 0, topOutward: true, pageCrossing: true });
+    // Consuming the native event must still load newer history at the boundary.
+    await page.evaluate(() => {
+      const ui = sessions.get('a');
+      ui.follow = false;
+      ui.history.total = 301;
+      ui.trace.dispatchEvent(new WheelEvent('wheel', { deltaY: 100000, bubbles: true, cancelable: true }));
+    });
+    await page.waitForFunction(() => sessions.get('a').history.end === 301);
     await page.waitForTimeout(150);
-    await page.evaluate(() => { document.body.style.zoom = 1; window.scrollTo(0, 0); restorePosition(sessions.get("a")); });
+    await page.evaluate(() => { document.body.style.zoom = 1; window.scrollTo(0, 0); layout(); restorePosition(sessions.get("a")); });
     await page.waitForTimeout(150);
     if (process.env.BOID_SCREENSHOT) await page.screenshot({ path: process.env.BOID_SCREENSHOT });
     assert.deepEqual(errors, []);

@@ -1261,6 +1261,7 @@ function addSession(view) {
       if (delta > 0 && promptVisible(ui)) {
         ui.followClearance = Math.max(0, Math.min(ui.trace.scrollTop, end) - messageBottom(ui));
       }
+      if (delta > 0 && ui.history && ui.history.end < ui.history.total) loadHistory(ui, "after");
     }
     if (event.deltaY < 0) {
       ui.follow = false;
