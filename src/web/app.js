@@ -525,7 +525,7 @@ function paintPaneResizeHandles(size) {
     segments.add(segment);
     const key = `${tile.key}:${edge}`;
     // Keep pointer capture attached if snapping joins this segment to another one.
-    const active = paneResize && [...group.members].some(([member, side]) =>
+    const active = paneResize && !paneResize.corner && [...group.members].some(([member, side]) =>
       member.key === paneResize.handle.dataset.ownerKey && side === paneResize.handle.dataset.edge);
     const handle = active ? paneResize.handle : paneResizeHandles.get(key) || makePaneResizeHandle();
     if (!active) { handle.dataset.ownerKey = tile.key; handle.dataset.edge = edge; }
@@ -540,6 +540,16 @@ function paintPaneResizeHandles(size) {
       left: `${group.low * size.width}px`, top: `${group.at * size.height - 4}px`,
       width: `${(group.high - group.low) * size.width}px`, height: "8px",
     });
+    next.set(key, handle);
+  }
+  for (const tile of paneLayout.tiles) {
+    const groups = paneCornerGroups(tile.key);
+    if (!groups) continue;
+    const key = `corner:${tile.key}`;
+    const handle = paneResizeHandles.get(key) || makePaneResizeHandle(true);
+    handle.dataset.cornerOwnerKey = tile.key;
+    Object.assign(handle.style, { left: `${tile.right * size.width - 5}px`,
+      top: `${tile.bottom * size.height - 5}px`, width: "10px", height: "10px" });
     next.set(key, handle);
   }
   const retained = new Set(next.values());
@@ -590,10 +600,29 @@ function paneResizeGroup(key, edge) {
   return { members, horizontal, at, pixels, min, max, size, low, high };
 }
 
+function paneCornerGroups(key) {
+  if (!catalogReady || !paneLayout) return null;
+  const tiles = paneLayout.tiles, nw = tiles.find(tile => tile.key === key);
+  if (!nw || nw.right === 1 || nw.bottom === 1) return null;
+  const ne = tiles.find(tile => tile.left === nw.right && tile.bottom === nw.bottom);
+  const sw = tiles.find(tile => tile.right === nw.right && tile.top === nw.bottom);
+  const se = tiles.find(tile => tile.left === nw.right && tile.top === nw.bottom);
+  if (!ne || !sw || !se) return null;
+  // Join the two touching segments on each axis only for this corner gesture.
+  return [[nw, sw, "right"], [nw, ne, "bottom"]].map(([first, second, edge]) => {
+    const a = paneResizeGroup(first.key, edge), b = paneResizeGroup(second.key, edge);
+    return { ...a, snapOrigin: a.at, members: new Map([...a.members, ...b.members]),
+      min: Math.max(a.min, b.min), max: Math.min(a.max, b.max) };
+  });
+}
+
 let paneReflowFrame;
-function resizePaneEdge(group, at) {
+function snappedPaneEdge(group, at) {
   at = Math.max(group.min, Math.min(group.max, at));
   let nearest = at, distance = 8 / group.pixels;
+  if (Number.isFinite(group.snapOrigin) && Math.abs(group.snapOrigin - at) <= distance) {
+    nearest = group.snapOrigin; distance = Math.abs(group.snapOrigin - at);
+  }
   for (const tile of paneLayout.tiles) for (const side of group.horizontal ? ["left", "right"] : ["top", "bottom"]) {
     const target = tile[side];
     if (group.members.get(tile) === side || target <= 0 || target >= 1
@@ -601,12 +630,17 @@ function resizePaneEdge(group, at) {
     const delta = Math.abs(target - at);
     if (delta <= distance) { nearest = target; distance = delta; }
   }
-  at = nearest;
+  return nearest;
+}
+
+function resizePaneEdges(moves) {
+  // Resolve both axes before changing geometry so one frame sees one layout.
+  const resolved = moves.map(({ group, at }) => ({ group, at: snappedPaneEdge(group, at) }));
   for (const ui of sessions.values()) {
     if (!ui.reflow) rememberPosition(ui);
     ui.reflow = true;
   }
-  for (const [tile, side] of group.members) tile[side] = at;
+  for (const { group, at } of resolved) for (const [tile, side] of group.members) tile[side] = at;
   paneLayout.custom = true;
   paintPaneLayout();
   cancelAnimationFrame(paneReflowFrame);
@@ -619,6 +653,7 @@ function finishPaneResize(cancel = false) {
   const drag = paneResize;
   if (!drag) return;
   paneResize = null;
+  drag.handle.classList.remove("dragging");
   if (cancel) paneLayout = drag.before;
   document.body.classList.remove("resizing-panes");
   document.body.style.removeProperty("--resize-cursor");
@@ -628,37 +663,46 @@ function finishPaneResize(cancel = false) {
   rememberPaneOrder();
 }
 
-function makePaneResizeHandle() {
-  const handle = element("div", "pane-resize");
+function makePaneResizeHandle(corner = false) {
+  const handle = element("div", corner ? "pane-resize pane-resize-corner" : "pane-resize");
   handle.id = `pane-resize-${++paneResizeHandleId}`;
   handle.tabIndex = 0;
-  handle.setAttribute("role", "separator");
-  handle.setAttribute("aria-valuemin", "0"); handle.setAttribute("aria-valuemax", "100");
+  handle.setAttribute("role", corner ? "button" : "separator");
+  if (corner) {
+    handle.setAttribute("aria-label", "Resize four panes; use arrow keys to move the intersection");
+  } else {
+    handle.setAttribute("aria-valuemin", "0"); handle.setAttribute("aria-valuemax", "100");
+  }
+  const groupsForHandle = () => corner ? paneCornerGroups(handle.dataset.cornerOwnerKey)
+    : [paneResizeGroup(handle.dataset.ownerKey, handle.dataset.edge)].filter(Boolean);
   handle.addEventListener("pointerdown", event => {
     if (event.button !== 0 || !event.isPrimary || paneResize) return;
-    const group = paneResizeGroup(handle.dataset.ownerKey, handle.dataset.edge);
-    if (!group) return;
+    const groups = groupsForHandle();
+    if (!groups?.length) return;
     event.preventDefault(); event.stopPropagation();
-    paneResize = { ...group, before: structuredClone(paneLayout), handle, pointerId: event.pointerId,
-      origin: group.horizontal ? event.clientX : event.clientY };
+    paneResize = { groups, corner, size: groups[0].size, before: structuredClone(paneLayout),
+      handle, pointerId: event.pointerId, originX: event.clientX, originY: event.clientY };
+    handle.classList.add("dragging");
     handle.setPointerCapture(event.pointerId);
-    document.body.style.setProperty("--resize-cursor", group.horizontal ? "col-resize" : "row-resize");
+    document.body.style.setProperty("--resize-cursor", corner ? "all-scroll" : groups[0].horizontal ? "col-resize" : "row-resize");
     document.body.classList.add("resizing-panes");
   });
   handle.addEventListener("pointermove", event => {
     const drag = paneResize;
     if (!drag || drag.handle !== handle || drag.pointerId !== event.pointerId) return;
-    resizePaneEdge(drag, drag.at + ((drag.horizontal ? event.clientX : event.clientY) - drag.origin) / drag.pixels);
+    resizePaneEdges(drag.groups.map(group => ({ group, at: group.at + (group.horizontal
+      ? event.clientX - drag.originX : event.clientY - drag.originY) / group.pixels })));
   });
   handle.addEventListener("pointerup", event => { if (paneResize?.pointerId === event.pointerId) finishPaneResize(); });
   handle.addEventListener("pointercancel", () => finishPaneResize(true));
   handle.addEventListener("lostpointercapture", () => finishPaneResize(true));
   handle.addEventListener("keydown", event => {
-    const group = paneResizeGroup(handle.dataset.ownerKey, handle.dataset.edge);
-    const keys = group?.horizontal ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+    const horizontal = ["ArrowLeft", "ArrowRight"].includes(event.key);
+    const group = groupsForHandle()?.find(group => group.horizontal === horizontal);
+    const keys = horizontal ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
     if (!group || !keys.includes(event.key)) return;
     event.preventDefault(); event.stopPropagation();
-    resizePaneEdge(group, group.at + (keys.indexOf(event.key) ? 1 : -1) * (event.shiftKey ? 40 : 10) / group.pixels);
+    resizePaneEdges([{ group, at: group.at + (keys.indexOf(event.key) ? 1 : -1) * (event.shiftKey ? 40 : 10) / group.pixels }]);
     rememberPaneOrder();
   });
   paneResizeLayer.append(handle);

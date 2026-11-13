@@ -96,7 +96,7 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     await page.evaluate(() => discardSetup(drafts.get('saved')));
     await snapshot();
     const original = await boxes();
-    assert.equal(await page.locator('.pane-resize').count(), 4, '2x2 grid has four shared boundary segments');
+    assert.equal(await page.locator('.pane-resize:not(.pane-resize-corner)').count(), 4, '2x2 grid has four shared boundary segments');
     const sameTarget = await page.evaluate(() => {
       const a = document.querySelector('[data-pane-key="agent:a"]').getBoundingClientRect();
       const vertical = [-2, 0, 2].map(dx => document.elementFromPoint(a.right + dx, a.top + a.height / 2)?.id);
@@ -107,14 +107,70 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     assert.equal(new Set(sameTarget.horizontal).size, 1, 'both sides of horizontal border hit the same target');
     assert.ok(sameTarget.vertical[0]?.startsWith('pane-resize-'));
     assert.ok(sameTarget.horizontal[0]?.startsWith('pane-resize-'));
+    // One corner target takes priority over all four adjoining edge segments.
+    assert.equal(await page.locator('.pane-resize-corner').count(), 1);
+    const junction = { x: original['agent:a'].right, y: original['agent:a'].bottom };
+    const hits = await page.evaluate(({ x, y }) => [-3, 0, 3].flatMap(dx => [-3, 0, 3].map(dy => {
+      const hit = document.elementFromPoint(x + dx, y + dy);
+      return { id: hit?.id, corner: hit?.classList.contains('pane-resize-corner'), cursor: getComputedStyle(hit).cursor };
+    })), junction);
+    assert.equal(new Set(hits.map(h => h.id)).size, 1);
+    assert.ok(hits.every(h => h.corner && h.cursor === 'all-scroll'));
+    const beginCorner = async () => {
+      const r = (await boxes())['agent:a'];
+      const point = { x: r.right, y: r.bottom };
+      await page.mouse.move(point.x, point.y); await page.mouse.down(); return point;
+    };
+    let corner = await beginCorner();
+    await page.mouse.move(corner.x + 90, corner.y + 60, { steps: 8 }); await frames();
+    let four = await boxes();
+    for (const key of ['agent:a', 'agent:c']) near(four[key].right, junction.x + 90, 'both vertical segments move');
+    for (const key of ['agent:a', 'agent:b']) near(four[key].bottom, junction.y + 60, 'both horizontal segments move');
+    near(four['agent:d'].left, junction.x + 90, 'lower right width follows');
+    near(four['agent:d'].top, junction.y + 60, 'lower right height follows');
+    await noOverlap();
+    // Original intersection stays a snap target even though no stationary edge remains there.
+    await page.mouse.move(corner.x + 6, corner.y - 6, { steps: 8 }); await frames();
+    four = await boxes();
+    near(four['agent:a'].right, junction.x, 'corner snaps back to original x');
+    near(four['agent:a'].bottom, junction.y, 'corner snaps back to original y');
+    await page.mouse.move(corner.x + 20, corner.y + 20); await page.mouse.up(); await frames();
+    four = await boxes();
+    near(four['agent:a'].right, junction.x + 20, 'corner escapes original x snap');
+    near(four['agent:a'].bottom, junction.y + 20, 'corner escapes original y snap');
+    await page.reload(); await page.waitForFunction(() => window.testEvents); await snapshot();
+    near((await boxes())['agent:a'].right, four['agent:a'].right, 'four-way width restored');
+    near((await boxes())['agent:a'].bottom, four['agent:a'].bottom, 'four-way height restored');
+    await reset();
+    corner = await beginCorner();
+    await page.mouse.move(corner.x + 80, corner.y - 50); await page.keyboard.press('Escape'); await page.mouse.up(); await frames();
+    near((await boxes())['agent:a'].right, junction.x, 'Escape restores corner x');
+    near((await boxes())['agent:a'].bottom, junction.y, 'Escape restores corner y');
+    corner = await beginCorner();
+    await page.mouse.move(corner.x - 70, corner.y + 60);
+    await page.locator('.pane-resize-corner').dispatchEvent('pointercancel'); await page.mouse.up(); await frames();
+    near((await boxes())['agent:a'].right, junction.x, 'cancel restores corner x');
+    near((await boxes())['agent:a'].bottom, junction.y, 'cancel restores corner y');
+    await page.locator('.pane-resize-corner').focus(); await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowDown'); await frames();
+    near((await boxes())['agent:c'].right, junction.x + 10, 'corner keyboard moves both vertical segments');
+    near((await boxes())['agent:b'].bottom, junction.y + 10, 'corner keyboard moves both horizontal segments');
+    await reset(); corner = await beginCorner();
+    await page.mouse.move(corner.x + 3000, corner.y - 3000); await page.mouse.up(); await frames(); await noOverlap();
+    near((await boxes())['agent:b'].width, 180, 'corner width minimum');
+    near((await boxes())['agent:a'].height, 120, 'corner height minimum');
+    await reset();
+    if (process.env.BOID_CORNER_SCREENSHOT) {
+      await page.mouse.move(junction.x, junction.y); await page.screenshot({ path: process.env.BOID_CORNER_SCREENSHOT });
+    }
     // Align the top divider to the stationary bottom divider, then drag away again.
     await drag('agent:a', 'right', 100);
+    assert.equal(await page.locator('.pane-resize-corner').count(), 0, 'staggered T junction has no four-way target');
     const bottomBeforeSnap = (await boxes())['agent:c'];
     const snapPoint = await beginDrag('agent:a', 'right');
     await page.mouse.move(snapPoint.x - 94, snapPoint.y, { steps: 8 }); await frames();
     near((await boxes())['agent:a'].right, bottomBeforeSnap.right, 'vertical divider snaps within 8px');
     near((await boxes())['agent:c'].right, bottomBeforeSnap.right, 'stationary divider stays fixed');
-    assert.equal(await page.locator('.pane-resize').count(), 4, 'snapping keeps one target per segment');
+    assert.equal(await page.locator('.pane-resize:not(.pane-resize-corner)').count(), 4, 'snapping keeps one target per segment');
     await page.mouse.move(snapPoint.x - 80, snapPoint.y, { steps: 4 }); await page.mouse.up(); await frames();
     near((await boxes())['agent:a'].right, bottomBeforeSnap.right + 20, 'drag escapes snapping range');
     await reset();
@@ -192,6 +248,23 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     await drag('agent:a', 'right', 50);
     near((await boxes())['agent:c'].height, overflowing['agent:c'].height, 'overflowing row height retained');
     await page.setViewportSize({ width: 1200, height: 900 }); await frames();
+    // A four-way gesture still snaps to stationary dividers elsewhere on both axes.
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const nine = Array.from('abcdefghi', id => ({ ...views[0], id, name: id }));
+    await reset(nine);
+    assert.equal(await page.locator('.pane-resize-corner').count(), 4, 'one target per four-pane junction');
+    await drag('agent:g', 'right', 50); await drag('agent:c', 'bottom', 40);
+    const stationary = await boxes();
+    corner = await beginCorner();
+    await page.mouse.move(corner.x + 44, corner.y + 34, { steps: 8 }); await frames();
+    near((await boxes())['agent:a'].right, stationary['agent:g'].right, 'corner snaps x to another row');
+    near((await boxes())['agent:a'].bottom, stationary['agent:c'].bottom, 'corner snaps y to another column');
+    near((await boxes())['agent:g'].right, stationary['agent:g'].right, 'stationary x stays fixed');
+    near((await boxes())['agent:c'].bottom, stationary['agent:c'].bottom, 'stationary y stays fixed');
+    await page.mouse.move(corner.x + 70, corner.y + 60); await page.mouse.up(); await frames(); await noOverlap();
+    near((await boxes())['agent:a'].right, corner.x + 70, 'corner breaks away from stationary x');
+    near((await boxes())['agent:a'].bottom, corner.y + 60, 'corner breaks away from stationary y');
+    await page.setViewportSize({ width: 1200, height: 900 });
     // The existing xterm fit/PTY resize path receives updated dimensions.
     const terminal = { id: 't', name: '#1', cwd: '/tmp', running: true };
     await reset([views[0]], [terminal]);
@@ -213,6 +286,6 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     if (process.env.BOID_RESIZE_SCREENSHOT) await page.screenshot({ path: process.env.BOID_RESIZE_SCREENSHOT });
     assert.deepEqual(mutations, [], 'resizing must not change agent execution');
     assert.deepEqual(errors, []);
-    console.log('PASS: single shared targets, both-side hit tests, two-axis snapping and breakaway, independent panes, neighbor constraints, min sizes, refresh/reconnect, cancel, keyboard, scroll anchors, viewport resize, add/remove, incomplete grid, terminal fit, startup and corrupt storage');
+    console.log('PASS: four-way hit priority/diagonal/minimum/cancel/keyboard/refresh/original-point snapping and breakaway, single shared targets, both-side hit tests, two-axis snapping and breakaway, independent panes, neighbor constraints, min sizes, refresh/reconnect, cancel, keyboard, scroll anchors, viewport resize, add/remove, incomplete grid, terminal fit, startup and corrupt storage');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exit(1); });
