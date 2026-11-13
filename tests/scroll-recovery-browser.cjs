@@ -67,20 +67,32 @@ const view=(id,entries)=>({id,name:id,cwd:'/tmp',status:'working',pending:[],ent
   const diffBefore=await page.evaluate(()=>inspectPane('b'));
   await page.mouse.wheel(0,-4);await page.waitForTimeout(150);
   const diffAfter=await page.evaluate(()=>inspectPane('b'));
+  // Collapse a tall result without moving the anchor or clamping scrollTop.
+  const collapseEntries=[diff[120],diff[121],...Array.from({length:200},(_,i)=>({id:`tail-${i}`,kind:'assistant',text:`Tail ${i}`}))];
+  await page.evaluate(v=>{removeSession(sessions.get('b'));addSession(v);},view('b',collapseEntries));
+  await page.waitForTimeout(150);
+  await page.evaluate(()=>{const ui=sessions.get('b');ui.follow=false;ui.trace.scrollTop=0;scheduleViewport(ui);});
+  await page.waitForTimeout(150);
+  await page.locator('[data-entry-id="diff-call"] summary').click();
+  await page.evaluate(()=>scheduleViewport(sessions.get('b')));await page.waitForTimeout(200);
+  const collapseBefore=await page.evaluate(()=>inspectPane('b'));
+  await page.locator('[data-entry-id="diff-call"] summary').click();await page.waitForTimeout(200);
+  const collapseAfter=await page.evaluate(()=>inspectPane('b'));
   // Refill must settle. No polling loop is added to an idle application.
   await page.waitForTimeout(350);const costs=await page.evaluate(()=>frameCosts.splice(0));
   await page.waitForTimeout(250);const idleFrames=await page.evaluate(()=>frameCosts.length);
   const sorted=costs.sort((a,b)=>a-b);
-  const result={cold,steps,beforeEscape,afterEscape,diffBefore,diffAfter,idleFrames,frameCallbacks:costs.length,frameP95ms:sorted[Math.floor(sorted.length*.95)],frameMaxMs:sorted.at(-1),errors};
+  const result={cold,steps,beforeEscape,afterEscape,diffBefore,diffAfter,collapseBefore,collapseAfter,idleFrames,frameCallbacks:costs.length,frameP95ms:sorted[Math.floor(sorted.length*.95)],frameMaxMs:sorted.at(-1),errors};
   console.log(JSON.stringify(result,null,2));
   if(process.env.BOID_SCREENSHOT)await page.screenshot({path:process.env.BOID_SCREENSHOT});
   if(process.env.BOID_EXPECT_FIXED!=='0'){
-   for(const state of [cold,...steps.map(s=>s.after),afterEscape,diffAfter]){
+   for(const state of [cold,...steps.map(s=>s.after),afterEscape,diffAfter,collapseAfter]){
     assert.ok(state.first,'viewport must contain real entries');assert.ok(state.beforeGap<2&&state.afterGap<2,`spacer inside viewport: ${JSON.stringify(state)}`);
    }
    for(const {delta,before,after} of steps)assert.ok(Math.abs(after.top-before.top-delta)<2,`wheel ${delta} moved ${after.top-before.top}`);
    assert.ok(Math.abs(afterEscape.top-beforeEscape.top)<2,'other pane moved on Escape');
    assert.equal(afterEscape.first,beforeEscape.first);
+   assert.equal(collapseAfter.top,collapseBefore.top,'collapse moved stable anchor');
    assert.ok(Math.abs(diffAfter.top-diffBefore.top+4)<2,'focused diff jumped on small upward wheel');
   }
   assert.ok(idleFrames<3,`viewport keeps scheduling while idle: ${idleFrames}`);

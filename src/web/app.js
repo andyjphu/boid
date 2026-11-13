@@ -1279,12 +1279,14 @@ function compactOutput(ui, item, content, text, label = "Output") {
     details.open = !details.open;
     item[openKey] = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected) return;
     if (Boolean(item[openKey]) === details.open) return;
     item[openKey] = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   return block;
 }
@@ -1395,12 +1397,14 @@ function renderToolEntry(ui, item) {
     showResult(details.open);
     for (const entry of [call, result].filter(Boolean)) if (ui.mounted.has(entry)) entry.height = measuredHeight(entry);
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
     for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
     showResult(details.open);
     restorePosition(ui);
+    scheduleViewport(ui);
   });
 }
 
@@ -1433,11 +1437,13 @@ function renderSkillEntry(ui, item) {
     rememberPosition(ui);
     item.expandedSkill = details.open = !details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected || Boolean(item.expandedSkill) === details.open) return;
     item.expandedSkill = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
 }
 
