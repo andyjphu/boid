@@ -40,6 +40,10 @@ whether each open agent is listening. Browser reloads do not change availability
 
 Agent panes retain the complete transcript and load recent history first.
 [Earlier history loads on demand](docs/history.md); rendering follows the viewport.
+Drag a pane's heading to reorder agents, terminals, and unfinished agent forms.
+The insertion line shows the destination. Order and resized positions survive
+refresh in that browser window; dragging a live pane heading onto a screen number
+moves it to that screen.
 
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 

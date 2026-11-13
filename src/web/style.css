@@ -93,6 +93,13 @@ body.resizing-panes, body.resizing-panes * { cursor: var(--resize-cursor) !impor
   border-right: 1px solid #3d3d3d;
 }
 .pane-icon, .pane-icon svg { display: block; width: 14px; height: 14px; flex-shrink: 0; color: #aaa; }
+.pane-tab[draggable="true"] { cursor: grab; }
+.pane-dragging .pane-tab { cursor: grabbing; opacity: .6; }
+.pane[data-pane-drop]::after { content: ""; position: absolute; z-index: 7; pointer-events: none; background: #8bafd0; }
+.pane[data-pane-drop="left"]::after { top: 0; bottom: 0; left: 0; width: 3px; }
+.pane[data-pane-drop="right"]::after { top: 0; bottom: 0; right: 0; width: 3px; }
+.pane[data-pane-drop="top"]::after { top: 0; left: 0; right: 0; height: 3px; }
+.pane[data-pane-drop="bottom"]::after { bottom: 0; left: 0; right: 0; height: 3px; }
 .pane-title { font-weight: 400; color: #eee; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-title:focus-visible { outline: 1px solid #777; outline-offset: 1px; }
 .pane-name-input { min-width: 4ch; max-width: 24ch; padding: 0 2px; border: 1px solid #555; background: #181818; color: inherit; }
