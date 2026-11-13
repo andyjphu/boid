@@ -33,6 +33,7 @@ let reconcilingCatalog = false;
 let launchCwd = "";
 let paneLayout = null;
 let paneResize = null;
+let paneDrag = null;
 const paneResizeLayer = element("div", "pane-resize-layer");
 workspace.append(paneResizeLayer);
 let paneResizeHandles = new Map();
@@ -164,6 +165,7 @@ function clearScreenPanes() {
 }
 function switchScreen(number) {
   if (number === activeScreen || number < 1 || number > screenCatalog.count) return Promise.resolve();
+  finishPaneDrag();
   finishPaneResize(true);
   rememberPaneOrder();
   catalogReady = false;
@@ -215,7 +217,14 @@ function rememberPaneOrder() {
   for (let i = 0; i < paneOrder.length; i++) {
     const pane = panes.get(paneOrder[i]);
     const current = workspace.querySelectorAll(".pane")[i];
-    if (pane !== current) workspace.insertBefore(pane, current || null);
+    if (pane !== current) {
+      // Moving a DOM subtree can reset descendant scroll offsets. Restore them
+      // before captureAgentState records the new arrangement.
+      const scroll = [...pane.querySelectorAll(".trace, .xterm-viewport")]
+        .map(node => ({ node, top: node.scrollTop, left: node.scrollLeft }));
+      workspace.insertBefore(pane, current || null);
+      for (const { node, top, left } of scroll) node.scrollTo({ top, left, behavior: "instant" });
+    }
   }
   for (const ui of sessions.values()) captureAgentState(ui);
   try {
@@ -226,6 +235,68 @@ function rememberPaneOrder() {
     }));
   } catch { /* Storage availability must not prevent session access. */ }
 }
+
+function clearPaneDropTarget() {
+  for (const pane of workspace.querySelectorAll("[data-pane-drop]")) delete pane.dataset.paneDrop;
+}
+function finishPaneDrag() {
+  clearPaneDropTarget();
+  paneDrag?.pane.classList.remove("pane-dragging");
+  paneDrag = null;
+}
+function paneDropTarget(event) {
+  if (!paneDrag || !paneDrag.pane.isConnected || paneDrag.screen !== activeScreen) return null;
+  const pane = event.target.closest(".pane");
+  if (!pane || pane === paneDrag.pane || pane.parentElement !== workspace) return null;
+  const box = pane.getBoundingClientRect();
+  // In a single column, use top/bottom insertion instead of left/right.
+  const vertical = paneLayout?.tiles.every(tile => tile.left === 0 && tile.right === 1);
+  const after = vertical ? event.clientY >= box.top + box.height / 2 : event.clientX >= box.left + box.width / 2;
+  return { pane, after, edge: vertical ? (after ? "bottom" : "top") : (after ? "right" : "left") };
+}
+function reorderPane(source, target, after) {
+  const before = [...workspace.querySelectorAll(".pane")].map(pane => pane.dataset.paneKey);
+  if (source === target || !before.includes(source) || !before.includes(target)) return;
+  const next = before.filter(key => key !== source);
+  next.splice(next.indexOf(target) + (after ? 1 : 0), 0, source);
+  if (next.every((key, index) => key === before[index])) return;
+  const focused = document.activeElement;
+  for (const ui of sessions.values()) rememberPosition(ui);
+  // Keep resized rectangles in place. Only their occupants change.
+  if (paneLayout?.custom) {
+    const slots = before.map(key => paneLayout.tiles.find(tile => tile.key === key));
+    if (slots.every(Boolean)) paneLayout.tiles = slots.map((tile, index) => ({ ...tile, key: next[index] }));
+  }
+  paneOrder = next;
+  layout();
+  if (focused?.isConnected && focused !== document.activeElement) focused.focus({ preventScroll: true });
+}
+workspace.addEventListener("dragover", event => {
+  const target = paneDropTarget(event);
+  clearPaneDropTarget();
+  if (!target) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  target.pane.dataset.paneDrop = target.edge;
+});
+workspace.addEventListener("dragleave", event => {
+  if (!workspace.contains(event.relatedTarget)) clearPaneDropTarget();
+});
+workspace.addEventListener("drop", event => {
+  const target = paneDropTarget(event);
+  if (!target) { finishPaneDrag(); return; }
+  event.preventDefault(); event.stopPropagation();
+  const source = paneDrag.pane.dataset.paneKey;
+  finishPaneDrag();
+  reorderPane(source, target.pane.dataset.paneKey, target.after);
+});
+document.addEventListener("dragend", finishPaneDrag);
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && paneDrag) {
+    event.preventDefault(); event.stopImmediatePropagation(); finishPaneDrag();
+  }
+}, true);
+window.addEventListener("blur", finishPaneDrag);
 
 function disableTextAssistance(input) {
   for (const [name, value] of Object.entries({
@@ -529,13 +600,23 @@ function makePane(name, cwd, kind, id) {
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
   tab.append(paneIcon(kind), title, directory, close);
-  if (kind !== "draft") {
-    tab.draggable = true;
-    tab.addEventListener("dragstart", event => {
-      event.dataTransfer.setData("application/x-boid-pane", `${kind}:${id}`);
-      event.dataTransfer.effectAllowed = "move";
-    });
-  }
+  tab.draggable = true;
+  let dragBlocked = false;
+  tab.addEventListener("pointerdown", event => {
+    dragBlocked = Boolean(event.target.closest("button, input, textarea, [contenteditable=true]"));
+  });
+  tab.addEventListener("dragstart", event => {
+    if (!catalogReady || dragBlocked || event.target.closest("button, input, textarea, [contenteditable=true]")
+      || tab.querySelector("input")) { event.preventDefault(); return; }
+    finishPaneResize(true);
+    finishPaneDrag();
+    paneDrag = { pane, screen: activeScreen };
+    pane.classList.add("pane-dragging");
+    const key = pane.dataset.paneKey;
+    event.dataTransfer.setData("application/x-boid-local-pane", key);
+    if (!key.startsWith("draft:")) event.dataTransfer.setData("application/x-boid-pane", key);
+    event.dataTransfer.effectAllowed = "move";
+  });
   header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
