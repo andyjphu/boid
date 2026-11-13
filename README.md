@@ -54,10 +54,14 @@ failure or reload; recovery storage does not block sending.
 
 Agent panes retain the complete transcript and load recent history first.
 [Earlier history loads on demand](docs/history.md); rendering follows the viewport.
-Drag a pane's heading to reorder agents, terminals, and unfinished agent forms.
-The insertion line shows the destination. Order and resized positions survive
-refresh in that browser window; dragging a live pane heading onto a screen number
-moves it to that screen.
+The main agent button creates an agent immediately. Each pane's trailing `+`
+adds an agent tab to that pane. Selecting a tab expands it in place; inactive
+tabs show only their names. Drag tabs to reorder or group agents and terminals,
+and scroll overflowing tab strips horizontally. Order, selected tabs and resized
+positions survive refresh in that browser window. Right-click either agent
+creation button to access active and inactive session history.
+Drag a pane's empty header area to move the whole pane, or drag an individual
+tab onto a screen number to move that session to another screen.
 
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 

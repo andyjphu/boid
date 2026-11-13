@@ -37,9 +37,13 @@ for remote access; the default listener is local.
 ## Sessions and live views
 
 The web workspace shows simultaneous agent traces, per-agent input,
-and real terminal panes. Each has a compact tab header beginning with an icon and ending
-with a close control. Tabs grow with their title and path, truncating at the
-available pane width.
+and real terminals. A pane can hold several session tabs. The selected tab
+shows its icon, name and close control; inactive tabs show only their names.
+No directory address is displayed. Tabs scroll horizontally on overflow without
+a visible scrollbar. Selection expands a tab in place; dragging changes order.
+The trailing `+` creates an agent in that pane immediately, as does the main
+agent button for a new pane. Right-click either button for active and inactive
+session history. Grouping, order and selected tabs survive browser refresh.
 Traces show selected instructions and tools, user and peer messages, text,
 tool calls and results, and control events. Provider-exposed reasoning summaries
 are hidden in every pane; events remain in the full session record.
@@ -249,8 +253,9 @@ shell. Names remain with the durable terminal record across server restarts.
 
 Login-shell PTYs and locally vendored xterm.js provide interactive programs, keyboard
 input, resize, and reconnect. Disconnecting leaves a shell running; its ×
-control ends it. Agent panes use the same control to end and archive the session. The + agent setup pane reopens
-an agent stopped; terminal records are retained separately.
+control ends it. Agent tabs use the same control to end and archive the session.
+The session-history chooser reopens an agent stopped; terminal records are
+retained separately.
 Replay retains a bounded 512 KiB history with resize events and marks omitted
 older output. Replaying bytes never sends terminal responses back to the shell.
 Views share the PTY dimensions; focusing or clicking a terminal transfers input
