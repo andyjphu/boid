@@ -12,6 +12,10 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
+mod persistence;
+use persistence::{Lane, Operation, Permit, Receipt};
+#[cfg(test)]
+mod persistence_tests;
 #[path = "questions.rs"]
 mod questions;
 pub use questions::{PromptArgs, Question};
@@ -235,9 +239,11 @@ struct Data {
     sessions: BTreeMap<String, Handle>,
     terminal_summaries: BTreeMap<String, Value>,
     messages: BTreeMap<(String, String), Communication>,
+    message_receipts: BTreeMap<(String, String), Receipt>,
 }
 struct Handle {
     record: Record,
+    persistence: Lane,
     cancel: watch::Sender<u64>,
     emergency: watch::Sender<u64>,
     halt: watch::Sender<()>,
@@ -330,6 +336,7 @@ impl Hub {
                     sessions: BTreeMap::new(),
                     terminal_summaries: BTreeMap::new(),
                     messages: messages.clone(),
+                    message_receipts: BTreeMap::new(),
                 }),
                 events,
                 client,
@@ -415,24 +422,20 @@ impl Hub {
             input_batch: None,
         }
     }
-    fn install(&self, record: Record, emit: bool) -> Result<()> {
-        crate::blocking::run(|| self.install_locked(&mut self.0.data.lock().unwrap(), record, emit))
-    }
     fn install_locked(&self, data: &mut Data, record: Record, emit: bool) -> Result<()> {
         let id = record.view.id.clone();
-        let (cancel, cancelled) = watch::channel(record.stop_through);
-        let (interrupt, interrupted) = watch::channel(());
-        let (emergency, emergencies) = watch::channel(0);
-        let (halt, halted) = watch::channel(());
+        let (cancel, _) = watch::channel(record.stop_through);
+        let (emergency, _) = watch::channel(0);
+        let (halt, _) = watch::channel(());
         let wake = Arc::new(Notify::new());
         if data.sessions.contains_key(&id) {
             bail!("Duplicate persisted session ID: {id}");
         }
         let archived = record.view.archived;
-        let pending_peers = !record.paused && !record.inbox.is_empty();
         data.sessions.insert(
             id.clone(),
             Handle {
+                persistence: Lane::new(Arc::downgrade(&self.0), id.clone())?,
                 record,
                 cancel,
                 emergency,
@@ -447,23 +450,37 @@ impl Hub {
             self.emit(data, json!({"type":"session","session":view}));
         }
         if !archived {
-            self.0
-                .interrupts
-                .lock()
-                .unwrap()
-                .insert(id.clone(), interrupt);
-            let hub = self.clone();
-            let worker_id = id.clone();
-            let task = tokio::spawn(async move {
-                hub.worker(worker_id, cancelled, interrupted, emergencies, halted, wake)
-                    .await;
-            });
-            data.sessions.get_mut(&id).unwrap().task = Some(task);
-            if pending_peers {
-                data.sessions[&id].wake.notify_one();
-            }
+            self.start_worker_locked(data, &id);
         }
         Ok(())
+    }
+    fn start_worker_locked(&self, data: &mut Data, id: &str) {
+        let handle = data.sessions.get_mut(id).unwrap();
+        let (cancel, cancelled) = watch::channel(handle.record.stop_through);
+        let (interrupt, interrupted) = watch::channel(());
+        let (emergency, emergencies) = watch::channel(0);
+        let (halt, halted) = watch::channel(());
+        let wake = Arc::new(Notify::new());
+        handle.cancel = cancel;
+        handle.emergency = emergency;
+        handle.halt = halt;
+        handle.wake = wake.clone();
+        self.0
+            .interrupts
+            .lock()
+            .unwrap()
+            .insert(id.into(), interrupt);
+        let pending = !handle.record.paused
+            && (!handle.record.inbox.is_empty() || !handle.record.inputs.is_empty());
+        let hub = self.clone();
+        let worker_id = id.to_owned();
+        handle.task = Some(tokio::spawn(async move {
+            hub.worker(worker_id, cancelled, interrupted, emergencies, halted, wake)
+                .await;
+        }));
+        if pending {
+            handle.wake.notify_one();
+        }
     }
     pub fn config(&self) -> Value {
         crate::blocking::run(|| {
@@ -772,7 +789,7 @@ impl Hub {
             self.emit(&mut data, json!({"type":"terminal","terminal":summary}));
         })
     }
-    fn save_record(&self, id: &str, record: &mut Record) -> Result<()> {
+    fn prepare_record(&self, record: &mut Record) -> Result<()> {
         // Older binaries must reject records that rely on external skill snapshots.
         if record.engine.skill_base.is_some() || !record.engine.skills.is_empty() {
             record.version = record.version.max(2);
@@ -780,6 +797,10 @@ impl Hub {
         if record.engine.skill_snapshot.is_none() && !record.engine.skills.is_empty() {
             record.engine.skill_snapshot = self.0.store.save_skills(&record.engine.skills)?;
         }
+        Ok(())
+    }
+    fn save_record(&self, id: &str, record: &mut Record) -> Result<()> {
+        self.prepare_record(record)?;
         if !record.messages.is_empty() && record.version < 3 {
             self.0.store.backup(id)?;
             record.version = 3;
@@ -788,21 +809,77 @@ impl Hub {
             self.0.store.backup_before_questions(id)?;
             record.version = 4;
         }
+        for message in &mut record.messages {
+            message.persisted = true;
+        }
         self.0.store.save(id, record)
     }
 
+    fn mark_durable(&self, id: &str, saved: &Record) {
+        let mut data = self.0.data.lock().unwrap();
+        let Some(handle) = data.sessions.get_mut(id) else {
+            return;
+        };
+        // A completed save must not overwrite a newer accepted transition.
+        if handle.storage_error.is_some() {
+            return;
+        }
+        handle.record.version = handle.record.version.max(saved.version);
+        if handle.record.engine.skills == saved.engine.skills {
+            handle.record.engine.skill_snapshot = saved.engine.skill_snapshot.clone();
+        }
+        let mut confirmed = vec![];
+        for message in &mut handle.record.messages {
+            if message.persisted {
+                continue;
+            }
+            let mut candidate = message.clone();
+            candidate.persisted = true;
+            if saved.messages.contains(&candidate) {
+                message.persisted = true;
+                confirmed.push(message.clone());
+            }
+        }
+        for mut message in confirmed {
+            message.blocked = message.state == "queued" && data.sessions[id].record.paused;
+            data.messages.insert(
+                (message.sender_id.clone(), message.call_id.clone()),
+                message.clone(),
+            );
+            self.emit(
+                &mut data,
+                json!({"type":"communication", "message":message}),
+            );
+        }
+    }
+    fn reserve_persistence(&self, id: &str, slots: usize) -> Result<Permit> {
+        let capacity = {
+            let data = self.0.data.lock().unwrap();
+            data.sessions
+                .get(id)
+                .context("Unknown session.")?
+                .persistence
+                .capacity()
+        };
+        capacity.reserve(slots)
+    }
     fn update<T>(&self, id: &str, change: impl FnOnce(&mut Record) -> Result<T>) -> Result<T> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
-            self.update_locked(&mut data, id, change)
+            let (result, receipt) = self.update_locked(&mut data, id, Some(&mut permit), change)?;
+            drop(data);
+            receipt.wait()?;
+            Ok(result)
         })
     }
     fn update_locked<T>(
         &self,
         data: &mut Data,
         id: &str,
+        permit: Option<&mut Permit>,
         change: impl FnOnce(&mut Record) -> Result<T>,
-    ) -> Result<T> {
+    ) -> Result<(T, Receipt)> {
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
         if let Some(error) = &handle.storage_error {
             bail!("Session storage failed: {error}");
@@ -834,24 +911,18 @@ impl Hub {
         } else {
             None
         };
-        if let Err(error) = self.save_record(id, &mut next) {
-            let message = format!("Session persistence failed; execution stopped: {error:#}");
-            handle.storage_error = Some(message.clone());
-            handle.record.paused = true;
-            handle.record.listen_on_restart = Some(false);
-            handle.record.view.status = "error".into();
-            handle.record.view.working_since_ms = None;
-            handle.halt.send_replace(());
-            self.0.interrupts.lock().unwrap().remove(id);
-            let entry = Self::make_entry("error", message);
-            handle.record.view.entries.push(entry.clone());
-            self.emit(data, json!({"type":"entry","session_id":id,"entry":entry}));
-            self.emit(
-                data,
-                json!({"type":"status","session_id":id,"status":"error","working_since_ms":null}),
-            );
-            return Err(error.context("Cannot save session; acceptance unconfirmed"));
+        for message in &mut next.messages {
+            if !handle.record.messages.contains(message) {
+                message.persisted = false;
+            }
         }
+        // Admission and event publication describe the actual in-memory state.
+        // Disk I/O is ordered by the lane and never holds the roster lock.
+        let operation = Operation::Snapshot(Box::new(next.clone()));
+        let receipt = match permit {
+            Some(permit) => handle.persistence.enqueue_reserved(operation, permit)?,
+            None => handle.persistence.enqueue(operation)?,
+        };
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         if current.view.archived {
@@ -940,7 +1011,7 @@ impl Hub {
         for event in events {
             self.emit(data, event);
         }
-        Ok(result)
+        Ok((result, receipt))
     }
     pub fn persistence_fault(&self, id: &str, error: anyhow::Error) {
         self.fault(id, error);
@@ -960,6 +1031,7 @@ impl Hub {
                 handle.record.view.status = "error".into();
                 handle.record.view.working_since_ms = None;
                 handle.halt.send_replace(());
+                self.0.interrupts.lock().unwrap().remove(id);
                 let entry = Self::make_entry("error", message);
                 handle.record.view.entries.push(entry.clone());
                 self.emit(
@@ -997,6 +1069,7 @@ impl Hub {
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
             let result = (|| -> Result<()> {
+                let mut permit = self.reserve_persistence(session, 1)?;
                 let mut data = self.0.data.lock().unwrap();
                 let handle = data.sessions.get_mut(session).context("Unknown session")?;
                 if handle.storage_error.is_some() {
@@ -1007,8 +1080,11 @@ impl Hub {
                     entry: entry.into(),
                     text: text.into(),
                 };
-                self.0.store.append(session, &delta)?;
-                handle.record.stream_seq = delta.seq;
+                let seq = delta.seq;
+                let receipt = handle
+                    .persistence
+                    .enqueue_reserved(Operation::Delta(delta), &mut permit)?;
+                handle.record.stream_seq = seq;
                 if let Some(item) = handle
                     .record
                     .view
@@ -1026,7 +1102,8 @@ impl Hub {
                     &mut data,
                     json!({"type":"delta","session_id":session,"entry_id":entry,"text":text}),
                 );
-                Ok(())
+                drop(data);
+                receipt.wait()
             })();
             if let Err(error) = result {
                 self.fault(session, error);
@@ -1041,9 +1118,15 @@ impl Hub {
     }
     pub fn archive_context(&self, id: &str, attempt: u64) -> Result<()> {
         crate::blocking::run(|| {
-            let data = self.0.data.lock().unwrap();
-            let record = &data.sessions.get(id).context("Unknown session.")?.record;
-            self.0.store.archive_context(id, attempt, record)
+            let mut permit = self.reserve_persistence(id, 1)?;
+            let mut data = self.0.data.lock().unwrap();
+            let handle = data.sessions.get_mut(id).context("Unknown session.")?;
+            let receipt = handle.persistence.enqueue_reserved(
+                Operation::Context(attempt, Box::new(handle.record.clone())),
+                &mut permit,
+            )?;
+            drop(data);
+            receipt.wait()
         })
     }
     pub fn checkpoint_entries(
@@ -1185,8 +1268,16 @@ impl Hub {
                     .text
                     .push_str(&format!("\n\n{identity}"));
                 self.assign_screen_locked(&mut data, &format!("agent:{id}"), screen)?;
-                self.save_record(&id, &mut record)?;
+                let snapshot = record.clone();
                 self.install_locked(&mut data, record, true)?;
+                let receipt = data
+                    .sessions
+                    .get_mut(&id)
+                    .unwrap()
+                    .persistence
+                    .enqueue(Operation::Snapshot(Box::new(snapshot)))?;
+                drop(data);
+                receipt.wait()?;
             }
             if !input.message.trim().is_empty() {
                 self.message(&id, input.message)?;
@@ -1294,7 +1385,8 @@ impl Hub {
             if text.trim() == "/login" {
                 bail!("Open /login in the Boid web composer to select API or subscription access.");
             }
-            if self.0.data.lock().unwrap().closing {
+            let mut data = self.0.data.lock().unwrap();
+            if data.closing {
                 bail!("Server is shutting down.");
             }
             let message_id = Uuid::new_v4().to_string();
@@ -1305,7 +1397,12 @@ impl Hub {
                 replaces: None,
                 input_batch: None,
             };
-            self.update(id, |r| {
+            data.sessions
+                .get_mut(id)
+                .context("Unknown session.")?
+                .persistence
+                .check_input_capacity()?;
+            let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
                 if r.view.archived {
                     bail!("Session has ended. Reopen its history first.");
                 }
@@ -1326,7 +1423,9 @@ impl Hub {
                 r.listen_on_restart = Some(true);
                 Ok(())
             })?;
-            self.0.data.lock().unwrap().sessions[id].wake.notify_one();
+            let handle = data.sessions.get_mut(id).unwrap();
+            handle.persistence.track_input(receipt);
+            handle.wake.notify_one();
             Ok(message_id)
         })
     }
@@ -1360,6 +1459,7 @@ impl Hub {
     }
     // The result indicates whether the final archived state was saved.
     pub async fn close(&self, id: &str) -> Result<bool> {
+        let mut closing_transition = false;
         let started = self.update(id, |r| {
             if r.view.archived {
                 bail!("Session has already ended.");
@@ -1383,6 +1483,7 @@ impl Hub {
                 "notice",
                 format!("Session ended. Cancelled {users} queued user messages and {peers} queued peer messages; received messages remain in the record."),
             ));
+            closing_transition = true;
             Ok(())
         });
         if let Err(error) = started {
@@ -1396,13 +1497,17 @@ impl Hub {
                     .unwrap()
                     .sessions
                     .get(id)
-                    .is_some_and(|h| !h.record.view.archived)
+                    .is_some_and(|h| !h.record.view.archived || closing_transition)
             });
             if !can_end {
                 return Err(error);
             }
             self.fault(id, error);
-            return self.close_without_storage(id, false).await;
+            let finishing = self.0.data.lock().unwrap().sessions[id]
+                .record
+                .view
+                .archived;
+            return self.close_without_storage(id, finishing).await;
         }
         let task = crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
@@ -1444,7 +1549,7 @@ impl Hub {
             h.record.inputs.clear();
             h.record.inbox.clear();
             for message in &mut h.record.messages {
-                if message.state == "queued" {
+                if message.state == "queued" || (finishing && message.state == "cancelled") {
                     message.state = "cancelled".into();
                     message.blocked = false;
                     message.persisted = false;
@@ -1506,29 +1611,31 @@ impl Hub {
     }
 
     pub fn reopen(&self, id: &str) -> Result<View> {
-        crate::blocking::run(|| {
-            let mut data = self.0.data.lock().unwrap();
-            let h = data.sessions.get(id).context("Unknown session.")?;
-            if let Some(error) = &h.storage_error {
-                bail!("Cannot reopen a session with an unresolved storage failure: {error}");
-            }
-            if !h.record.view.archived {
+        self.update(id, |record| {
+            if !record.view.archived {
                 bail!("Session is already open.");
             }
-            if h.record.view.status != "archived" {
+            if record.view.status != "archived" {
                 bail!("Session is still ending; try again after execution stops.");
             }
-            let mut record = h.record.clone();
             record.view.archived = false;
             record.view.status = "stopped".into();
             record.view.working_since_ms = None;
             record.paused = true;
             record.listen_on_restart = Some(false);
-            self.save_record(id, &mut record)?;
-            data.sessions.remove(id);
-            drop(data);
-            self.install(record, true)?;
-            Ok(self.view(id).unwrap())
+            Ok(())
+        })?;
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            if let Some(error) = &data.sessions[id].storage_error {
+                bail!("Session storage failed: {error}");
+            }
+            if !data.sessions[id].record.view.archived && !data.closing {
+                self.start_worker_locked(&mut data, id);
+            }
+            let view = Self::project_view(&data, &data.sessions[id].record.view);
+            self.emit(&mut data, json!({"type":"session","session":view}));
+            Ok(view)
         })
     }
     pub fn stop_account(&self, account: &str) -> Result<()> {
@@ -1588,17 +1695,35 @@ impl Hub {
             if text.trim().is_empty() || text.len() > 65536 {
                 bail!("Peer messages must contain 1 to 65536 bytes.");
             }
-            let mut data = self.0.data.lock().unwrap();
-            if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
-                if message.recipient_id != to || message.text != text || message.urgency != urgency
-                {
-                    bail!("A send operation cannot change its recipient, text or urgency.");
+            let mut permit = None;
+            let mut data = loop {
+                let data = self.0.data.lock().unwrap();
+                if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
+                    if message.recipient_id != to
+                        || message.text != text
+                        || message.urgency != urgency
+                    {
+                        bail!("A send operation cannot change its recipient, text or urgency.");
+                    }
+                    let mut message = message.clone();
+                    message.blocked = message.state == "queued"
+                        && data.sessions.get(to).is_some_and(|h| h.record.paused);
+                    let receipt = data
+                        .message_receipts
+                        .get(&(from.into(), call_id.into()))
+                        .cloned();
+                    drop(data);
+                    if let Some(receipt) = receipt {
+                        receipt.wait()?;
+                    }
+                    return Ok(message.receipt());
                 }
-                let mut message = message.clone();
-                message.blocked = message.state == "queued"
-                    && data.sessions.get(to).is_some_and(|h| h.record.paused);
-                return Ok(message.receipt());
-            }
+                if permit.is_some() {
+                    break data;
+                }
+                drop(data);
+                permit = Some(self.reserve_persistence(to, 1)?);
+            };
             if data.closing {
                 bail!("Server is shutting down.");
             }
@@ -1634,7 +1759,7 @@ impl Hub {
                 blocked: false,
                 persisted: true,
             };
-            self.update_locked(&mut data, to, |r| {
+            let (_, receipt) = self.update_locked(&mut data, to, permit.as_mut(), |r| {
                 if r.view.archived {
                     bail!("Recipient session has ended.");
                 }
@@ -1660,6 +1785,11 @@ impl Hub {
                 r.messages.push(message.clone());
                 Ok(())
             })?;
+            data.message_receipts
+                .insert((from.into(), call_id.into()), receipt.clone());
+            drop(data);
+            receipt.wait()?;
+            let data = self.0.data.lock().unwrap();
             let recipient = &data.sessions[to];
             if urgency == Urgency::Emergency && !recipient.record.paused {
                 recipient
@@ -1690,6 +1820,7 @@ impl Hub {
     }
     pub fn claim_tool(&self, id: &str, session: &Session) -> Result<bool> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let r = &data.sessions[id].record;
             if r.paused
@@ -1700,15 +1831,26 @@ impl Hub {
             {
                 return Ok(false);
             }
-            self.update_locked(&mut data, id, |r| {
+            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 r.engine = session.clone();
                 Ok(())
             })?;
-            Ok(true)
+            drop(data);
+            receipt.wait()?;
+            // Stop or emergency may have arrived while the checkpoint saved.
+            let data = self.0.data.lock().unwrap();
+            let record = &data.sessions[id].record;
+            Ok(!record.paused
+                && !record.view.archived
+                && !record
+                    .messages
+                    .iter()
+                    .any(|m| m.state == "queued" && m.urgency == Urgency::Emergency))
         })
     }
     pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<bool> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get(id).context("Unknown session.")?;
             if let Some(error) = &handle.storage_error {
@@ -1718,7 +1860,7 @@ impl Hub {
                 return Ok(false);
             }
             let mut staged = session.clone();
-            self.update_locked(&mut data, id, |r| {
+            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 let urgent = r
                     .messages
                     .iter()
@@ -1755,6 +1897,8 @@ impl Hub {
                 r.engine = staged.clone();
                 Ok(())
             })?;
+            drop(data);
+            receipt.wait()?;
             *session = staged;
             Ok(true)
         })
@@ -1767,7 +1911,22 @@ impl Hub {
         .unwrap()
     }
     fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
-        let event = self.update(id, |r| {
+        crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 2)?;
+            let mut data = self.0.data.lock().unwrap();
+            let handle = data.sessions.get_mut(id).context("Unknown session.")?;
+            if let Some(input) = handle.record.inputs.front().filter(|i| {
+                i.clear && !handle.record.paused && i.order > handle.record.stop_through
+            }) {
+                let receipt = handle.persistence.enqueue_reserved(
+                    Operation::Clear(input.id.clone(), Box::new(handle.record.clone())),
+                    &mut permit,
+                )?;
+                drop(data);
+                receipt.wait()?;
+                data = self.0.data.lock().unwrap();
+            }
+            let (event, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
             let Some(input) = r.inputs.front() else {
                 return Ok(None);
             };
@@ -1778,7 +1937,6 @@ impl Hub {
             let cancelled = input.order <= r.stop_through;
             if !cancelled {
                 let selected = if input.clear {
-                    self.0.store.archive_clear(id, &input.id, r)?;
                     session.clear_context();
                     r.view.entries.push(Self::make_entry(
                         "notice", "Context cleared. The transcript is retained; new messages start a fresh conversation.".into(),
@@ -1803,7 +1961,10 @@ impl Hub {
             r.view.pending.retain(|p| p != &input.id);
             Ok((!cancelled).then_some(!input.clear))
         })?;
-        Ok(event)
+            drop(data);
+            receipt.wait()?;
+            Ok(event)
+        })
     }
     async fn worker(
         &self,
@@ -2875,6 +3036,8 @@ mod tests {
         for _ in 0..32 {
             hub.message(&target.id, "This older request must not execute.".into())
                 .unwrap();
+            // Fill the execution queue, independently of the three-unsaved-input limit.
+            hub.update(&target.id, |_| Ok(())).unwrap();
         }
         hub.stop(&target.id).unwrap();
         hub.interrupt(&target.id).unwrap();
@@ -2964,6 +3127,9 @@ mod tests {
         .unwrap();
         assert!(hub.view(&view.id).unwrap().working_since_ms.is_some());
         let queued = hub.message(&view.id, "Queued before crash".into()).unwrap();
+        // This fixture asserts retention of this specific input. New messages
+        // normally acknowledge before disk; fence this one before simulating a crash.
+        hub.update(&view.id, |_| Ok(())).unwrap();
         // Abort without graceful shutdown or interruption accounting: the
         // persisted intent must reconcile an already-started side effect.
         let task = hub

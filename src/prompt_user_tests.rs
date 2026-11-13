@@ -420,7 +420,23 @@ async fn crash_between_question_commit_and_tool_result_recovers_receipt_without_
         .unwrap();
     let q = question(&hub, &a.id).await;
     let path = state.path().join("sessions").join(format!("{}.json", a.id));
-    let crash_record = std::fs::read(&path).unwrap();
+    // Published state can precede its background save. This fixture models a
+    // crash after the question's durable commit, before its tool result.
+    let crash_record = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let bytes = std::fs::read(&path).unwrap();
+            let saved: Value = serde_json::from_slice(&bytes).unwrap();
+            if saved["view"]["questions"]
+                .as_array()
+                .is_some_and(|questions| questions.iter().any(|question| question["id"] == q.id))
+            {
+                break bytes;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     let record: Value = serde_json::from_slice(&crash_record).unwrap();
     assert_eq!(record["engine"]["running"]["id"], "crash");
     assert_eq!(record["version"], 4);
