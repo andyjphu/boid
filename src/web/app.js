@@ -3296,6 +3296,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
 });
 
 
+// Sunset: usage diagnostics are hidden and unmaintained. See docs/diagnostics.md.
 const diagnosticsButton = document.querySelector("#open-diagnostics");
 const diagnosticsDialog = document.querySelector("#diagnostics-dialog");
 const diagnosticsScope = document.querySelector("#diagnostics-scope");

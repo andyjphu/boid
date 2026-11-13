@@ -1,3 +1,5 @@
+//! Sunset: usage/cache/cost diagnostics are retained without maintenance.
+//! See docs/diagnostics.md before revisiting this component.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{

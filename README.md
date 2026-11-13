@@ -8,6 +8,10 @@ improve with experience and make effective use of agents working together.
 [Performance profiling and the speed mandate](docs/performance.md) guide work
 on harness overhead.
 
+[Usage diagnostics](docs/diagnostics.md) are sunset and hidden. Their accounting
+is not currently reliable; the existing components remain for a later revisit,
+with maintenance stopped.
+
 Boid's code and intended agent guidance belong in [src/](src/).
 [bootstrap/](bootstrap/) holds temporary context for agents developing Boid.
 
