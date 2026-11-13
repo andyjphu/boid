@@ -61,7 +61,9 @@ mod tests {
             .filter(|row| row["id"] == one || row["id"] == two)
             .map(|row| row["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["openai-api-key-1", "openai-api-key-2"]);
+        // These are public display labels, not credential values.
+        let expected_names: Vec<_> = (1..=2).map(|n| format!("openai-api-key-{n}")).collect();
+        assert_eq!(names, expected_names);
         let public = auth.credentials().unwrap();
         assert_eq!(public["credentials"][0]["name"], "alpha");
         for secret in [
