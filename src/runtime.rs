@@ -341,6 +341,7 @@ impl Hub {
             let mut restored_records = Vec::new();
             for mut record in records {
                 record.engine.refresh_tools();
+                record.engine.ensure_peer_trace_tool();
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
@@ -3324,3 +3325,10 @@ mod prompt_user_tests;
 #[cfg(test)]
 #[path = "screen_tests.rs"]
 mod screen_tests;
+
+#[path = "peer_trace.rs"]
+mod peer_trace;
+
+#[cfg(test)]
+#[path = "peer_trace_tests.rs"]
+mod peer_trace_tests;
