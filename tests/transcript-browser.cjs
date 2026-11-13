@@ -222,7 +222,7 @@ views.forEach(view => view.communications = [message]);
       await page.waitForFunction(() => !sessions.get('sender').interrupting);
     }
     assert.equal(interrupts, 1);
-    assert.match(await page.locator('[data-pane-key="agent:sender"] .working-status').textContent(), /Interrupt requested/);
+    assert.match(await page.locator('[data-pane-key="agent:sender"] .working-status').textContent(), /Interrupting/);
     await page.evaluate(() => {
       const ui = sessions.get('sender');
       setStatus(ui, 'stopped');
