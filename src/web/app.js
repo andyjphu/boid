@@ -1080,6 +1080,7 @@ function compactOutput(ui, item, content, text, label = "Output") {
 function toolCommand(tool) {
   const value = tool.value;
   if (!value || typeof value !== "object") return tool.payload;
+  if (tool.name === "read_skill" && typeof value.name === "string") return value.name;
   if (typeof value.command === "string") return value.command;
   if (typeof value.path === "string") {
     if (typeof value.content === "string") return `${value.path}\n${value.content}`;
@@ -1122,7 +1123,7 @@ function renderToolEntry(ui, item) {
   const tool = toolEntry(item.text);
   const counterpartKind = item.kind === "tool_call" ? "tool_result" : "tool_call";
   const related = tool.callId && ui.toolPairs.get(tool.heading)?.[counterpartKind];
-  const counterpart = related && !related.partial ? related : null;
+  const counterpart = related || null;
   const call = item.kind === "tool_call" ? item : counterpart;
   const result = item.kind === "tool_result" ? item : counterpart;
   const owner = call && ui.mounted.has(call) ? call : result;
@@ -1130,13 +1131,11 @@ function renderToolEntry(ui, item) {
   if (!owner) return;
   const command = toolEntry((call || owner).text);
   const outcome = toolOutcome(result ? toolEntry(result.text) : null);
-  const text = call ? toolCommand(command) : "";
+  const text = call && !call.partial ? toolCommand(command) : "";
   const newline = text.indexOf("\n");
   const firstLine = newline < 0 ? text : text.slice(0, newline);
   const rest = newline < 0 ? "" : text.slice(newline + 1);
-  const output = result ? toolOutput(toolEntry(result.text)) : null;
-  const outputText = output ? [...output.children].map(child => child.textContent).join("\n") : "";
-  const expandable = Boolean(call || rest || firstLine.length > 120 || outputText.length > 240 || outputText.trimEnd().split("\n").length > 3);
+  const output = result ? (result.partial ? fullEntryButton(ui, result, "Load full result") : toolOutput(toolEntry(result.text))) : null;
   let previous = result?.node.previousElementSibling;
   while (previous?.hidden) previous = previous.previousElementSibling;
   const joined = Boolean(call && result && previous === call.node);
@@ -1151,54 +1150,46 @@ function renderToolEntry(ui, item) {
     return;
   }
   owner.body.replaceChildren();
-  if (result && result !== owner && !result.partial) result.body.replaceChildren();
-  const header = element(expandable ? "summary" : "div", "tool-header");
+  if (result && result !== owner) result.body.replaceChildren();
+  const header = element("summary", "tool-header");
   header.append(element("span", "tool-name", command.name === "exec_command" ? "$" : command.name));
   if (firstLine) header.append(element("span", "tool-command", firstLine));
   header.append(element("span", "tool-status", outcome.label));
-  let details;
-  if (expandable) {
-    details = element("details", "activity-details tool-operation");
-    details.open = expandedTool;
-    header.title = "Expand or collapse tool call and result";
-    details.append(header);
-    if (rest) details.append(element("pre", "tool-text activity-full", rest));
-    owner.body.append(details);
-  } else {
-    owner.body.append(header);
-  }
-  let preview;
-  if (result && outputText) {
+  const details = element("details", "activity-details tool-operation");
+  details.open = expandedTool;
+  header.title = "Expand or collapse tool call and result";
+  details.append(header);
+  if (call?.partial) details.append(fullEntryButton(ui, call, "Load full arguments"));
+  else if (rest) details.append(element("pre", "tool-text activity-full", rest));
+  owner.body.append(details);
+  if (result && output) {
     // Intervening peer or assistant text keeps its place between call and result.
-    if (call && !joined) result.body.append(element("div", "tool-note", `${command.name} result`));
-    result.body.append(output);
-    if (expandable) {
-      preview = element("pre", "activity-preview", outputText.split("\n").slice(0, 3).join("\n"));
-      result.body.append(preview);
-    }
+    if (call && !joined && result !== owner) result.body.append(element("div", "tool-note", `${command.name} result`));
+    result.body.id = `tool-result-${result.id}`;
+    header.setAttribute("aria-controls", result.body.id);
+    (result === owner ? details : result.body).append(output);
   }
   function showResult(open) {
-    if (!preview) return;
-    output.hidden = !open;
-    preview.hidden = open;
+    if (!result) return;
+    result.node.hidden = result !== owner && !open;
+    if (output) output.hidden = !open;
   }
   showResult(expandedTool);
-  if (details) {
-    header.addEventListener("click", event => {
-      event.preventDefault();
-      rememberPosition(ui);
-      details.open = !details.open;
-      for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
-      showResult(owner.expandedTool);
-      restorePosition(ui);
-    });
-    details.addEventListener("toggle", () => {
-      if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
-      for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
-      showResult(details.open);
-      restorePosition(ui);
-    });
-  }
+  header.addEventListener("click", event => {
+    event.preventDefault();
+    rememberPosition(ui);
+    details.open = !details.open;
+    for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
+    showResult(details.open);
+    for (const entry of [call, result].filter(Boolean)) if (ui.mounted.has(entry)) entry.height = measuredHeight(entry);
+    restorePosition(ui);
+  });
+  details.addEventListener("toggle", () => {
+    if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
+    for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
+    showResult(details.open);
+    restorePosition(ui);
+  });
 }
 
 function renderSkillEntry(ui, item) {
@@ -1321,7 +1312,7 @@ function mountTranscript(ui) {
   let visible = history;
   let before = 0, after = 0;
   if (ui.history && history.length) {
-    const heights = history.map(item => item.node.isConnected ? measuredHeight(item) : (item.height || 60));
+    const heights = history.map(item => item.node.isConnected ? measuredHeight(item) : (item.height ?? 60));
     let start = 0, end = history.length;
     if (ui.follow) start = Math.max(0, end - 35);
     else {
@@ -1356,6 +1347,11 @@ function mountTranscript(ui) {
     visible = history.slice(start, end);
   }
   const wanted = new Set(visible);
+  for (const item of new Set([...ui.mounted, ...wanted])) {
+    if (ui.mounted.has(item) === wanted.has(item) || !["tool_call", "tool_result"].includes(item.kind)) continue;
+    const pair = ui.toolPairs.get(toolEntry(item.text).heading);
+    for (const entry of Object.values(pair || {})) if (wanted.has(entry)) ui.dirty.add(entry);
+  }
   for (const item of ui.mounted) {
     if (wanted.has(item)) continue;
     item.height = measuredHeight(item);
@@ -1494,28 +1490,32 @@ function scheduleTranscript(ui) {
   });
 }
 
+function fullEntryButton(ui, item, label = "Load full message") {
+  const load = element("button", "history-more", label); load.type = "button";
+  load.onclick = async () => {
+    const generation = ui.historyGeneration;
+    load.disabled = true;
+    try {
+      const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}/history?entry=${encodeURIComponent(item.id)}`);
+      if (sessions.get(ui.id) !== ui || generation !== ui.historyGeneration || ui.entries.get(item.id) !== item) return;
+      const entry = view.entries[0];
+      for (const message of view.communications || []) rememberCommunication(message);
+      // A streaming update that raced this read requires another fresh read.
+      if ((item.eventSeq || 0) > view.history.seq) { load.disabled = false; return; }
+      putEntry(ui, { ...entry, history_index: item.index });
+      item.eventSeq = view.history.seq;
+    } catch (error) { showError(ui.error, error); load.disabled = false; }
+  };
+  return load;
+}
+
 function renderEntry(ui, item) {
   if (!ui.mounted.has(item)) { item.rendered = false; return; }
   const { node, body, kind, text } = item;
   node.dataset.pending = ui.pending.has(item.id) ? "Queued" : "";
   if (kind === "reasoning") return;
-  if (item.partial) {
-    const load = element("button", "history-more", "Load full message"); load.type = "button";
-    body.replaceChildren(element("pre", "tool-text", text), load);
-    load.onclick = async () => {
-      const generation = ui.historyGeneration;
-      load.disabled = true;
-      try {
-        const view = await request(`/api/sessions/${encodeURIComponent(ui.id)}/history?entry=${encodeURIComponent(item.id)}`);
-        if (sessions.get(ui.id) !== ui || generation !== ui.historyGeneration || ui.entries.get(item.id) !== item) return;
-        const entry = view.entries[0];
-        for (const message of view.communications || []) rememberCommunication(message);
-        // A streaming update that raced this read requires another fresh read.
-        if ((item.eventSeq || 0) > view.history.seq) { load.disabled = false; return; }
-        putEntry(ui, { ...entry, history_index: item.index });
-        item.eventSeq = view.history.seq;
-      } catch (error) { showError(ui.error, error); load.disabled = false; }
-    };
+  if (item.partial && kind !== "tool_call" && kind !== "tool_result") {
+    body.replaceChildren(element("pre", "tool-text", text), fullEntryButton(ui, item));
     return;
   }
   const communication = communicationFor(ui, item);
