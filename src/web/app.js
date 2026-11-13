@@ -9,14 +9,108 @@ const sessions = new Map();
 const questionSubmissions = new Map();
 const messageSubmissions = new Map();
 const newDraftRevision = () => Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
+function storedImages(images = []) {
+  return images.map(({ local_id, id, mime_type, size_bytes, width, height }) => ({ local_id, id, mime_type, size_bytes, width, height }));
+}
+function restoreImages(images) {
+  return (Array.isArray(images) ? images : []).slice(0, 8).map(image => ({ ...image,
+    local_id: image.local_id || newDraftRevision(),
+    error: image.id ? null : 'Image upload was interrupted by reload. Paste the image again or remove it.',
+  }));
+}
+let imagePreview = null, imagePreviewUrl = null, imagePreviewGeneration = 0;
+async function previewMessageImage(ui, image) {
+  if (!imagePreview) {
+    imagePreview = element('dialog', 'image-preview'); imagePreview.setAttribute('aria-label', 'Image preview');
+    document.body.append(imagePreview);
+    imagePreview.addEventListener('close', () => { imagePreviewGeneration++; if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); imagePreviewUrl = null; imagePreview.replaceChildren(); });
+  }
+  if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl); imagePreviewUrl = null;
+  const generation = ++imagePreviewGeneration;
+  const close = element('button', '', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close image preview'); close.onclick = () => imagePreview.close();
+  imagePreview.replaceChildren(close, element('span', '', 'Loading…'));
+  if (!imagePreview.open) imagePreview.showModal();
+  try {
+    // Same authenticated fetch path as other API reads; never expose the token in a URL.
+    const response = await fetch(`/api/sessions/${encodeURIComponent(ui.id)}/images/${encodeURIComponent(image.id)}`, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(`Image preview failed (${response.status}).`);
+    const blob = await response.blob();
+    if (generation !== imagePreviewGeneration || !imagePreview.open) return;
+    imagePreviewUrl = URL.createObjectURL(blob);
+    const picture = element('img'); picture.alt = image.label || 'Attached image'; picture.src = imagePreviewUrl;
+    imagePreview.replaceChildren(close, picture);
+  } catch (error) { if (generation === imagePreviewGeneration && imagePreview.open) imagePreview.replaceChildren(close, element('p', 'error-banner', error.message)); }
+}
+function refreshComposerImages(id) {
+  const ui = sessions.get(id);
+  if (!ui?.imageChips) return;
+  const images = ui.messageState.images;
+  if (!images.length && !ui.imageChips.childElementCount) return;
+  ui.imageChips.replaceChildren();
+  ui.composer.classList.toggle('has-images', images.length > 0);
+  ui.imageChips.hidden = !images.length;
+  images.forEach((image, index) => {
+    const chip = element('span', 'image-chip');
+    chip.append(element('span', '', `[Image #${index + 1}]`));
+    if (image.promise) { chip.setAttribute('aria-busy', 'true'); chip.title = 'Uploading image'; }
+    if (image.error) {
+      chip.classList.add('image-failed'); chip.title = image.error;
+      if (image.file) {
+        const retry = element('button', '', '↻'); retry.type = 'button'; retry.setAttribute('aria-label', `Retry image #${index + 1}`);
+        retry.onclick = () => uploadComposerImage(id, image).catch(() => {}); chip.append(retry);
+      }
+    }
+    const remove = element('button', '', '×'); remove.type = 'button'; remove.setAttribute('aria-label', `Remove image #${index + 1}`);
+    remove.onclick = () => {
+      const state = messageSubmissions.get(id);
+      state.images = state.images.filter(candidate => candidate !== image); state.revision = newDraftRevision();
+      refreshComposerImages(id); scheduleMessageRecovery(); sessions.get(id)?.input.focus({ preventScroll: true });
+    };
+    chip.append(remove); ui.imageChips.append(chip);
+  });
+  ui.resizeInput?.(); activatePromptSpace(ui); showMessageSubmission(id);
+}
+function uploadComposerImage(id, image) {
+  if (image.id) return Promise.resolve(image);
+  if (image.promise) return image.promise;
+  if (!image.file) return Promise.reject(new Error(image.error || 'Image unavailable. Paste it again or remove it.'));
+  image.error = null;
+  image.promise = request(`/api/sessions/${encodeURIComponent(id)}/images`, 'POST', image.file, { 'Content-Type': image.mime_type })
+    .then(result => {
+      if (typeof result.id !== 'string') throw new Error('Image upload returned no image ID.');
+      Object.assign(image, result); return image;
+    }).catch(error => { image.error = error.message; throw error; })
+    .finally(() => { image.promise = null; refreshComposerImages(id); scheduleMessageRecovery(); });
+  refreshComposerImages(id);
+  return image.promise;
+}
+function pasteComposerImages(ui, event) {
+  const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
+  if (!files.length) return; // Leave ordinary text and native selection/undo untouched.
+  if (!event.clipboardData.getData('text/plain')) event.preventDefault();
+  const state = ui.messageState;
+  const bytes = state.images.reduce((sum, image) => sum + image.size_bytes, 0) + files.reduce((sum, file) => sum + file.size, 0);
+  const error = files.some(file => !imageTypes.has(file.type)) ? 'Paste a PNG, JPEG, or WebP image.'
+    : state.images.length + files.length > 8 ? 'A message can contain up to eight images.'
+    : files.some(file => file.size > 10 * 1024 * 1024) ? 'Each image must be no larger than 10 MiB.'
+    : bytes > 20 * 1024 * 1024 ? 'Images in one message must total no more than 20 MiB.' : null;
+  if (error) { showError(ui.error, error); return; }
+  const images = files.map(file => ({ local_id: newDraftRevision(), file, mime_type: file.type, size_bytes: file.size }));
+  state.images.push(...images); state.revision = newDraftRevision();
+  for (const image of images) uploadComposerImage(ui.id, image).catch(() => {});
+  refreshComposerImages(ui.id); scheduleMessageRecovery();
+}
+
 const submissionStorageKey = `boid:submissions:v1:${location.origin}`;
 try {
   for (const [id, saved] of JSON.parse(sessionStorage.getItem(submissionStorageKey) || "[]")) {
     if (typeof id !== "string" || typeof saved?.draft !== "string" || typeof saved.revision !== "string"
-        || !Array.isArray(saved.queue) || !saved.queue.length || saved.queue.length > 8) continue;
+        || !Array.isArray(saved.queue) || (!saved.queue.length && !saved.images?.length) || saved.queue.length > 8) continue;
     if (!saved.queue.every(item => typeof item.text === "string" && typeof item.revision === "string")) continue;
-    messageSubmissions.set(id, { ...saved, promise: null, paused: true,
-      error: "Submission interrupted by reload. Review before resending.", uncertain: !!saved.queue[0].attempted });
+    messageSubmissions.set(id, { ...saved, images: restoreImages(saved.images),
+      queue: saved.queue.map(item => ({ ...item, images: restoreImages(item.images) })), promise: null, paused: saved.queue.length > 0,
+      error: saved.queue.length ? "Submission interrupted by reload. Review before resending." : null, uncertain: !!saved.queue[0]?.attempted });
   }
 } catch { /* Existing composer drafts remain available if storage is unavailable. */ }
 let recoveryWrite = null;
@@ -54,9 +148,9 @@ function flushMessageRecovery() {
 }
 function saveMessageSubmissions() {
   sessionStorage.setItem(submissionStorageKey, JSON.stringify([...messageSubmissions]
-    .filter(([, state]) => state.queue.length).map(([id, state]) => [id, {
-      draft: state.draft, revision: state.revision,
-      queue: state.queue.map(({ text, revision, attempted }) => ({ text, revision, attempted })),
+    .filter(([, state]) => state.queue.length || state.images?.length).map(([id, state]) => [id, {
+      draft: state.draft, revision: state.revision, images: storedImages(state.images),
+      queue: state.queue.map(({ text, revision, attempted, images }) => ({ text, revision, attempted, images: storedImages(images) })),
     }])));
 }
 function noteMessageDraft(ui, edited = false) {
@@ -71,16 +165,17 @@ function showMessageSubmission(id) {
   if (!ui || !state) return;
   ui.input.setAttribute("aria-busy", String(!!state.promise));
   updateActivity(ui);
-  if (!state.error && !state.recoveryError) {
+  const imageErrors = (state.images || []).map(image => image.error).filter(Boolean);
+  if (!state.error && !state.recoveryError && !imageErrors.length) {
     if (ui.error.dataset.submissionError) { ui.error.hidden = true; delete ui.error.dataset.submissionError; }
     return;
   }
-  showError(ui.error, [state.error, state.recoveryError].filter(Boolean).join(" "));
+  showError(ui.error, [...new Set([state.error, state.recoveryError, ...imageErrors].filter(Boolean))].join(" "));
   ui.error.dataset.submissionError = "true";
   if (!state.error) return;
   const first = state.queue[0];
   if (!first) return;
-  const details = element("details"), preview = element("pre", "", first.text);
+  const details = element("details"), preview = element("pre", "", [first.text, ...(first.images || []).map((image, index) => `[Image #${index + 1}]`)].filter(Boolean).join("\n"));
   Object.assign(preview.style, { whiteSpace: "pre-wrap", maxHeight: "140px", overflow: "auto" });
   details.append(element("summary", "", `Review message (${state.queue.length} not confirmed)`), preview);
   const retry = element("button", "", state.uncertain ? "Resend (may duplicate)" : "Retry");
@@ -104,10 +199,10 @@ function showMessageSubmission(id) {
 function clearAcknowledgedDraft(id, item) {
   const state = messageSubmissions.get(id);
   if (state.revision === item.revision) {
-    state.draft = ""; state.revision = newDraftRevision();
+    state.draft = ""; state.images = []; state.revision = newDraftRevision();
     const current = sessions.get(id);
     if (current) {
-      current.input.value = ""; current.input.dispatchEvent(new Event("input"));
+      current.input.value = ""; refreshComposerImages(id); current.input.dispatchEvent(new Event("input"));
       inputTiming.cleared(item.timing);
     }
   }
@@ -123,15 +218,16 @@ function runMessageSubmissions(id) {
     while (state.queue.length && !state.paused) {
       const item = state.queue[0];
       try {
+        if (item.images?.length) await Promise.all(item.images.map(image => uploadComposerImage(id, image)));
         item.attempted = true;
         inputTiming.dispatched(item.timing);
-        const acknowledgment = await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text }, {},
+        const acknowledgment = await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text, ...(item.images?.length ? { images: item.images.map(image => image.id) } : {}) }, {},
           item.timing ? (response, headersAt) => inputTiming.response(item.timing, response, headersAt) : null);
         inputTiming.acknowledge(item.timing, acknowledgment);
       } catch (error) {
         inputTiming.failed(item.timing, error);
         state.paused = true; state.error = error.message;
-        state.uncertain = !Number.isFinite(error.status);
+        state.uncertain = item.attempted && !Number.isFinite(error.status);
         if (state.uncertain) state.error += " Delivery is unconfirmed; resending may duplicate it.";
         break;
       }
@@ -958,7 +1054,8 @@ function showError(node, error) {
 
 async function request(path, method = "GET", body, headers = {}, observeResponse = null) {
   const options = { method, credentials: "same-origin", headers };
-  if (body !== undefined) {
+  if (body instanceof Blob) options.body = body;
+  else if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
@@ -1385,7 +1482,7 @@ function atBottom(ui) {
 
 function promptVisible(ui) {
   return !ui.composer.hidden && (ui.pane.matches(":hover")
-    || ui.composer.contains(document.activeElement) || ui.input.value.length > 0);
+    || ui.composer.contains(document.activeElement) || ui.input.value.length > 0 || ui.messageState.images.length > 0);
 }
 
 function followTarget(ui) {
@@ -1901,8 +1998,10 @@ function addSession(view) {
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
   ui.messageState = messageSubmissions.get(id) || {
     draft: savedState?.input || "", revision: savedState?.inputRevision || newDraftRevision(),
-    queue: [], promise: null, paused: false, error: null,
+    queue: [], images: [], promise: null, paused: false, error: null,
   };
+  ui.messageState.images ||= [];
+  ui.input.value = ui.messageState.draft;
   messageSubmissions.set(id, ui.messageState);
   Object.defineProperties(ui, {
     sending: { get: () => !!ui.messageState.promise },
@@ -1968,7 +2067,11 @@ function addSession(view) {
     }
   });
   ui.contextLabel = element("span", "context-usage");
-  ui.composer.append(ui.input, ui.contextLabel);
+  ui.imageChips = element("div", "composer-images"); ui.imageChips.hidden = true;
+  ui.imageChips.setAttribute("aria-label", "Attached images");
+  const composerContent = element("div", "composer-content"); composerContent.append(ui.imageChips, ui.input);
+  ui.composer.append(composerContent, ui.contextLabel);
+  ui.input.addEventListener("paste", event => pasteComposerImages(ui, event));
   ui.input.addEventListener("scroll", () => updateContextVisibility(ui), { passive: true });
   const stream = element("div", "agent-stream");
   const overlay = element("div", "composer-overlay");
@@ -2016,7 +2119,7 @@ function addSession(view) {
       option.setAttribute("aria-selected", String(command === ui.slashCommand));
       return option;
     }));
-    ui.slashSuggestion.hidden = ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
+    ui.slashSuggestion.hidden = ui.messageState.images.length > 0 || ui.slashDismissed || !text || !ui.slashCommand || ui.input.value.includes("\n");
     ui.input.setAttribute("aria-controls", ui.slashSuggestion.id);
     ui.input.setAttribute("aria-expanded", String(!ui.slashSuggestion.hidden));
     if (!ui.slashSuggestion.hidden) ui.input.setAttribute("aria-activedescendant", `slash-${id}-${ui.slashCommand.slice(1)}`);
@@ -2024,6 +2127,7 @@ function addSession(view) {
     clearPromptSpaceWhenHidden(ui);
     updateContextVisibility(ui);
   }
+  ui.resizeInput = resizeInput;
   let historyIndex = null;
   let savedDraft = "";
   ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
@@ -2080,26 +2184,26 @@ function addSession(view) {
   });
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
-    if (!ui.input.value.trim()) return;
+    if (!ui.input.value.trim() && !ui.messageState.images.length) return;
     noteMessageDraft(ui);
     const submittedAt = inputTiming.startedAt();
     const text = ui.input.value;
     activatePromptSpace(ui);
-    if (text.trim() === "/login" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/login")) {
+    if (!ui.messageState.images.length && (text.trim() === "/login" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/login"))) {
       ui.input.value = "";
       historyIndex = null;
       resizeInput();
       openLogin(ui);
       return;
     }
-    if (text.trim() === "/skills" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/skills")) {
+    if (!ui.messageState.images.length && (text.trim() === "/skills" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/skills"))) {
       ui.input.value = "";
       historyIndex = null;
       resizeInput();
       await openSkillPicker(ui);
       return;
     }
-    if (text.trim() === "/model" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/model")) {
+    if (!ui.messageState.images.length && (text.trim() === "/model" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/model"))) {
       ui.input.value = "";
       historyIndex = null;
       resizeInput();
@@ -2114,7 +2218,7 @@ function addSession(view) {
       showError(ui.error, "Eight messages are awaiting confirmation. This draft has not been submitted."); return;
     }
     const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
-    const item = { text: submitted, revision: state.revision, attempted: false,
+    const item = { text: submitted, images: [...state.images], revision: state.revision, attempted: false,
       timing: inputTiming.begin(id, submittedAt) };
     state.queue.push(item);
     scheduleMessageRecovery();
@@ -2123,6 +2227,7 @@ function addSession(view) {
     showMessageSubmission(id);
   });
   sessions.set(id, ui);
+  refreshComposerImages(id);
   setQuestions(ui, view.questions || []);
   updateContextUsage(ui);
   setStatus(ui, view.status);
@@ -2693,6 +2798,16 @@ function fullEntryButton(ui, item, label = "Load full message") {
   return load;
 }
 
+function appendEntryImages(ui, item) {
+  if (!item.images?.length) return;
+  const images = element('span', 'entry-images');
+  for (const [index, image] of item.images.entries()) {
+    const link = element('a', 'image-marker', `[${image.label || `Image #${index + 1}`}]`);
+    link.href = '#'; link.onclick = event => { event.preventDefault(); previewMessageImage(ui, image); }; images.append(link);
+  }
+  item.body.append(images);
+}
+
 function renderEntry(ui, item) {
   if (!ui.mounted.has(item)) { item.rendered = false; return; }
   const { node, body, kind, text } = item;
@@ -2700,6 +2815,7 @@ function renderEntry(ui, item) {
   if (kind === "reasoning") return;
   if (item.partial && kind !== "tool_call" && kind !== "tool_result") {
     body.replaceChildren(element("pre", "tool-text", text), fullEntryButton(ui, item));
+    if (kind === "user") appendEntryImages(ui, item);
     return;
   }
   const communication = communicationFor(ui, item);
@@ -2721,6 +2837,7 @@ function renderEntry(ui, item) {
     body.replaceChildren(compactOutput(ui, item, element("pre", "tool-text", text), text, "Arguments"));
   } else {
     body.textContent = text;
+    if (kind === "user") appendEntryImages(ui, item);
   }
 }
 
@@ -2794,11 +2911,14 @@ function putEntry(ui, entry, delta = false) {
     if (entry.superseded !== undefined) { item.superseded = entry.superseded; if (!selectedWithin(item.node)) item.node.hidden = item.suppressed || item.superseded; }
   }
   if (delta && item.partial) { item.textBytes = (item.textBytes || item.text.length) + (entry.text || "").length; return; }
+  const imagesChanged = !delta && !!(item.images?.length || entry.images?.length)
+    && JSON.stringify(item.images || []) !== JSON.stringify(entry.images || []);
+  if (imagesChanged) item.images = entry.images || [];
   const batchChanged = !delta && item.inputBatch !== entry.input_batch;
   if (batchChanged && item.kind === "user") ui.groupDirty = true;
   if (!delta) item.inputBatch = entry.input_batch;
   const text = delta ? item.text + (entry.text || "") : (entry.text || "");
-  if (text !== item.text || !item.rendered || batchChanged) {
+  if (text !== item.text || !item.rendered || batchChanged || imagesChanged) {
     item.text = text;
     if (item.kind === "tool_call" || item.kind === "tool_result") {
       const tool = toolEntry(item.text);
@@ -3611,7 +3731,7 @@ document.addEventListener("focusin", event => {
   selected = ui?.pane || null;
 });
 document.addEventListener("keydown", async event => {
-  if (credentialMode || diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
+  if (imagePreview?.open || credentialMode || diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault(); closeSkillPicker(skillPicker); return;
