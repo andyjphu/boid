@@ -81,6 +81,22 @@ const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:
     assert.equal(await page.locator('[data-entry-id="result"] .tool-output').isVisible(),false);
     await page.locator('[data-entry-id="result"] summary').click();await frames();
     assert.equal(await page.locator('[data-entry-id="result"] .tool-text').textContent(),skillText);
+    // Old catalog records, including truncated JSON, never enter the visible transcript.
+    const catalog=JSON.stringify({event:'catalog',text:'Skill catalog refreshed\n'+skillText});
+    const entries=[{id:'catalog',kind:'skill',text:catalog},
+      {id:'catalog-partial',kind:'skill',text:catalog.slice(0,8192),text_complete:false},
+      {id:'selected',kind:'skill',text:JSON.stringify({event:'loaded',skill:{name:'humanizer',text:skillText}})},
+      {id:'skill-error',kind:'skill',text:JSON.stringify({event:'error',error:'Unavailable skill'})},
+      {id:'ordinary',kind:'assistant',text:'Catalog refresh is internal.'}];
+    await page.evaluate(v=>{removeSession(sessions.get('a'));snapshot([v],[]);},{...view(entries),history:{start:0,end:entries.length,total:entries.length,seq:1}});await frames();
+    assert.equal(await page.locator('[data-entry-id="catalog"]').count(),0);
+    assert.equal(await page.locator('[data-entry-id="catalog-partial"]').count(),0);
+    assert.equal(await page.locator('.trace').innerText().then(t=>t.includes('Skill catalog refreshed')),false);
+    assert.equal(await page.locator('[data-entry-id="selected"] summary').innerText(),'Loaded humanizer');
+    assert.equal(await page.locator('[data-entry-id="skill-error"]').innerText(),'Skill selection failed: Unavailable skill');
+    assert.equal(await page.locator('[data-entry-id="ordinary"]').innerText(),'Catalog refresh is internal.');
+    assert.equal(fullReads,1,'hidden catalog must not fetch full JSON');
+    if(process.env.BOID_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.BOID_SCREENSHOT_DIR,'skill-catalog-hidden.png')});
     assert.deepEqual(errors,[]);
     console.log('PASS: partial history stays collapsed, skill summary, keyboard toggles, explicit full fetch, decoded selectable text, live update, interleaving, orphan result, virtual-window ownership');
   }finally{await browser.close();}

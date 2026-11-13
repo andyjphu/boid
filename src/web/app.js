@@ -2037,6 +2037,15 @@ function groupUserEntries(ui) {
   }
 }
 
+function isSkillCatalog(entry) {
+  if (entry.kind !== "skill") return false;
+  try { return JSON.parse(entry.text)?.event === "catalog"; }
+  catch {
+    // Older history pages truncate the JSON; the serialized event field comes first.
+    return entry.text_complete === false && /^\s*\{\s*"event"\s*:\s*"catalog"\s*[,}]/.test(entry.text || "");
+  }
+}
+
 function putEntry(ui, entry, delta = false) {
   const id = String(entry.id);
   let item = ui.entries.get(id);
@@ -2060,7 +2069,7 @@ function putEntry(ui, entry, delta = false) {
       node.append(body);
     }
     // Transport receipts remain in the full record; they are not model output.
-    node.hidden = kind === "reasoning" || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message (?:[^ ]+ )?from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
+    node.hidden = kind === "reasoning" || isSkillCatalog(entry) || (kind === "notice" && /^(Input .* applied to the conversation\.|Queued message (?:[^ ]+ )?from .* applied to this model request\.|Reasoning shown here is the provider's exposed summary\.)/.test(entry.text || ""));
     if (entry.replaces) {
       const replaced = ui.entries.get(String(entry.replaces));
       if (replaced) {
