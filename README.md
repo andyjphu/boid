@@ -21,8 +21,10 @@ cd ~/boid
 
 `build.sh` builds the release binary and links `~/.local/bin/boid` to it.
 Keep `~/.local/bin` on `PATH`. `run.sh` simply executes `boid`, forwarding any
-arguments; `boid --help` lists the options. Use `/login` to choose an API key or
-[ChatGPT subscription](docs/chatgpt.md); an existing `OPENAI_API_KEY` also works. `boid` starts one background server or
+arguments; `boid --help` lists the options. The lock button, also opened by
+`/login`, manages named API keys and [ChatGPT subscriptions](docs/chatgpt.md).
+An existing `OPENAI_API_KEY` is imported once into that registry.
+`boid` starts one background server or
 reuses the running server, opens its web workspace, and returns to the shell.
 Use `boid --no-open` to print the URL without opening a browser; SSH sessions
 also print the URL only. Closing the shell or browser leaves agents running.
@@ -57,11 +59,21 @@ Agent panes retain the complete transcript and load recent history first.
 The main agent button creates an agent immediately. Each pane's trailing `+`
 adds an agent tab to that pane. Selecting a tab expands it in place; inactive
 tabs show only their names. Drag tabs to reorder or group agents and terminals,
-and scroll overflowing tab strips horizontally. Order, selected tabs and resized
+and scroll overflowing tab strips horizontally. Tab membership, order and
+credentials are shared across browser windows. Selected tabs and resized
 positions survive refresh in that browser window. Right-click either agent
-creation button to access active and inactive session history.
+creation button to find active agents.
 Drag a pane's empty header area to move the whole pane, or drag an individual
 tab onto a screen number to move that session to another screen.
+
+Each pane has one [credential](docs/credentials.md) for all its agent tabs,
+including background tabs. Changing or removing it takes effect on the next
+model request; an in-progress request keeps its current credential. Removal
+leaves affected panes unassigned. Background agents continue working normally.
+
+Ending an agent removes it from Boid. Its [archived trace files](docs/archives.md)
+remain on disk for manual reading or reconstructing a new agent. Archived agents
+have no history picker or reopen action and do not remain loaded in the harness.
 
 ![Boid v0.5 with a terminal and two agent panes](docs/images/boid-v0.5.png)
 
@@ -88,7 +100,7 @@ original deadline. Stop and Escape end the wait, while retaining the question.
 Questions survive reconnects and server restarts. Restarts preserve the usual
 paused recovery behavior; they do not restart a question's timer or agent work.
 
-`/login` changes the connection for its agent pane. `/model` selects a model
+`/login` opens the shared credential view. `/model` selects a model
 from the connected account's catalog.
 `/clear` remains available; `/oai-compact` currently requires the API-key route.
 
