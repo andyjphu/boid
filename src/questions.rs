@@ -207,7 +207,7 @@ impl Hub {
             }
             let (message_id, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 if r.view.archived || r.view.status == "ending" {
-                    bail!("Session has ended. Reopen its history first.");
+                    bail!("Session has ended. Create a new agent instead.");
                 }
                 let q = r.view.questions.iter_mut().find(|q| q.id == question_id)
                     .context("Unknown question.")?;
@@ -232,7 +232,17 @@ impl Hub {
             })?;
             drop(data);
             receipt.wait()?;
-            self.0.data.lock().unwrap().sessions[id].wake.notify_one();
+            if let Some(handle) = self
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .get(id)
+                .filter(|h| !h.record.view.archived)
+            {
+                handle.wake.notify_one();
+            }
             Ok(message_id)
         })
     }
