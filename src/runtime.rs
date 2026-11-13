@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
@@ -19,6 +19,17 @@ mod persistence_tests;
 #[path = "questions.rs"]
 mod questions;
 pub use questions::{PromptArgs, Question};
+
+// Durations from this server's monotonic clock, never cross-host timestamps.
+#[derive(Default, Debug)]
+pub(crate) struct MessageTimings {
+    /// Mutex acquisition only; absent when validation rejects before locking.
+    pub lock_wait: Option<Duration>,
+    /// Work while Data is held, including cloning, enqueueing, events, and wake.
+    pub mutation: Option<Duration>,
+    /// Includes Data guard release and the return from blocking::run.
+    pub admission: Duration,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -1378,56 +1389,70 @@ impl Hub {
         })
     }
     pub fn message(&self, id: &str, text: String) -> Result<String> {
-        crate::blocking::run(|| {
+        self.message_timed(id, text).0
+    }
+    pub(crate) fn message_timed(&self, id: &str, text: String) -> (Result<String>, MessageTimings) {
+        let started = Instant::now();
+        let mut timings = MessageTimings::default();
+        let result = crate::blocking::run(|| {
             if text.trim().is_empty() {
                 bail!("Message must not be empty.");
             }
             if text.trim() == "/login" {
                 bail!("Open /login in the Boid web composer to select API or subscription access.");
             }
+            let waiting = Instant::now();
             let mut data = self.0.data.lock().unwrap();
-            if data.closing {
-                bail!("Server is shutting down.");
-            }
-            let message_id = Uuid::new_v4().to_string();
-            let entry = Entry {
-                id: message_id.clone(),
-                kind: "user".into(),
-                text: text.clone(),
-                replaces: None,
-                input_batch: None,
-            };
-            data.sessions
-                .get_mut(id)
-                .context("Unknown session.")?
-                .persistence
-                .check_input_capacity()?;
-            let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
-                if r.view.archived {
-                    bail!("Session has ended. Reopen its history first.");
+            timings.lock_wait = Some(waiting.elapsed());
+            let mutating = Instant::now();
+            let result = (|| {
+                if data.closing {
+                    bail!("Server is shutting down.");
                 }
-                if r.inputs.len() >= 32 {
-                    bail!("Session input queue is full.");
-                }
-                r.order += 1;
-                r.inputs.push_back(Input {
+                let message_id = Uuid::new_v4().to_string();
+                let entry = Entry {
                     id: message_id.clone(),
-                    compact: text.trim() == "/oai-compact",
-                    clear: text.trim() == "/clear",
-                    text,
-                    order: r.order,
-                });
-                r.view.entries.push(entry.clone());
-                r.view.pending.push(message_id.clone());
-                r.paused = false;
-                r.listen_on_restart = Some(true);
-                Ok(())
-            })?;
-            let handle = data.sessions.get_mut(id).unwrap();
-            handle.persistence.track_input(receipt);
-            handle.wake.notify_one();
-            Ok(message_id)
-        })
+                    kind: "user".into(),
+                    text: text.clone(),
+                    replaces: None,
+                    input_batch: None,
+                };
+                data.sessions
+                    .get_mut(id)
+                    .context("Unknown session.")?
+                    .persistence
+                    .check_input_capacity()?;
+                let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
+                    if r.view.archived {
+                        bail!("Session has ended. Reopen its history first.");
+                    }
+                    if r.inputs.len() >= 32 {
+                        bail!("Session input queue is full.");
+                    }
+                    r.order += 1;
+                    r.inputs.push_back(Input {
+                        id: message_id.clone(),
+                        compact: text.trim() == "/oai-compact",
+                        clear: text.trim() == "/clear",
+                        text,
+                        order: r.order,
+                    });
+                    r.view.entries.push(entry.clone());
+                    r.view.pending.push(message_id.clone());
+                    r.paused = false;
+                    r.listen_on_restart = Some(true);
+                    Ok(())
+                })?;
+                let handle = data.sessions.get_mut(id).unwrap();
+                handle.persistence.track_input(receipt);
+                handle.wake.notify_one();
+                Ok(message_id)
+            })();
+            timings.mutation = Some(mutating.elapsed());
+            result
+        });
+        timings.admission = started.elapsed();
+        (result, timings)
     }
     pub fn interrupt(&self, id: &str) -> Result<()> {
         let controls = self.0.interrupts.lock().unwrap();

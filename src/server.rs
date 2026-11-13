@@ -1,6 +1,6 @@
 use crate::{
     api::Client,
-    runtime::{Create, Hub},
+    runtime::{Create, Hub, MessageTimings},
     terminal::TerminalHub,
 };
 use anyhow::{Context, Result, bail};
@@ -25,6 +25,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     sync::Arc,
+    time::Instant,
 };
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
@@ -432,12 +433,46 @@ async fn message(
     State(app): State<App>,
     Path(id): Path<String>,
     Json(input): Json<Input>,
-) -> ApiResult<impl IntoResponse> {
-    let message_id = app.hub.message(&id, input.text).map_err(invalid)?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({"message_id":message_id,"status":"queued"})),
-    ))
+) -> Response {
+    // Axum authentication/body extraction has already completed. This measures
+    // handler entry to response construction, not socket flush or client receipt.
+    let started = Instant::now();
+    let (result, timings) = app.hub.message_timed(&id, input.text);
+    message_response(result, timings, started)
+}
+fn message_response(result: Result<String>, timings: MessageTimings, started: Instant) -> Response {
+    let mut response = match result {
+        Ok(message_id) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"message_id":message_id,"status":"queued"})),
+        )
+            .into_response(),
+        Err(error) => invalid(error).into_response(),
+    };
+    let handler = started.elapsed();
+    let mut metrics = format!(
+        "boid_admit;dur={:.3}, boid_handler;dur={:.3}",
+        timings.admission.as_secs_f64() * 1000.0,
+        handler.as_secs_f64() * 1000.0,
+    );
+    if let Some(lock_wait) = timings.lock_wait {
+        metrics.push_str(&format!(
+            ", boid_lock;dur={:.3}",
+            lock_wait.as_secs_f64() * 1000.0
+        ));
+    }
+    if let Some(mutation) = timings.mutation {
+        metrics.push_str(&format!(
+            ", boid_mutate;dur={:.3}",
+            mutation.as_secs_f64() * 1000.0
+        ));
+    }
+    response.headers_mut().insert(
+        "server-timing",
+        HeaderValue::from_str(&metrics)
+            .expect("numeric Server-Timing durations are valid header values"),
+    );
+    response
 }
 async fn stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
     app.hub.stop(&id).map_err(invalid)?;
@@ -787,4 +822,61 @@ async fn auth_callback(
             "<!doctype html><meta charset=\"utf-8\"><title>Boid account</title><p>{text}</p>"
         )),
     )
+}
+
+#[cfg(test)]
+mod message_timing_tests {
+    use super::*;
+    use std::time::Duration;
+
+    // Synthetic values check the wire contract, not observed user latency.
+    #[tokio::test]
+    async fn timing_headers_preserve_success_and_error_response_bodies() {
+        let response = message_response(
+            Ok("measured-message".into()),
+            MessageTimings {
+                lock_wait: Some(Duration::from_micros(1250)),
+                mutation: Some(Duration::from_micros(2500)),
+                admission: Duration::from_micros(4000),
+            },
+            Instant::now(),
+        );
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let timing = response.headers()["server-timing"].to_str().unwrap();
+        for metric in [
+            "boid_lock;dur=1.250",
+            "boid_mutate;dur=2.500",
+            "boid_admit;dur=4.000",
+            "boid_handler;dur=",
+        ] {
+            assert!(timing.contains(metric));
+        }
+        assert!(!timing.contains("measured-message"));
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "message_id":"measured-message", "status":"queued"
+            })
+        );
+
+        let response = message_response(
+            Err(anyhow::anyhow!("Message must not be empty.")),
+            MessageTimings::default(),
+            Instant::now(),
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let timing = response.headers()["server-timing"].to_str().unwrap();
+        assert!(timing.contains("boid_admit;") && timing.contains("boid_handler;"));
+        assert!(!timing.contains("boid_lock;") && !timing.contains("boid_mutate;"));
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error":"Message must not be empty."})
+        );
+    }
 }
