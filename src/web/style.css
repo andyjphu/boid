@@ -365,9 +365,12 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 /* Screen selection belongs to this browser window, alongside the shared server. */
 #screens { position: fixed; top: 0; left: 0; z-index: 10; display: flex; height: 24px;
   max-width: calc(50% - 28px); overflow-x: auto; scrollbar-width: none; }
-#screens a, #screens button { flex: 0 0 auto; min-width: 24px; height: 24px; padding: 2px 6px;
+#screens a, #screens button { display: flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; min-width: 24px; height: 24px; padding: 0 6px 2px; line-height: 1;
+  /* The 2px bottom inset optically centers the system font glyphs. */
   color: #999; text-decoration: none; text-align: center; border: 0; border-right: 1px solid #353535;
   border-radius: 0; background: #181818; }
+#screens #add-screen { padding-bottom: 4px; } /* The + glyph sits 1px below the digits. */
 #screens a[aria-current="page"] { color: #ddd; background: #292929; }
 #screens a:hover, #screens button:hover, #screens a.drop-target { color: #fff; background: #373737; }
 #screens a:focus-visible { outline: 1px solid #777; outline-offset: -2px; }
