@@ -1181,6 +1181,11 @@ function addSession(view) {
         }
       } catch {}
       if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
+      const current = sessions.get(id);
+      if (current && current !== ui && current.input.value === text) {
+        current.input.value = "";
+        current.input.dispatchEvent(new Event("input"));
+      }
     } catch (error) { showError(ui.error, error); }
     finally { ui.sending = false; ui.submission = null; }
   });
@@ -1864,6 +1869,7 @@ function snapshot(views, terminalViews = [], catalog = views.map(view => String(
   views = views.filter(view => paneScreen(`agent:${view.id}`) === activeScreen);
   views = [...views].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  for (const ui of sessions.values()) captureAgentState(ui);
   reconcilingCatalog = true;
   reconcileTerminals(terminalViews);
   const ids = new Set(views.map(view => String(view.id)));
@@ -2306,7 +2312,8 @@ function addSetup(saved) {
       // Empty names are allocated atomically by the server, including concurrent creation.
       fields.name = fields.name.trim();
       const view = await request(`/api/sessions?screen=${ui.screen}`, "POST", fields);
-      screenCatalog.panes[`agent:${view.id}`] = ui.screen;
+      const paneKey = `agent:${view.id}`;
+      screenCatalog.panes[paneKey] ??= ui.screen;
       if (ui.screen !== activeScreen || drafts.get(ui.id) !== ui) {
         const key = `boid:pane-order:v1:${location.origin}:${agentDefaults.cwd}${ui.screen === 1 ? "" : `:screen:${ui.screen}`}`;
         try { const saved = JSON.parse(sessionStorage.getItem(key));
@@ -2314,6 +2321,7 @@ function addSetup(saved) {
         } catch {}
         return;
       }
+      if (paneScreen(paneKey) !== activeScreen) { discardSetup(ui); return; }
       discardSetup(ui, acceptSessionResponse(view, startedAt));
     } catch (error) { showError(ui.error, error); }
     finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
@@ -2424,9 +2432,10 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   const screen = activeScreen;
   try {
     const info = await request(`/api/terminals?screen=${screen}`, "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
-    screenCatalog.panes[`terminal:${info.id}`] = screen;
-    terminalCatalog.set(String(info.id), info);
-    if (screen === activeScreen) attachTerminal(info);
+    const paneKey = `terminal:${info.id}`;
+    screenCatalog.panes[paneKey] ??= screen;
+    if (!terminalCatalog.has(String(info.id))) terminalCatalog.set(String(info.id), info);
+    if (paneScreen(paneKey) === activeScreen) attachTerminal(terminalCatalog.get(String(info.id)));
   } catch (error) { showError(workspaceError, error); }
   finally { button.disabled = false; }
 });

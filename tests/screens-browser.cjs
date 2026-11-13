@@ -15,6 +15,9 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     const agents = [view('a'), view('b')];
     const terms = [{ id: 't', name: '#1', cwd: '/tmp', running: true }];
     let sequence = 0;
+    let holdAgent = false, holdTerminal = false;
+    let releaseAgent, releaseTerminal, releaseMessage;
+    const until = async check => { for (let i = 0; !check(); i++) { assert.ok(i < 300, 'deferred request arrived'); await new Promise(resolve => setTimeout(resolve, 10)); } };
     const emit = async message => {
       message.seq = ++sequence;
       for (const page of pages) await page.evaluate(message => testEvents?.onmessage?.({ data: JSON.stringify(message) }), message);
@@ -39,18 +42,24 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
         const { pane, screen } = route.request().postDataJSON(); screens.panes[pane] = screen; screens.revision++;
         await emit({ type: 'screens', screens }); return route.fulfill({ json: screens });
       }
+      if (url.pathname.endsWith('/messages') && method === 'POST') {
+        await new Promise(resolve => { releaseMessage = resolve; });
+        return route.fulfill({ json: { status: 'queued' } });
+      }
       if (url.pathname === '/api/sessions' && method === 'POST') {
         const fields = route.request().postDataJSON(); const a = view(fields.name || 'created'); agents.push(a);
         screens.panes[`agent:${a.id}`] = Number(url.searchParams.get('screen') || 1);
         screens.revision++;
         await emit({ type: 'session', screens_revision: screens.revision, session: { ...a, screen: screens.panes[`agent:${a.id}`] } });
+        if (holdAgent) await new Promise(resolve => { releaseAgent = resolve; });
         return route.fulfill({ json: a });
       }
       if (url.pathname === '/api/terminals' && method === 'POST') {
-        const term = { id: 'second-terminal', name: '#2', cwd: '/tmp', running: true }; terms.push(term);
+        const term = { id: terms.length === 1 ? 'second-terminal' : 'late-terminal', name: '#2', cwd: '/tmp', running: true }; terms.push(term);
         screens.panes[`terminal:${term.id}`] = Number(url.searchParams.get('screen') || 1);
         screens.revision++;
         await emit({ type: 'terminal', screens_revision: screens.revision, terminal: { ...term, screen: screens.panes[`terminal:${term.id}`] } });
+        if (holdTerminal) await new Promise(resolve => { releaseTerminal = resolve; });
         return route.fulfill({ json: term });
       }
       if (url.pathname === '/api/sessions') return route.fulfill({ json: agents });
@@ -146,8 +155,51 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     const overlap = await page.evaluate(() => document.querySelector('#screens').getBoundingClientRect().right > document.querySelector('.workspace-actions').getBoundingClientRect().left);
     assert.equal(overlap, false, 'screen strip does not cover existing controls');
     assert.ok(mutations.every(m => !m.path.endsWith('/messages') && m.method !== 'DELETE'), 'switching/moving sends no input or lifecycle operations');
+    await page.setViewportSize({ width: 1200, height: 900 });
+    // An accepted message must clear the remounted composer, but preserve newer edits.
+    for (const edit of [false, true]) {
+      releaseMessage = null;
+      const text = edit ? 'Second accepted message' : 'First accepted message';
+      await page.locator('[data-pane-key="agent:b"] textarea').fill(text);
+      await page.locator('[data-pane-key="agent:b"] textarea').press('Enter');
+      await until(() => releaseMessage);
+      await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
+      await page.locator('#screens [data-screen="3"]').click(); await ready(page, 3);
+      assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), text);
+      if (edit) await page.locator('[data-pane-key="agent:b"] textarea').fill('Newer edit');
+      releaseMessage();
+      if (!edit) await page.waitForFunction(() => sessions.get('b').input.value === '');
+      else { await frames(page); assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), 'Newer edit'); }
+    }
+    // A move missed while disconnected arrives only in the reconnect snapshot.
+    await page.locator('[data-pane-key="agent:b"] textarea').fill('Typed since the last save');
+    screens.panes['agent:b'] = 1; screens.revision++;
+    await snapshot(page); await frames(page);
+    assert.equal(await page.locator('[data-pane-key="agent:b"]').count(), 0);
+    await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
+    assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), 'Typed since the last save');
+    // A newer cross-window move wins over a delayed create response for either pane kind.
+    holdAgent = true;
+    await page.locator('#add-agent').click(); await page.locator('.setup-form input[name=name]').fill('late-agent');
+    await page.locator('.setup-submit').click(); await until(() => releaseAgent);
+    screens.panes['agent:late-agent'] = 2; screens.revision++;
+    await emit({ type: 'screens', screens });
+    await page.waitForFunction(() => !sessions.has('late-agent'));
+    releaseAgent(); holdAgent = false;
+    await page.waitForFunction(() => drafts.size === 0); await frames(page);
+    assert.equal(await page.evaluate(() => paneScreen('agent:late-agent')), 2);
+    assert.equal(await page.locator('[data-pane-key="agent:late-agent"]').count(), 0);
+    holdTerminal = true;
+    await page.locator('#add-terminal').click(); await until(() => releaseTerminal);
+    screens.panes['terminal:late-terminal'] = 2; screens.revision++;
+    await emit({ type: 'screens', screens });
+    await page.waitForFunction(() => !terminals.has('late-terminal'));
+    releaseTerminal(); holdTerminal = false;
+    await page.waitForFunction(() => !document.querySelector('#add-terminal').disabled);
+    assert.equal(await page.evaluate(() => paneScreen('terminal:late-terminal')), 2);
+    assert.equal(await page.locator('[data-pane-key="terminal:late-terminal"]').count(), 0);
     assert.deepEqual(errors, []);
     if (process.env.SCREENSHOT) { await page.setViewportSize({ width: 1200, height: 900 }); await frames(page); await page.screenshot({ path: process.env.SCREENSHOT }); }
-    console.log('PASS: independent windows, shared screen membership, creation, drag move, inactive DOM/socket release, per-screen drafts/layout/reading position, refresh and narrow controls');
+    console.log('PASS: independent windows, shared screen membership, creation, drag move, inactive DOM/socket release, per-screen drafts/layout/reading position, refresh, narrow controls, delayed response and reconnect races');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exit(1); });
