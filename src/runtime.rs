@@ -2132,9 +2132,7 @@ impl Hub {
                     }
                     match result {
                         Ok(Some(snapshot)) => {
-                            if let Some(event) = session.refresh_skills(snapshot) {
-                                self.entry(&id, "skill", event.to_string());
-                            }
+                            session.refresh_skills(snapshot);
                             match self.next_input(&id, &mut session, active) {
                                 Ok(applied) => {
                                     if let Some(continue_work) = applied {
@@ -2657,8 +2655,9 @@ mod tests {
             history.contains("Original review guidance")
                 && history.contains("Revised review guidance")
         );
+        assert!(history.contains("Skill catalog refreshed"));
         assert!(
-            hub.view(&view.id)
+            !hub.view(&view.id)
                 .unwrap()
                 .entries
                 .iter()
