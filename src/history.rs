@@ -130,46 +130,53 @@ impl Hub {
         after: Option<usize>,
         around: Option<&str>,
     ) -> Result<Value> {
-        let data = self.0.data.lock().unwrap();
-        let source = &data
-            .sessions
-            .get(id)
-            .context("Unknown session.")?
-            .record
-            .view;
-        Self::history_view(&data, source, before, after, around)
+        crate::blocking::run(|| {
+            let data = self.0.data.lock().unwrap();
+            let source = &data
+                .sessions
+                .get(id)
+                .context("Unknown session.")?
+                .record
+                .view;
+            Self::history_view(&data, source, before, after, around)
+        })
     }
     pub fn history_list(&self, archived: bool) -> Vec<Value> {
-        let data = self.0.data.lock().unwrap();
-        data.sessions
-            .values()
-            .filter(|h| h.record.view.archived == archived)
-            .map(|h| {
-                Self::history_view(&data, &h.record.view, None, None, None).expect("latest history")
-            })
-            .collect()
+        crate::blocking::run(|| {
+            let data = self.0.data.lock().unwrap();
+            data.sessions
+                .values()
+                .filter(|h| h.record.view.archived == archived)
+                .map(|h| {
+                    Self::history_view(&data, &h.record.view, None, None, None)
+                        .expect("latest history")
+                })
+                .collect()
+        })
     }
     pub fn history_entry(&self, id: &str, entry: &str) -> Result<Value> {
-        let data = self.0.data.lock().unwrap();
-        let source = &data
-            .sessions
-            .get(id)
-            .context("Unknown session.")?
-            .record
-            .view;
-        let index = source
-            .entries
-            .iter()
-            .position(|e| e.id == entry)
-            .context("History entry is unavailable.")?;
-        let mut view = json!(Self::project_entries(
-            &data,
-            source,
-            &source.entries[index..index + 1]
-        ));
-        view["history"] =
-            json!({"start":index,"end":index+1,"total":source.entries.len(),"seq":data.seq});
-        Ok(view)
+        crate::blocking::run(|| {
+            let data = self.0.data.lock().unwrap();
+            let source = &data
+                .sessions
+                .get(id)
+                .context("Unknown session.")?
+                .record
+                .view;
+            let index = source
+                .entries
+                .iter()
+                .position(|e| e.id == entry)
+                .context("History entry is unavailable.")?;
+            let mut view = json!(Self::project_entries(
+                &data,
+                source,
+                &source.entries[index..index + 1]
+            ));
+            view["history"] =
+                json!({"start":index,"end":index+1,"total":source.entries.len(),"seq":data.seq});
+            Ok(view)
+        })
     }
     pub fn recent_event(mut event: Value) -> Value {
         if event["type"] == "entry" {
