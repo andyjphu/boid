@@ -79,7 +79,7 @@ function uploadComposerImage(id, image) {
   image.promise = request(`/api/sessions/${encodeURIComponent(id)}/images`, 'POST', image.file, { 'Content-Type': image.mime_type })
     .then(result => {
       if (typeof result.id !== 'string') throw new Error('Image upload returned no image ID.');
-      Object.assign(image, result); return image;
+      Object.assign(image, result); delete image.file; return image;
     }).catch(error => { image.error = error.message; throw error; })
     .finally(() => { image.promise = null; refreshComposerImages(id); scheduleMessageRecovery(); });
   refreshComposerImages(id);
@@ -2129,8 +2129,8 @@ function addSession(view) {
   }
   ui.resizeInput = resizeInput;
   let historyIndex = null;
-  let savedDraft = "";
-  ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
+  let savedDraft = null;
+  ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; savedDraft = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     if (ui.inactive) return;
@@ -2164,14 +2164,21 @@ function addSession(view) {
     }
     if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
         && ui.input.selectionStart === ui.input.selectionEnd) {
-      const prompts = [...ui.entries.values()].filter(item => item.kind === "user").map(item => item.text);
+      const prompts = [...ui.entries.values()].filter(item => item.kind === "user");
       const up = event.key === "ArrowUp" && ui.input.selectionStart === 0;
       const down = event.key === "ArrowDown" && ui.input.selectionEnd === ui.input.value.length;
       if ((up && prompts.length) || (down && historyIndex !== null)) {
         event.preventDefault();
-        if (historyIndex === null) { savedDraft = ui.input.value; historyIndex = prompts.length; }
+        if (historyIndex === null) {
+          savedDraft = { text: ui.input.value, images: [...ui.messageState.images] }; historyIndex = prompts.length;
+        }
         historyIndex = Math.max(0, Math.min(prompts.length, historyIndex + (up ? -1 : 1)));
-        ui.input.value = historyIndex === prompts.length ? savedDraft : prompts[historyIndex];
+        const prompt = historyIndex === prompts.length ? savedDraft : prompts[historyIndex];
+        ui.input.value = prompt.text;
+        ui.messageState.draft = prompt.text;
+        ui.messageState.images = historyIndex === prompts.length ? [...savedDraft.images] : restoreImages(prompt.images);
+        ui.messageState.revision = newDraftRevision();
+        refreshComposerImages(id); scheduleMessageRecovery();
         ui.input.setSelectionRange(up ? 0 : ui.input.value.length, up ? 0 : ui.input.value.length);
         resizeInput();
         return;
