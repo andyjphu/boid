@@ -110,6 +110,18 @@ impl Session {
         session.user(identity);
         session
     }
+    pub fn ensure_peer_trace_tool(&mut self) {
+        if let Some(tools) = self.tools.as_array_mut() {
+            if let Some(tool) = tools
+                .iter_mut()
+                .find(|tool| tool["name"] == "read_peer_trace")
+            {
+                *tool = tool_calls::peer_trace_definition();
+            } else {
+                tools.push(tool_calls::peer_trace_definition());
+            }
+        }
+    }
     pub fn recover_sends(
         &mut self,
         sender: &str,
@@ -275,7 +287,12 @@ impl Session {
             vec![("notice".into(), "Compacting context…".into())],
         )?;
         hub.archive_context(id, self.model_requests)?;
-        let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
+        let instructions = format!(
+            "{}\n\n{}\n\n{}",
+            self.instructions,
+            hub.identity(id)?,
+            tool_calls::PEER_TRACE_GUIDANCE
+        );
         let result = client
             .compact(&self.history, &self.model, &instructions, &self.profile)
             .await;
@@ -317,6 +334,7 @@ impl Session {
         hub: &Hub,
         id: &str,
     ) -> Result<bool> {
+        self.ensure_peer_trace_tool();
         // /login and /model may update an idle agent while its worker waits.
         self.profile = hub.profile(id)?;
         if let Some(model) = self.profile["model"].as_str() {
@@ -334,7 +352,12 @@ impl Session {
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
             // Read current metadata at each request; worker checkpoints never overwrite names.
-            let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
+            let instructions = format!(
+                "{}\n\n{}\n\n{}",
+                self.instructions,
+                hub.identity(id)?,
+                tool_calls::PEER_TRACE_GUIDANCE
+            );
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let attempt = self.model_requests;
@@ -439,6 +462,7 @@ impl Session {
             }
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
+            "read_peer_trace" => hub.read_peer_trace(id, &call.arguments),
             "send_message" => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
