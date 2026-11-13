@@ -1919,6 +1919,9 @@ function addSession(view) {
       && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total);
     ui.followClearance = ui.follow && promptVisible(ui)
       ? Math.max(0, Math.min(ui.trace.scrollTop, traceEnd(ui)) - messageBottom(ui)) : 0;
+    // Inactive windows can scroll without hover. Keep the reached position until
+    // new output fills the hidden composer's space, just as on pointer leave.
+    if (!promptVisible(ui)) retainPromptSpace(ui);
     rememberPosition(ui);
     if (ui.follow && !wasFollowing) scheduleTranscript(ui);
     if (ui.history) {
@@ -1954,6 +1957,8 @@ function addSession(view) {
       ui.follow = true;
       scheduleTranscript(ui);
     }
+    // A consumed boundary event may not emit scroll before the next render.
+    if (delta > 0 && reachesBoundary && event.cancelable && !promptVisible(ui)) retainPromptSpace(ui);
   }, { passive: false });
   ui.trace.addEventListener("keydown", event => {
     if (["ArrowUp", "PageUp", "Home"].includes(event.key)) {
