@@ -349,7 +349,7 @@ function createPaneGroup(record) {
   const header = element('header', 'pane-header');
   const strip = element('div', 'pane-tabs'); strip.setAttribute('role', 'tablist'); strip.setAttribute('aria-label', 'Sessions');
   const plus = element('button', 'subpane-add', '+'); plus.type = 'button'; plus.setAttribute('aria-label', 'New agent tab');
-  plus.title = 'New agent · right-click for session history';
+  plus.title = 'New agent · right-click for active agents';
   const body = element('div', 'pane-body');
   const group = { record, pane, header, strip, plus, body };
   plus.addEventListener('click', () => createAgent(group, plus));
@@ -381,7 +381,7 @@ function createPaneGroup(record) {
   });
   strip.addEventListener('keydown', event => {
     if (event.target.closest('input, button') || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    const tabs = record.tabs.map(key => subpanes.get(key)).filter(Boolean), current = tabs.findIndex(ui => ui.pane.dataset.paneKey === record.active);
+    const tabs = group.record.tabs.map(key => subpanes.get(key)).filter(Boolean), current = tabs.findIndex(ui => ui.pane.dataset.paneKey === group.record.active);
     const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
     event.preventDefault(); selectSubpane(tabs[index]); tabs[index]?.tab.focus({ preventScroll: true });
   });
@@ -389,10 +389,11 @@ function createPaneGroup(record) {
   group.resizeObserver = new ResizeObserver(() => {
     if (strip.clientWidth === stripWidth) return;
     stripWidth = strip.clientWidth;
-    revealSubpaneTab(subpanes.get(record.active));
+    revealSubpaneTab(subpanes.get(group.record.active));
   });
   group.resizeObserver.observe(strip);
   paneGroups.set(record.id, group);
+  renderCredentialView();
   return group;
 }
 function beginPaneDrag(event, group, ui = null) {
@@ -433,7 +434,19 @@ function detachSubpane(ui, moving = false) {
   } else renderPaneGroup(group);
   if (wasSelected) selected = subpanes.get(group.record.active)?.pane || null;
 }
-function moveSubpane(ui, group, targetKey, after = false) {
+async function moveSubpane(ui, group, targetKey, after = false) {
+  if (!serverPaneGroups) return moveLocalSubpane(ui, group, targetKey, after);
+  if (!ui || !group || ui.pane.dataset.paneKey === targetKey) return;
+  const tabs = group.record.tabs.filter(key => key !== ui.pane.dataset.paneKey);
+  const index = tabs.indexOf(targetKey);
+  const before = index < 0 ? null : tabs[index + (after ? 1 : 0)] || null;
+  try {
+    const result = await credentialMutation('/api/pane-groups/move', 'POST', { pane: ui.pane.dataset.paneKey, target_group_id: group.record.id, before, revision: serverPaneGroups.revision });
+    receivePaneGroups(result);
+    if (ui.pane.isConnected) selectSubpane(ui);
+  } catch (error) { showError(ui.pane.isConnected ? ui.error : workspaceError, error); }
+}
+function moveLocalSubpane(ui, group, targetKey, after = false) {
   if (!ui || !group || ui.pane.dataset.paneKey === targetKey) return;
   const key = ui.pane.dataset.paneKey;
   if (ui.group === group) group.record.tabs = group.record.tabs.filter(item => item !== key);
@@ -447,6 +460,205 @@ function moveSubpane(ui, group, targetKey, after = false) {
   group.record.tabs.splice(index, 0, key);
   // Moving changes order; merely selecting a tab never does.
   group.record.active = key; renderPaneGroup(group); layout();
+}
+
+const credentialButton = document.querySelector('#open-credentials');
+let credentialMode = false, credentialRegistry = { revision: -1, credentials: [] }, registryLoaded = false;
+let serverPaneGroups = null;
+const credentialPanels = new Map();
+let emptyCredentialPanel = null;
+function receiveCredentialRegistry(value) {
+  if (!Array.isArray(value?.credentials) || !Number.isFinite(value.revision) || value.revision < credentialRegistry.revision) return;
+  credentialRegistry = value; registryLoaded = true; renderCredentialView();
+}
+function receivePaneGroups(value, arrange = true) {
+  if (!Array.isArray(value?.groups) || !Number.isFinite(value.revision) || (serverPaneGroups && value.revision < serverPaneGroups.revision)) return;
+  const structure = groups => groups.map(group => [group.id, group.screen, group.tabs]);
+  const membershipChanged = !serverPaneGroups || JSON.stringify(structure(serverPaneGroups.groups)) !== JSON.stringify(structure(value.groups));
+  serverPaneGroups = value;
+  const previous = new Map(groupRecords.map(record => [record.id, record]));
+  const next = value.groups.filter(group => group.screen === activeScreen).map(group => {
+    const old = previous.get(group.id);
+    return { id: group.id, tabs: [...group.tabs], active: group.tabs.includes(old?.active) ? old.active : group.tabs[0] };
+  });
+  const wasReconciling = reconcilingCatalog; reconcilingCatalog = true;
+  groupRecords = next;
+  const membership = new Map(value.groups.flatMap(group => group.tabs.map(key => [key, group])));
+  for (const [key, ui] of [...subpanes]) {
+    const group = membership.get(key);
+    if (!group || group.screen !== activeScreen) {
+      if (ui.trace) { captureAgentState(ui); removeSession(ui); } else ui.dispose?.();
+    }
+  }
+  for (const record of next) {
+    const live = record.tabs.map(key => subpanes.get(key)).filter(Boolean);
+    let group = paneGroups.get(record.id);
+    if (!group && !live.length) continue;
+    group ||= createPaneGroup(record); group.record = record;
+    for (const ui of live) {
+      if (ui.group !== group) {
+        if (ui.trace) rememberPosition(ui);
+        ui.group = group; group.body.append(ui.pane); group.strip.insertBefore(ui.tab, group.plus);
+      }
+    }
+    renderPaneGroup(group);
+  }
+  for (const [id, group] of [...paneGroups]) {
+    if (!next.some(record => record.id === id) || !group.record.tabs.some(key => subpanes.get(key)?.group === group)) {
+      group.resizeObserver.disconnect(); group.pane.remove(); paneGroups.delete(id);
+    }
+  }
+  if (selected && (selected.hidden || !selected.isConnected)) selected = null;
+  reconcilingCatalog = wasReconciling;
+  if (arrange && catalogReady && membershipChanged) layout();
+  renderCredentialView();
+}
+async function refreshCredentialState() {
+  const [registry, groups] = await Promise.all([request('/api/credentials'), request('/api/pane-groups')]);
+  receiveCredentialRegistry(registry); receivePaneGroups(groups);
+}
+async function credentialMutation(path, method, body) {
+  try { return await request(path, method, body); }
+  catch (error) { if (error.status === 409) await refreshCredentialState(); throw error; }
+}
+function credentialActions(group) {
+  return {
+    async select(id) {
+      if (!group || !serverPaneGroups) throw new Error('Pane membership is not available yet.');
+      receivePaneGroups(await credentialMutation(`/api/pane-groups/${encodeURIComponent(group.record.id)}`, 'PATCH', { credential_id: id, revision: serverPaneGroups.revision }));
+    },
+    async saveKey(id, values) {
+      const body = { ...(values.name ? { name: values.name } : {}), ...(values.key ? { key: values.key } : {}) };
+      const result = await credentialMutation(id ? `/api/credentials/${encodeURIComponent(id)}` : '/api/credentials', id ? 'PATCH' : 'POST', id ? body : { type: 'api_key', ...body });
+      receiveCredentialRegistry(result.registry);
+    },
+    async remove(id) {
+      const result = await credentialMutation(`/api/credentials/${encodeURIComponent(id)}`, 'DELETE');
+      receiveCredentialRegistry(result.registry);
+    },
+    async subscription(id) {
+      const popup = window.open('about:blank', 'boid-credential-sign-in');
+      try {
+        const result = await request('/api/credentials/sign-in', 'POST', { origin: location.origin, consent: !id || !credentialRegistry.credentials.find(row => row.id === id)?.plan_enabled, ...(id ? { credential_id: id } : {}) });
+        if (popup) { popup.opener = null; popup.location.href = result.start_url; return null; }
+        return result.start_url;
+      } catch (error) { popup?.close(); throw error; }
+    },
+  };
+}
+function renderCredentialView() {
+  for (const [id, view] of [...credentialPanels]) {
+    if (!credentialMode || !paneGroups.has(id)) { view.dispose(); credentialPanels.delete(id); }
+  }
+  if (emptyCredentialPanel && (!credentialMode || paneGroups.size)) { emptyCredentialPanel.dispose(); emptyCredentialPanel = null; }
+  if (!credentialMode) return;
+  for (const [id, group] of paneGroups) {
+    let view = credentialPanels.get(id);
+    if (!view) { view = makeCredentialPanel(group.pane, credentialActions(group)); credentialPanels.set(id, view); }
+    const confirmed = serverPaneGroups?.groups.find(record => record.id === id);
+    view.render(credentialRegistry.credentials, confirmed?.credential_id || null, !!confirmed, !registryLoaded);
+  }
+  if (!paneGroups.size) {
+    emptyCredentialPanel ||= makeCredentialPanel(workspace, credentialActions(null));
+    emptyCredentialPanel.overlay.classList.add('credential-workspace');
+    emptyCredentialPanel.render(credentialRegistry.credentials, null, false, !registryLoaded);
+  }
+}
+function showCredentialError(error) {
+  for (const view of credentialPanels.values()) view.error(error);
+  emptyCredentialPanel?.error(error);
+}
+function toggleCredentialView(enabled) {
+  credentialMode = enabled; credentialButton.setAttribute('aria-pressed', String(enabled));
+  renderCredentialView();
+  if (enabled) refreshCredentialState().catch(showCredentialError);
+}
+credentialButton.addEventListener('click', () => toggleCredentialView(!credentialMode));
+document.addEventListener('keydown', event => {
+  if (credentialMode && event.key === 'Escape' && !event.isComposing) {
+    event.preventDefault(); event.stopImmediatePropagation(); toggleCredentialView(false); credentialButton.focus({ preventScroll: true });
+  }
+}, true);
+
+function makeCredentialPanel(host, actions) {
+  const overlay = element('section', 'credential-overlay'); overlay.setAttribute('aria-label', 'Pane credentials');
+  const panel = element('div', 'credential-panel');
+  const label = element('div', 'credential-label'), name = element('strong'), type = element('span'); label.append(name, type);
+  const table = element('table', 'credential-list'); table.setAttribute('aria-label', 'Shared credentials');
+  const columns = element('colgroup'); for (let i = 0; i < 4; i++) columns.append(element('col'));
+  const rows = element('tbody'); table.append(columns, rows);
+  const empty = element('p', 'credential-empty', 'No credentials');
+  const add = element('div', 'credential-add');
+  const addKey = element('button', '', '+ API key'), addSubscription = element('button', '', '+ Subscription');
+  addKey.type = addSubscription.type = 'button'; add.append(addKey, addSubscription);
+  const error = element('p', 'error-banner'); error.hidden = true; error.setAttribute('role', 'alert');
+  panel.append(label, table, empty, add, error); overlay.append(panel); host.append(overlay);
+  let editor = null, signature = '';
+  async function act(button, operation) {
+    button.disabled = true; error.hidden = true;
+    try { await operation(); }
+    catch (failure) { showError(error, failure); }
+    finally { if (button.isConnected) button.disabled = false; }
+  }
+  function editKey(row = null) {
+    editor?.remove(); editor = element('form', 'credential-editor');
+    const nameLabel = element('label', '', 'Name'), nameInput = element('input');
+    nameInput.value = row?.name || ''; nameInput.placeholder = 'Automatic'; nameInput.autocomplete = 'off'; nameLabel.append(nameInput);
+    const keyLabel = element('label', '', 'Key'), keyInput = element('input');
+    keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.placeholder = row ? 'Keep current key' : 'API key'; keyInput.required = !row; keyLabel.append(keyInput);
+    const controls = element('div', 'credential-editor-actions');
+    const cancel = element('button', '', 'Cancel'), save = element('button', '', 'Save'); cancel.type = 'button'; save.type = 'submit';
+    cancel.onclick = () => { keyInput.value = ''; editor.remove(); editor = null; };
+    controls.append(cancel, save); editor.append(nameLabel, keyLabel, controls); panel.insertBefore(editor, error);
+    const form = editor;
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const values = { name: nameInput.value.trim(), key: keyInput.value.trim() };
+      nameInput.disabled = keyInput.disabled = cancel.disabled = true;
+      act(save, async () => {
+        try { await actions.saveKey(row?.id || null, values); keyInput.value = ''; form.remove(); if (editor === form) editor = null; }
+        finally { nameInput.disabled = keyInput.disabled = cancel.disabled = false; }
+      });
+    });
+    keyInput.focus({ preventScroll: true });
+  }
+  addKey.onclick = () => editKey();
+  async function subscription(id) {
+    const url = await actions.subscription(id);
+    if (url) { const link = element('a', '', 'Continue with ChatGPT'); link.href = url; link.target = '_blank'; link.rel = 'noopener'; error.replaceChildren(link); error.hidden = false; }
+  }
+  addSubscription.onclick = () => act(addSubscription, () => subscription(null));
+  return {
+    overlay,
+    dispose() { if (editor) editor.querySelector('input[type=password]').value = ''; overlay.remove(); },
+    error(failure) { showError(error, failure); },
+    render(credentials, selectedId, selectable = true, loading = false) {
+      const selected = credentials.find(row => row.id === selectedId);
+      const nameCounts = new Map();
+      for (const row of credentials) { const key = row.name.toLocaleLowerCase(); nameCounts.set(key, (nameCounts.get(key) || 0) + 1); }
+      const displayName = row => nameCounts.get(row.name.toLocaleLowerCase()) > 1 ? `${row.name} · ${row.id.slice(-8)}` : row.name;
+      name.textContent = selectable ? (selected ? displayName(selected) : selectedId ? 'Credential unavailable' : 'No credential selected') : 'Shared credentials'; name.title = name.textContent;
+      type.textContent = selectable && selected ? (selected.type === 'chatgpt' && (!selected.connected || !selected.plan_enabled) ? 'Reconnect needed' : selected.paused ? 'Paused' : 'Next request') : '';
+      let hash = 0; for (const char of selectedId || '') hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+      panel.style.setProperty('--credential-color', selected ? `hsl(${hash % 360} 28% 60%)` : '#777');
+      const next = JSON.stringify([credentials, selectedId, selectable, loading]); if (next === signature) return; signature = next;
+      rows.replaceChildren(); empty.hidden = credentials.length > 0; empty.textContent = loading ? 'Loading…' : 'No credentials';
+      for (const row of [...credentials].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id))) {
+        const tr = element('tr'); tr.dataset.credentialId = row.id; tr.setAttribute('aria-selected', String(row.id === selectedId));
+        const kind = element('td', 'credential-type', row.type === 'api_key' ? 'API key' : 'Subscription');
+        const rowName = displayName(row);
+        const identity = element('td'), choose = element('button', 'credential-name', rowName); choose.type = 'button'; choose.title = rowName;
+        choose.disabled = !selectable; choose.setAttribute('aria-label', `Use ${rowName}`); choose.onclick = () => act(choose, () => actions.select(row.id)); identity.append(choose);
+        const editCell = element('td'), edit = element('button', 'credential-action'); edit.type = 'button'; edit.setAttribute('aria-label', `Edit ${rowName}`);
+        edit.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"><path d="m3 10 7-7 3 3-7 7-4 1zM9 4l3 3"/></svg>';
+        edit.onclick = () => row.type === 'api_key' ? editKey(row) : act(edit, () => subscription(row.id)); editCell.append(edit);
+        const removeCell = element('td'), remove = element('button', 'credential-action', '×'); remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${rowName}`);
+        remove.onclick = () => act(remove, () => actions.remove(row.id)); removeCell.append(remove);
+        tr.onclick = event => { if (selectable && !event.target.closest('button') && !choose.disabled) choose.click(); };
+        tr.append(kind, identity, editCell, removeCell); rows.append(tr);
+      }
+    },
+  };
 }
 
 const screensNav = document.querySelector("#screens");
@@ -477,7 +689,10 @@ function renderScreens() {
         event.preventDefault(); link.classList.remove("drop-target");
         const pane = event.dataTransfer.getData("application/x-boid-pane");
         if (!pane) return;
-        try { receiveScreens(await request("/api/screens/move", "POST", { pane, screen: number })); }
+        try {
+          const result = await request("/api/screens/move", "POST", { pane, screen: number });
+          receiveScreens(result); if (result.pane_groups) receivePaneGroups(result.pane_groups);
+        }
         catch (error) { showError(workspaceError, error); }
       });
       screensNav.insertBefore(link, addScreenButton);
@@ -769,6 +984,7 @@ function layout(event) {
   for (const ui of sessions.values()) ui.reflow = true;
   const panes = [...workspace.querySelectorAll(".pane")];
   empty.hidden = panes.length > 0;
+  renderCredentialView();
   const columns = Math.max(1, Math.min(panes.length, Math.floor(workspace.clientWidth / 420)));
   workspace.style.setProperty("--columns", columns);
   workspace.style.setProperty("--rows", Math.max(1, Math.ceil(panes.length / columns)));
@@ -1149,7 +1365,6 @@ function reportUnsavedEnd(result) {
 }
 
 function removeSession(ui) {
-  if (loginOwner === ui) closeLogin();
   ui.skillRequest = (ui.skillRequest || 0) + 1;
   ui.traceResize.disconnect();
   ui.overlayResize.disconnect();
@@ -1282,6 +1497,7 @@ function restorePosition(ui) {
 }
 
 document.addEventListener("selectionchange", () => {
+  if (credentialMode) return;
   for (const ui of sessions.values()) {
     if (selectedWithin(ui.trace)) {
       ui.follow = false;
@@ -1364,7 +1580,7 @@ async function openModelPicker(ui) {
 }
 
 function pickerOpen(ui) {
-  return loginOwner === ui || !ui.modelPicker.hidden || !ui.skillPicker.hidden;
+  return !ui.modelPicker.hidden || !ui.skillPicker.hidden;
 }
 
 function closeSkillPicker(ui) {
@@ -1778,7 +1994,7 @@ function addSession(view) {
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
     const commands = {
-      "/login": "/login  Choose API or subscription",
+      "/login": "/login  Choose credentials",
       "/model": "/model  Select model and effort",
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
@@ -2610,7 +2826,7 @@ function setPending(ui, pending) {
 function acceptSessionResponse(view, startedAt) {
   const lifecycle = sessionLifecycle.get(String(view.id));
   if (view.archived || view.status === "ending" || (lifecycle && !lifecycle.open && lifecycle.revision > startedAt)) {
-    throw new Error("This agent has ended. Choose it from Inactive sessions to reopen.");
+    throw new Error("This agent has ended.");
   }
   sessionLifecycle.set(String(view.id), { open: true, revision: ++catalogRevision });
   const ui = addSession(view);
@@ -2747,13 +2963,18 @@ function startEvents() {
       if (message.type === "snapshot") {
         lastSequence = message.seq;
         receiveScreens(message.screens, false);
+        if (message.pane_groups) receivePaneGroups(message.pane_groups, false);
         snapshot(message.sessions, message.terminals || [], message.catalog);
+        if (credentialMode) request('/api/credentials').then(receiveCredentialRegistry).catch(showCredentialError);
         screenLoaded?.(); screenLoaded = null;
         return;
       }
       if (message.seq <= lastSequence) return;
       lastSequence = message.seq;
       const revision = ++catalogRevision;
+      if (message.type === 'credentials') { receiveCredentialRegistry(message.registry); return; }
+      if (message.type === 'pane_groups') { receivePaneGroups(message.pane_groups); return; }
+      if (message.pane_groups) receivePaneGroups(message.pane_groups, false);
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
       if (["session", "closed", "status", "name"].includes(message.type)) refreshChoices();
@@ -2992,7 +3213,7 @@ async function createAgent(group = null, button = document.querySelector('#add-a
   button.disabled = true; workspaceError.hidden = true;
   const screen = activeScreen, startedAt = catalogRevision;
   try {
-    const view = await request(`/api/sessions?screen=${screen}`, 'POST', { name: '', cwd: '~' });
+    const view = await request(`/api/sessions?screen=${screen}${group && serverPaneGroups ? `&group_id=${encodeURIComponent(group.record.id)}` : ''}`, 'POST', { name: '', cwd: '~' });
     const key = `agent:${view.id}`;
     screenCatalog.panes[key] ??= screen;
     if (paneScreen(key) !== activeScreen) {
@@ -3007,7 +3228,7 @@ async function createAgent(group = null, button = document.querySelector('#add-a
       return;
     }
     const ui = acceptSessionResponse(view, startedAt);
-    if (group && paneGroups.get(group.record.id) === group) moveSubpane(ui, group);
+    if (group && paneGroups.get(group.record.id) === group && ui.group !== group) await moveSubpane(ui, group);
     focusSession(ui);
   } catch (error) {
     showError(workspaceError, error);
@@ -3019,35 +3240,33 @@ async function createAgent(group = null, button = document.querySelector('#add-a
   finally { button.disabled = false; }
 }
 const sessionHistory = element('dialog', 'session-history');
-sessionHistory.setAttribute('aria-label', 'Session history');
+sessionHistory.setAttribute('aria-label', 'Active agents');
 document.body.append(sessionHistory);
 let historyGeneration = 0;
 async function openSessionHistory(group = null) {
   const generation = ++historyGeneration;
   const header = element('header', 'diagnostics-header');
-  const close = element('button', '', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close session history'); close.onclick = () => sessionHistory.close();
-  header.append(element('h1', '', 'Sessions'), close);
+  const close = element('button', '', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close active agents'); close.onclick = () => sessionHistory.close();
+  header.append(element('h1', '', 'Active agents'), close);
   const body = element('div', 'session-history-list'), error = element('p', 'error-banner'); error.hidden = true;
   sessionHistory.replaceChildren(header, body, error);
   if (!sessionHistory.open) sessionHistory.showModal();
   try {
-    const [active, inactive] = await Promise.all([request('/api/sessions?history=recent'), request('/api/sessions/archived?history=recent')]);
+    const active = await request('/api/sessions?history=recent');
     if (generation !== historyGeneration || !sessionHistory.open) return;
-    for (const [label, records, archived] of [['Active sessions', active, false], ['Inactive sessions', inactive, true]]) {
-      body.append(element('h2', '', label));
+    for (const records of [active.filter(record => !record.archived)]) {
       if (!records.length) body.append(element('p', 'session-empty', 'None'));
       for (const record of records) {
         const card = element('button', 'session-card', record.name || record.id); card.type = 'button'; card.dataset.sessionId = String(record.id);
-        card.disabled = record.status === 'ending' || (archived && !record.archived);
+        card.disabled = record.status === 'ending';
         card.onclick = async () => {
           card.disabled = true;
           try {
             const startedAt = catalogRevision;
-            const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? '/reopen?history=recent' : '/history'}`, archived ? 'POST' : 'GET');
+            const view = await request(`/api/sessions/${encodeURIComponent(record.id)}/history`);
             const destination = paneScreen(`agent:${view.id}`);
             if (destination !== activeScreen) await switchScreen(destination);
             const ui = acceptSessionResponse(view, startedAt);
-            if (archived && group && paneGroups.get(group.record.id) === group) moveSubpane(ui, group);
             sessionHistory.close(); focusSession(ui);
           } catch (failure) { showError(error, failure); card.disabled = false; }
         };
@@ -3118,8 +3337,8 @@ function diagnosticRow(list, label, value, reason) {
 
 function renderDiagnostics(resetMissing = true) {
   if (!diagnosticsData) return;
-  const records = diagnosticsData.sessions || [];
-  const options = JSON.stringify(records.map(record => [record.id, record.name, record.archived]));
+  const records = (diagnosticsData.sessions || []).filter(record => !record.archived);
+  const options = JSON.stringify(records.map(record => [record.id, record.name]));
   if (options !== diagnosticsOptions) {
     diagnosticsOptions = options;
     const all = element("option", null, "All agents");
@@ -3127,7 +3346,7 @@ function renderDiagnostics(resetMissing = true) {
     diagnosticsScope.replaceChildren(all);
     for (const record of records) {
       const duplicate = records.filter(other => other.name === record.name).length > 1;
-      const name = (record.name || "Agent") + (duplicate ? ` (${String(record.id).slice(0, 6)})` : "") + (record.archived ? " · ended" : "");
+      const name = (record.name || "Agent") + (duplicate ? ` (${String(record.id).slice(0, 6)})` : "");
       const option = element("option", null, name);
       option.value = String(record.id);
       diagnosticsScope.append(option);
@@ -3318,8 +3537,7 @@ function requireLogin() {
   addScreenButton.disabled = true;
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
-  diagnosticsButton.disabled = true;
-  closeLogin();
+  diagnosticsButton.disabled = true; credentialButton.disabled = true; toggleCredentialView(false);
   if (diagnosticsDialog.open) diagnosticsDialog.close();
 }
 
@@ -3341,7 +3559,7 @@ async function connect(token) {
   addScreenButton.disabled = false;
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
-  diagnosticsButton.disabled = false;
+  diagnosticsButton.disabled = false; credentialButton.disabled = false;
 
   startEvents();
   for (const ui of terminals.values()) ui.reconnect();
@@ -3386,11 +3604,7 @@ document.addEventListener("focusin", event => {
   selected = ui?.pane || null;
 });
 document.addEventListener("keydown", async event => {
-  if (diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
-  if (loginOwner && selected === loginOwner.pane) {
-    if (event.key === "Escape" && !event.isComposing) { event.preventDefault(); closeLogin(); }
-    return;
-  }
+  if (credentialMode || diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
   if (skillPicker && event.key === "Escape" && !event.isComposing && !event.defaultPrevented) {
     event.preventDefault(); closeSkillPicker(skillPicker); return;
@@ -3437,163 +3651,16 @@ document.addEventListener("keydown", async event => {
   }
   finally { ui.interrupting = false; }
 });
-const loginPanel = document.querySelector("#provider-login");
-const standaloneLogin = element("dialog", "standalone-login");
-standaloneLogin.setAttribute("aria-label", "Connect provider");
-document.body.append(standaloneLogin);
-standaloneLogin.addEventListener("cancel", event => { event.preventDefault(); closeLogin(); });
-const providerError = document.querySelector("#provider-login-error");
-const providerStatus = document.querySelector("#provider-login-status");
-const subscriptionAccount = document.querySelector("#subscription-account");
-let loginOwner = null, loginTimer, loginGeneration = 0, loginStatus, loginSignature = "";
-let loginMethod = "";
-function closeLogin() {
-  clearTimeout(loginTimer); loginGeneration++;
-  const owner = loginOwner; loginOwner = null;
-  loginPanel.hidden = true; document.body.append(loginPanel);
-  document.querySelector("#provider-api-key").value = "";
-  if (!owner) return;
-  if (owner.composer) { owner.composer.hidden = false; updateActivity(owner); owner.input.focus({ preventScroll: true }); }
-  else { standaloneLogin.close(); document.querySelector("#add-agent").focus({ preventScroll: true }); }
-}
-function openLogin(ui = { pane: standaloneLogin }) {
-  closeLogin(); loginOwner = ui; loginMethod = ""; loginSignature = ""; loginStatus = null;
-  subscriptionAccount.replaceChildren();
-  if (ui.composer) {
-    ui.slashSuggestion.hidden = true; ui.modelPicker.hidden = true; ui.skillPicker.hidden = true;
-    ui.composer.hidden = true; clearPromptSpaceWhenHidden(ui); updateActivity(ui);
-  } else standaloneLogin.showModal();
-  ui.pane.append(loginPanel); loginPanel.hidden = false;
-  providerError.hidden = true; providerStatus.textContent = "";
-  document.querySelector("#api-key-login").hidden = true;
-  document.querySelector("#subscription-login").hidden = true;
-  for (const button of loginPanel.querySelectorAll("[data-login-method]")) button.setAttribute("aria-pressed", "false");
-  loginPanel.querySelector("[data-login-method]").focus({ preventScroll: true });
-  refreshLogin();
-}
-function chooseLoginMethod(method) {
-  loginMethod = method; providerError.hidden = true;
-  for (const button of loginPanel.querySelectorAll("[data-login-method]")) button.setAttribute("aria-pressed", String(button.dataset.loginMethod === method));
-  document.querySelector("#api-key-login").hidden = method !== "api_key";
-  document.querySelector("#subscription-login").hidden = method !== "chatgpt";
-  if (method === "api_key") {
-    document.querySelector("#api-key-label").hidden = Boolean(loginStatus?.api_key_available);
-    document.querySelector("#api-key-ready").hidden = !loginStatus?.api_key_available;
-    if (!loginStatus?.api_key_available) document.querySelector("#provider-api-key").focus();
-  } else refreshSubscription();
-}
-async function refreshLogin() {
-  clearTimeout(loginTimer);
-  if (!loginOwner) return;
-  if (!loginOwner.pane.isConnected) { closeLogin(); return; }
-  const generation = loginGeneration;
-  try {
-    const status = await request("/api/accounts");
-    if (!loginOwner || generation !== loginGeneration) return;
-    loginStatus = status;
-    const signature = JSON.stringify(status);
-    if (signature !== loginSignature) {
-      loginSignature = signature;
-      if (loginMethod) chooseLoginMethod(loginMethod);
-    }
-  } catch (error) { if (generation === loginGeneration) showError(providerError, error); }
-  finally { if (loginOwner && generation === loginGeneration) loginTimer = setTimeout(refreshLogin, 2000); }
-}
-async function refreshSubscription() {
-  if (!loginStatus) return;
-  const previous = subscriptionAccount.value;
-  subscriptionAccount.replaceChildren();
-  for (const account of loginStatus.accounts) {
-    const option = element("option", null, `${account.label}${account.connected ? "" : " · signed out"}`);
-    option.value = account.id; subscriptionAccount.append(option);
+function openLogin(ui = null) {
+  if (ui) {
+    selectSubpane(ui); ui.slashSuggestion.hidden = true; ui.modelPicker.hidden = true; ui.skillPicker.hidden = true;
   }
-  const preferred = previous || loginOwner?.view?.profile?.chatgpt_account || loginStatus.selected_account;
-  if ([...subscriptionAccount.options].some(option => option.value === preferred)) subscriptionAccount.value = preferred;
-  document.querySelector("#subscription-selection").hidden = !loginStatus.accounts.length;
-  subscriptionActions();
+  toggleCredentialView(true);
+  const panel = ui?.group ? credentialPanels.get(ui.group.record.id) : emptyCredentialPanel || credentialPanels.values().next().value;
+  panel?.overlay.querySelector('button')?.focus({ preventScroll: true });
 }
-function subscriptionActions() {
-  const account = loginStatus?.accounts.find(account => account.id === subscriptionAccount.value);
-  const submit = document.querySelector("#subscription-selection button"); submit.disabled = true;
-  const actions = document.querySelector("#subscription-actions"); actions.replaceChildren();
-  if (!account) return;
-  const action = (label, run) => {
-    const button = element("button", null, label); button.type = "button";
-    button.addEventListener("click", async () => { button.disabled = true; try { await run(); }
-      catch (error) { showError(providerError, error); } finally { button.disabled = false; } });
-    actions.append(button);
-  };
-  if (!account.connected || !account.plan_enabled) {
-    action(account.connected ? "Enable subscription" : "Reconnect", () => signInChatGPT(account.id, !account.plan_enabled));
-  }
-  if (account.connected) action("Sign out", async () => {
-    const result = await request(`/api/accounts/${encodeURIComponent(account.id)}/logout`, "POST");
-    loginSignature = ""; await refreshLogin();
-    if (!result.revocation_confirmed) showError(providerError, result.message);
-  });
-  if (account.paused) {
-    actions.append(element("p", null, "Requests paused after a usage limit. Review ChatGPT settings before resuming."));
-    action("Resume requests", async () => { await request(`/api/accounts/${encodeURIComponent(account.id)}/resume`, "POST"); loginSignature = ""; await refreshLogin(); });
-  }
-  submit.disabled = !account.connected || !account.plan_enabled || account.paused;
-}
-
-async function signInChatGPT(account = null, consent = false) {
-  providerError.hidden = true;
-  const popup = window.open("about:blank", "boid-chatgpt-sign-in");
-  try {
-    const result = await request("/api/accounts/sign-in", "POST", { origin: location.origin, account, consent });
-    if (popup) { popup.opener = null; popup.location.href = result.start_url; }
-    else { const link = element("a", null, "Continue with ChatGPT"); link.href = result.start_url; link.target = "_blank"; link.rel = "noopener";
-      providerError.replaceChildren(link); providerError.hidden = false; }
-  } catch (error) { popup?.close(); showError(providerError, error); }
-}
-loginPanel.addEventListener("keydown", event => {
-  event.stopPropagation();
-  if (event.key === "Escape" && !event.isComposing) { event.preventDefault(); closeLogin(); }
-});
-document.querySelector("#close-provider-login").addEventListener("click", closeLogin);
-function restoreLoginFocus() {
-  if (loginOwner) loginPanel.querySelector('[data-login-method="chatgpt"]').focus({ preventScroll: true });
-}
-document.querySelector("#plan-welcome").addEventListener("close", restoreLoginFocus);
 document.querySelector("#plan-welcome form").addEventListener("submit", event => {
-  event.preventDefault(); document.querySelector("#plan-welcome").close(); restoreLoginFocus();
-});
-for (const button of loginPanel.querySelectorAll("[data-login-method]")) button.addEventListener("click", () => chooseLoginMethod(button.dataset.loginMethod));
-document.querySelector("#chatgpt-sign-in").addEventListener("click", () => signInChatGPT());
-subscriptionAccount.addEventListener("change", subscriptionActions);
-document.querySelector("#api-key-login").addEventListener("submit", async event => {
-  event.preventDefault(); providerError.hidden = true;
-  const owner = loginOwner, generation = loginGeneration;
-  const button = event.submitter; button.disabled = true;
-  const field = document.querySelector("#provider-api-key"), key = field.value.trim(); field.value = "";
-  try {
-    if (!loginStatus?.api_key_available) {
-      if (!key) throw new Error("Enter an OpenAI API key.");
-      await request("/api/accounts/api-key", "POST", { key });
-    }
-    const result = await request("/api/accounts/select", "POST", { session_id: owner.composer ? owner.id : undefined, billing_route: "api_key" });
-    if (owner.composer) updateProfile(owner, result.profile, result.context_window);
-    if (loginOwner !== owner || generation !== loginGeneration) return;
-    loginSignature = ""; await refreshLogin();
-    providerStatus.textContent = "API key connected.";
-  } catch (error) { showError(providerError, error); }
-  finally { button.disabled = false; }
-});
-document.querySelector("#subscription-selection").addEventListener("submit", async event => {
-  event.preventDefault(); providerError.hidden = true;
-  const owner = loginOwner, generation = loginGeneration;
-  const button = event.submitter; button.disabled = true;
-  try {
-    const result = await request("/api/accounts/select", "POST", { session_id: owner.composer ? owner.id : undefined, billing_route: "chatgpt", account: subscriptionAccount.value });
-    if (owner.composer) updateProfile(owner, result.profile, result.context_window);
-    if (loginOwner !== owner || generation !== loginGeneration) return;
-    loginSignature = ""; await refreshLogin();
-    providerStatus.textContent = "Subscription connected.";
-    if (result.welcome) document.querySelector("#plan-welcome").showModal();
-  } catch (error) { showError(providerError, error); }
-  finally { if (loginOwner === owner && generation === loginGeneration) subscriptionActions(); }
+  event.preventDefault(); document.querySelector("#plan-welcome").close(); credentialButton.focus({ preventScroll: true });
 });
 
 setInterval(() => {

@@ -18,6 +18,9 @@
     <button id="open-diagnostics" type="button" aria-label="Diagnostics" title="Diagnostics" aria-haspopup="dialog" aria-controls="diagnostics-dialog" disabled>
       <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" fill="none" stroke="currentColor"><path d="M2 10V6m4 4V2m4 8V4" stroke-width="1.5"/></svg>
     </button>
+    <button id="open-credentials" type="button" aria-label="Credentials" title="Credentials" aria-pressed="false" disabled>
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M5 7V5a3 3 0 0 1 6 0v2"/><rect x="3" y="7" width="10" height="8" rx="1"/><path d="M8 10v2"/></svg>
+    </button>
   </nav>
   <div id="workspace-error" class="error-banner" role="alert" hidden></div>
   <form id="login" hidden>
@@ -41,28 +44,6 @@
     <p id="diagnostics-error" class="error-banner" role="alert" hidden></p>
     <div id="diagnostics-content" aria-live="polite"></div>
   </dialog>
-  <section id="provider-login" class="login-picker" aria-label="Login" hidden>
-    <header class="login-heading"><strong>/login</strong><button id="close-provider-login" type="button" aria-label="Close login">×</button></header>
-    <div class="login-methods" aria-label="Login method">
-      <button type="button" data-login-method="api_key" aria-pressed="false">API key</button>
-      <button type="button" data-login-method="chatgpt" aria-pressed="false">ChatGPT subscription</button>
-    </div>
-    <p id="provider-login-error" class="error-banner" role="alert" hidden></p>
-    <form id="api-key-login" hidden>
-      <label id="api-key-label">OpenAI API key <input id="provider-api-key" type="password" autocomplete="off" spellcheck="false"></label>
-      <p id="api-key-ready" hidden>A server API key is configured.</p>
-      <button type="submit">Use API key</button>
-    </form>
-    <div id="subscription-login" hidden>
-      <button id="chatgpt-sign-in" type="button" data-oai-siwc-button>Continue with ChatGPT</button>
-      <form id="subscription-selection" hidden>
-        <label>Account <select id="subscription-account" required></select></label>
-        <button type="submit">Use subscription</button>
-      </form>
-      <div id="subscription-actions"></div>
-    </div>
-    <p id="provider-login-status" role="status"></p>
-  </section>
   <dialog id="plan-welcome" aria-labelledby="plan-welcome-title">
     <h1 id="plan-welcome-title">You're using your ChatGPT plan</h1>
     <p>Eligible requests use your ChatGPT plan or credits. Review limits and access in ChatGPT settings.</p>

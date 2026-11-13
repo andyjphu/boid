@@ -29,14 +29,14 @@ const view = id => ({ id, name: id, cwd: '/mock/home', status: 'idle', pending: 
       if(url.pathname==='/api/config')return route.fulfill({json:{cwd:'/tmp',agent_names:['wren','finch']}});
       if(url.pathname==='/api/screens')return route.fulfill({json:screens});
       if(url.pathname.endsWith('/messages')){posts.push(route);return;}
-      if(url.pathname==='/api/sessions/archived')return route.fulfill({json:archived});
+      if(url.pathname==='/api/sessions/archived')assert.fail('Archived agents must not be requested');
       if(url.pathname==='/api/sessions'&&method==='POST'){
         assert.deepEqual(route.request().postDataJSON(),{name:'',cwd:'~'});
         const agent=view(`wren-${++created}`);agents.push(agent);screens.panes[`agent:${agent.id}`]=Number(url.searchParams.get('screen')||1);
         await emit({type:'session',session:agent});return route.fulfill({json:agent});
       }
-      if(url.pathname==='/api/sessions')return route.fulfill({json:agents});
-      if(url.pathname.endsWith('/reopen')){const a={...archived.shift(),archived:false};agents.push(a);await emit({type:'session',session:a});return route.fulfill({json:a});}
+      if(url.pathname==='/api/sessions')return route.fulfill({json:[...agents,...archived]});
+      if(url.pathname.endsWith('/reopen'))assert.fail('Ended agent IDs must not be reopened');
       if(url.pathname.endsWith('/history')){const agent=agents.find(a=>url.pathname.includes(`/${a.id}/`));return route.fulfill({json:url.searchParams.has('around')?{...agent,history:{start:0,end:agent.entries.length,total:agent.entries.length,seq}}:agent});}
       if(url.pathname.startsWith('/api/sessions/')&&method==='DELETE'){
         const id=url.pathname.split('/').at(-1);agents.splice(agents.findIndex(a=>a.id===id),1);await emit({type:'closed',session_id:id});return route.fulfill({json:{}});
@@ -108,12 +108,13 @@ const view = id => ({ id, name: id, cwd: '/mock/home', status: 'idle', pending: 
     await page.locator('#add-agent').click();await page.waitForFunction(()=>sessions.has('wren-2'));await frames();assert.equal(await page.locator('.pane-group').count(),2);
     await page.locator('#add-terminal').click();await page.waitForFunction(()=>terminals.has('t2'));assert.equal(await page.locator('.pane-cwd:visible').count(),0);
     if(process.env.SCREENSHOT)await page.screenshot({path:process.env.SCREENSHOT.replace('.png','-normal.png')});
-    // History remains accessible without exposing any creation form or directory chooser.
-    await group('agent:a').locator('.subpane-add').click({button:'right'});await page.waitForSelector('.session-history[open] .session-card[data-session-id="old"]');
-    assert.match(await page.locator('.session-history').innerText(),/Active sessions/);assert.match(await page.locator('.session-history').innerText(),/Inactive sessions/);
-    if(process.env.SCREENSHOT)await page.screenshot({path:process.env.SCREENSHOT.replace('.png','-history.png')});
-    assert.equal(await page.locator('.session-history input').count(),0);await page.locator('.session-history .session-card[data-session-id="old"]').click();await page.waitForFunction(()=>sessions.get('old')?.group===sessions.get('b')?.group);await frames();
-    assert.ok((await order('agent:a')).includes('agent:old'));
+    // Only active agents remain accessible; archived IDs are never offered or reopened.
+    await group('agent:a').locator('.subpane-add').click({button:'right'});await page.waitForSelector('.session-history[open] .session-card[data-session-id="b"]');
+    assert.match(await page.locator('.session-history').innerText(),/Active agents/);
+    assert.equal(await page.locator('.session-history .session-card[data-session-id="old"]').count(),0);
+    if(process.env.SCREENSHOT)await page.screenshot({path:process.env.SCREENSHOT.replace('.png','-active-agents.png')});
+    assert.equal(await page.locator('.session-history input').count(),0);await page.locator('.session-history .session-card[data-session-id="b"]').click();await frames();
+    assert.equal(await tab('agent:b').getAttribute('aria-selected'),'true');
     // Close the original group key while another tab remains: the group and other sessions survive.
     await tab('agent:a').click();await tab('agent:a').getByRole('button',{name:'Close a',exact:true}).click();await frames();
     assert.equal(await group('agent:a').count(),1);assert.ok((await order('agent:a')).includes('agent:b'));
@@ -128,6 +129,6 @@ const view = id => ({ id, name: id, cwd: '/mock/home', status: 'idle', pending: 
     assert.equal(await group('agent:a').locator('.pane-tabs').evaluate(node=>node.scrollLeft),0,'deliberate strip scrolling is not undone');
     const finalOrder=await order('agent:a');await page.reload();await page.waitForFunction(()=>sessions.size>5);await frames();assert.deepEqual(await order('agent:a'),finalOrder);
     assert.deepEqual(errors,[]);
-    console.log('PASS: mixed tabs, stable selection/order, drag reorder, socket/draft/anchor continuity, real-ACK composer, direct creation, home contract, hidden cwd, history reopen, close, overflow and refresh');
+    console.log('PASS: mixed tabs, stable selection/order, drag reorder, socket/draft/anchor continuity, real-ACK composer, direct creation, home contract, hidden cwd, active agents only, close, overflow and refresh');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

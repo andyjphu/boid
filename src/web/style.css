@@ -338,16 +338,6 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .diagnostics-reason { display: block; }
 #diagnostics-error { padding: 0; margin: 7px 0; }
 
-.login-picker { flex-shrink: 0; max-height: 80%; overflow: auto; border-top: 1px solid #383838; padding: 8px; }
-.login-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.login-heading button { border: 0; padding: 0 5px; }
-.login-methods { display: flex; gap: 6px; flex-wrap: wrap; }
-.login-methods button[aria-pressed="true"] { border-color: #aaa; background: #383838; }
-.login-picker form, .login-picker label { display: grid; gap: 6px; }
-.login-picker form { margin: 10px 0; }
-.login-picker select, .login-picker input { width: 100%; min-width: 0; background: #292929; color: inherit; border: 1px solid #555; padding: 4px; }
-#subscription-login { margin-top: 10px; }
-#subscription-actions button { margin: 4px 4px 6px 0; }
 #chatgpt-sign-in { background: #111; color: #fff; padding: 8px 12px; }
 
 .history-spacer { pointer-events: none; overflow-anchor: none; }
@@ -394,5 +384,30 @@ body.disconnected #screens { opacity: .45; }
 
 .pane-tab.needs-answer { box-shadow: inset 0 -2px #d46a60; }
 .pane-tab.needs-answer .pane-title { color: #ffb5aa; }
-.standalone-login { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid #555; background: #222; color: inherit; }
-.standalone-login .login-picker { max-height: 75vh; }
+
+/* Credential view overlays foreground panes; their sessions keep running. */
+#open-credentials[aria-pressed="true"] { background: #414141; color: #fff; }
+.credential-overlay { position: absolute; inset: 26px 0 0; z-index: 8; overflow: auto; background: #88888812; padding: 8px; }
+.credential-panel { width: 100%; max-width: 480px; margin: 0 auto; padding: 8px; background: #252525; border: 1px solid #555; border-top: 2px solid var(--credential-color, #777); }
+.credential-label { display: flex; align-items: baseline; gap: 6px; min-width: 0; margin-bottom: 7px; color: #eee; }
+.credential-label strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.credential-label span { color: #999; white-space: nowrap; }
+.credential-list { border-collapse: collapse; width: 100%; table-layout: fixed; }
+.credential-list col:first-child { width: 79px; }
+.credential-list col:nth-last-child(-n+2) { width: 26px; }
+.credential-list td { padding: 3px 2px; border-top: 1px solid #363636; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.credential-list tr[aria-selected="true"] { background: #3b4650; }
+.credential-type { color: #aaa; }
+.credential-name { padding: 0; border: 0; border-radius: 0; width: 100%; text-align: left; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.credential-action { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: 0; }
+.credential-action svg { width: 12px; height: 12px; }
+.credential-add { display: flex; gap: 6px; margin-top: 7px; }
+.credential-add button { flex: 1; min-width: 0; padding: 3px 5px; border-radius: 0; }
+.credential-editor { display: grid; gap: 6px; margin-top: 8px; padding-top: 7px; border-top: 1px solid #555; }
+.credential-editor label { display: grid; grid-template-columns: 45px minmax(0, 1fr); align-items: center; gap: 5px; color: #aaa; }
+.credential-editor input { width: 100%; min-width: 0; padding: 3px 4px; border: 1px solid #555; border-radius: 0; background: #1d1d1d; color: #ddd; }
+.credential-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.credential-panel .error-banner { padding: 6px 0 0; margin: 0; }
+.credential-empty { color: #999; margin: 6px 0; }
+
+.credential-workspace { inset: 0; }
