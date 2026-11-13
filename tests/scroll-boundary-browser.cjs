@@ -101,6 +101,8 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
     assert.deepEqual(defaults, { bottom: true, zoom: false, horizontal: false, interior: false,
       topCrossing: true, top: 0, topOutward: true, pageCrossing: true });
     await page.waitForTimeout(150);
+    await page.evaluate(() => { document.body.style.zoom = 1; window.scrollTo(0, 0); restorePosition(sessions.get("a")); });
+    await page.waitForTimeout(150);
     if (process.env.BOID_SCREENSHOT) await page.screenshot({ path: process.env.BOID_SCREENSHOT });
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ results, defaults, errors }, null, 2));
