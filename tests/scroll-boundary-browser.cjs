@@ -10,6 +10,7 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
   try {
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
     const errors = [], results = [];
+    const cdp = await page.context().newCDPSession(page);
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       window.EventSource = class { constructor() { window.testEvents = this; } close() {} };
@@ -43,7 +44,7 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
         return { top: ui.trace.scrollTop, end: ui.trace.scrollHeight - ui.trace.clientHeight, follow: ui.follow };
       };
     });
-    for (const history of [false, true]) for (const zoom of [1, 1.1, 1.25]) {
+    for (const hovered of [true, false]) for (const history of [false, true]) for (const zoom of [1, 1.1, 1.25]) {
       await page.evaluate(({ history, zoom }) => {
         for (const ui of [...sessions.values()]) removeSession(ui);
         document.body.style.zoom = zoom;
@@ -53,15 +54,24 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
       }, { history, zoom });
       await page.locator('.trace').hover();
       await page.waitForTimeout(200);
+      const box = await page.locator('.trace').boundingBox();
+      // macOS inactive-window scrolling can arrive without pointer enter/hover.
+      // CDP wheel coordinates do not synthesize the missing mouse move.
+      if (!hovered) await page.mouse.move(1, 1);
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => promptVisible(sessions.get('a'))), hovered);
+      const wheel = deltaY => cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x: box.x + box.width / 2, y: box.y + box.height / 2, deltaX: 0, deltaY,
+      });
       await page.evaluate(() => {
         moves.length = 0;
         window.streamTimer = setInterval(() => putEntry(sessions.get('a'), { id: '299', text: '.' }, true), 8);
       });
       try {
-        for (let i = 0; i < 30; i++) { await page.mouse.wheel(0, 300); await page.waitForTimeout(10); }
+        for (let i = 0; i < 30; i++) { await wheel(300); await page.waitForTimeout(10); }
       } finally { await page.evaluate(() => clearInterval(streamTimer)); }
       await page.waitForTimeout(150);
-      const result = { history, zoom, ...await page.evaluate(() => ({
+      const result = { hovered, history, zoom, ...await page.evaluate(() => ({
         state: inspectScroll(), upwardCorrections: moves.filter(move => move.after < move.before).length,
       })) };
       results.push(result);
@@ -70,15 +80,27 @@ const root = process.env.BOID_WEB_ROOT || path.resolve(__dirname, '../src/web');
 
       // Small reverse gestures must leave follow mode immediately.
       const before = await page.evaluate(() => inspectScroll());
-      await page.mouse.wheel(0, -4);
+      await wheel(-4);
       await page.waitForTimeout(150);
       const reading = await page.evaluate(() => inspectScroll());
       assert.equal(reading.follow, false);
       assert.ok(reading.top < before.top - 1, 'Small upward wheel remained stuck');
-      await page.mouse.wheel(0, 100000);
+      await wheel(100000);
       await page.waitForTimeout(150);
       const resumed = await page.evaluate(() => inspectScroll());
-      assert.equal(resumed.follow, true, JSON.stringify({ history, zoom, before, reading, resumed }));
+      assert.equal(resumed.follow, true, JSON.stringify({ hovered, history, zoom, before, reading, resumed }));
+      if (!hovered) {
+        // Hidden composer clearance is a retained endpoint, not a permanent gap.
+        await page.evaluate(() => putEntry(sessions.get('a'), { id: '299', text: '\nMore output'.repeat(20) }, true));
+        await page.waitForTimeout(150);
+        const filled = await page.evaluate(() => {
+          const ui = sessions.get('a');
+          return { top: ui.trace.scrollTop, bottom: messageBottom(ui), follow: ui.follow, clearance: ui.followClearance };
+        });
+        assert.equal(filled.follow, true);
+        assert.equal(filled.clearance, 0);
+        assert.ok(Math.abs(filled.top - filled.bottom) <= 1, JSON.stringify(filled));
+      }
     }
 
     // Edge events must be consumed before a browser can overscroll. Interior

@@ -191,7 +191,7 @@ views.forEach(view => view.communications = [message]);
     const composer = page.locator('[data-pane-key="agent:sender"] .composer textarea');
     await composer.fill('/');
     assert.deepEqual(await page.locator('.slash-option:visible').allTextContents(), [
-      '/login  Choose API or subscription', '/model  Select model and effort', '/skills  Select a skill',
+      '/login  Choose credentials', '/model  Select model and effort', '/skills  Select a skill',
       '/oai-compact  Compact OpenAI context', '/clear  Start fresh model context'
     ]);
     await composer.press('ArrowDown');
