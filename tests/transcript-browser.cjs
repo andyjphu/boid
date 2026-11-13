@@ -188,7 +188,7 @@ views.forEach(view => view.communications = [message]);
     assert.equal(await page.evaluate(() => sessions.get('sender').mounted.size), 201);
 
     // Slash commands are discoverable, keyboard-selectable, and submitted exactly.
-    const composer = page.locator('[data-pane-key="agent:sender"] textarea');
+    const composer = page.locator('[data-pane-key="agent:sender"] .composer textarea');
     await composer.fill('/');
     assert.deepEqual(await page.locator('.slash-option:visible').allTextContents(), [
       '/login  Choose API or subscription', '/model  Select model and effort', '/skills  Select a skill',

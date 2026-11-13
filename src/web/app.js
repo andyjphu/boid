@@ -801,14 +801,20 @@ function rememberPosition(ui) {
   ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
 }
 
+function traceEnd(ui) {
+  return Math.max(0, ui.trace.scrollHeight - ui.trace.clientHeight);
+}
+
 function scrollTrace(ui, top) {
-  if (Math.abs(ui.trace.scrollTop - top) > 0.5) ui.trace.scrollTop = top;
+  top = Math.max(0, Math.min(top, traceEnd(ui)));
+  // Scroll metrics round to whole pixels; scrollTop can retain a fraction.
+  if (Math.abs(ui.trace.scrollTop - top) > 1) ui.trace.scrollTop = top;
   // Programmatic movement must not be interpreted as a new reading gesture.
   ui.lastScrollTop = ui.trace.scrollTop;
 }
 
 function atTraceEnd(ui) {
-  return ui.trace.scrollTop >= ui.trace.scrollHeight - ui.trace.clientHeight - 1;
+  return ui.trace.scrollTop >= traceEnd(ui) - 1;
 }
 
 function restorePosition(ui) {
@@ -1229,8 +1235,7 @@ function addSession(view) {
     ui.follow = (wasFollowing ? atBottom(ui) : movedDown && atTraceEnd(ui))
       && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total);
     ui.followClearance = ui.follow && promptVisible(ui)
-      ? Math.min(ui.overlay.getBoundingClientRect().height + composerPadding,
-        Math.max(0, ui.trace.scrollTop - messageBottom(ui))) : 0;
+      ? Math.max(0, Math.min(ui.trace.scrollTop, traceEnd(ui)) - messageBottom(ui)) : 0;
     rememberPosition(ui);
     if (ui.follow && !wasFollowing) scheduleTranscript(ui);
     if (ui.history) {
@@ -1240,15 +1245,32 @@ function addSession(view) {
     }
   }, { passive: true });
   ui.trace.addEventListener("wheel", event => {
+    if (event.ctrlKey || event.shiftKey || !event.deltaY || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? parseFloat(getComputedStyle(ui.trace).lineHeight)
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? ui.trace.clientHeight : 1;
+    const delta = event.deltaY * unit;
+    const top = ui.trace.scrollTop;
+    const end = traceEnd(ui);
+    const boundary = delta < 0 ? 0 : end;
+    const reachesBoundary = delta < 0 ? top + delta <= 0 : top + delta >= end;
+    if (reachesBoundary && event.cancelable) {
+      // Stop at the boundary before native scrolling and follow restoration compete.
+      event.preventDefault();
+      scrollTrace(ui, boundary);
+      if (delta > 0 && promptVisible(ui)) {
+        ui.followClearance = Math.max(0, Math.min(ui.trace.scrollTop, end) - messageBottom(ui));
+      }
+    }
     if (event.deltaY < 0) {
       ui.follow = false;
       ui.lastScrollTop = ui.trace.scrollTop;
       rememberPosition(ui);
-    } else if (event.deltaY > 0 && !ui.follow && atTraceEnd(ui) && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total)) {
+    } else if (event.deltaY > 0 && !ui.follow && (reachesBoundary || atTraceEnd(ui)) && !selectedWithin(ui.trace) && (!ui.history || ui.history.end >= ui.history.total)) {
       ui.follow = true;
       scheduleTranscript(ui);
     }
-  }, { passive: true });
+  }, { passive: false });
   ui.trace.addEventListener("keydown", event => {
     if (["ArrowUp", "PageUp", "Home"].includes(event.key)) {
       ui.follow = false;
