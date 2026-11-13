@@ -260,15 +260,17 @@ impl Session {
         }
         entries
     }
-    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) -> Option<Value> {
-        let base = self.skill_base.as_ref()?;
+    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) {
+        let Some(base) = self.skill_base.as_ref() else {
+            return;
+        };
         let prompt = skills::catalog::prompt(&snapshot.skills, snapshot.budget, &snapshot.warnings);
         let instructions = format!("{base}\n{prompt}");
         if self.skills == snapshot.skills
             && self.skill_warnings == snapshot.warnings
             && self.instructions == instructions
         {
-            return None;
+            return;
         }
         self.skills = snapshot.skills;
         self.skill_snapshot = None;
@@ -280,7 +282,6 @@ impl Session {
         );
         self.history
             .push(json!({"role":"developer","content":notice}));
-        Some(json!({"event":"catalog", "text":notice, "warnings":self.skill_warnings}))
     }
     pub fn request_count(&self) -> u64 {
         self.model_requests
