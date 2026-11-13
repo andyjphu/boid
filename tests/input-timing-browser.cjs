@@ -25,7 +25,7 @@ const root = path.resolve(__dirname, '../src/web');
     const view = entries => ({ id: 'a', name: 'a', cwd: '/tmp', status: 'idle', pending: [], entries });
     const frames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const emit = async message => { await page.evaluate(message => testEvents.onmessage({ data: JSON.stringify(message) }), { ...message, seq: ++sequence }); await frames(); };
-    const reset = async (entries = []) => { await page.waitForFunction(() => testEvents?.onmessage); await emit({ type: 'snapshot', sessions: [view(entries)], terminals: [], catalog: ['a'] }); };
+    const reset = async (entries = []) => { await page.waitForFunction(() => window.testEvents?.onmessage); await emit({ type: 'snapshot', sessions: [view(entries)], terminals: [], catalog: ['a'] }); };
     const samples = () => page.evaluate(() => boidInputTiming.samples());
     const input = page.locator('.composer textarea');
     const submit = async text => {

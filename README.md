@@ -76,8 +76,9 @@ from the connected account's catalog.
 
 ### Measuring message admission
 
-Browser input diagnostics are off by default. In the browser console, call
-`boidInputTiming.enable()`, send a normal message, then inspect
+Browser input diagnostics are off by default. Open the page with
+`?input-timing=1`, or call `boidInputTiming.enable()` in the browser console.
+Send a normal message, then inspect
 `boidInputTiming.samples()`. Use `boidInputTiming.clear()` to remove retained
 samples and `boidInputTiming.disable()` to stop recording. Diagnostics retain
 at most 64 samples in memory and do not retain message contents or write disk
