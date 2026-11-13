@@ -43,11 +43,24 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
       await frames();
     };
     const boxes = () => page.locator('.pane').evaluateAll(nodes => Object.fromEntries(nodes.map(node => [node.dataset.paneKey, node.getBoundingClientRect().toJSON()])));
-    const handle = (key, edge) => page.locator(`[data-pane-key="${key}"] > .pane-resize-${edge}`);
+    async function handle(key, edge) {
+      const id = await page.evaluate(({ key, edge }) => {
+        const pane = [...document.querySelectorAll('.pane')].find(node => node.dataset.paneKey === key);
+        const box = pane.getBoundingClientRect();
+        const x = edge === 'left' ? box.left : edge === 'right' ? box.right : box.left + box.width / 2;
+        const y = edge === 'top' ? box.top : edge === 'bottom' ? box.bottom : box.top + box.height / 2;
+        return document.elementFromPoint(x, y)?.closest('.pane-resize')?.id;
+      }, { key, edge });
+      assert.ok(id, `${key} ${edge} has one shared boundary target`);
+      return page.locator(`#${id}`);
+    }
     async function beginDrag(key, edge) {
-      const box = await handle(key, edge).boundingBox();
-      assert.ok(box, `${key} ${edge} is draggable`);
-      const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      await handle(key, edge);
+      const box = await page.locator(`.pane[data-pane-key="${key}"]`).boundingBox();
+      const point = {
+        x: edge === 'left' ? box.x : edge === 'right' ? box.x + box.width : box.x + box.width / 2,
+        y: edge === 'top' ? box.y : edge === 'bottom' ? box.y + box.height : box.y + box.height / 2,
+      };
       await page.mouse.move(point.x, point.y); await page.mouse.down();
       return point;
     }
@@ -77,12 +90,40 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     })));
     await page.reload(); await page.waitForFunction(() => window.testEvents);
     assert.equal(await page.evaluate(() => paneLayout), null);
-    await handle('draft:saved', 'right').focus(); await page.keyboard.press('ArrowRight');
-    await drag('draft:saved', 'right', 20);
+    assert.equal(await page.locator('.pane-resize').count(), 0, 'no resize targets before initial layout');
+    assert.equal(await page.evaluate(() => paneResizeGroup('draft:saved', 'right')), null);
     assert.deepEqual(errors, [], 'restored draft resize before the first snapshot must be harmless');
     await page.evaluate(() => discardSetup(drafts.get('saved')));
     await snapshot();
     const original = await boxes();
+    assert.equal(await page.locator('.pane-resize').count(), 4, '2x2 grid has four shared boundary segments');
+    const sameTarget = await page.evaluate(() => {
+      const a = document.querySelector('[data-pane-key="agent:a"]').getBoundingClientRect();
+      const vertical = [-2, 0, 2].map(dx => document.elementFromPoint(a.right + dx, a.top + a.height / 2)?.id);
+      const horizontal = [-2, 0, 2].map(dy => document.elementFromPoint(a.left + a.width / 2, a.bottom + dy)?.id);
+      return { vertical, horizontal };
+    });
+    assert.equal(new Set(sameTarget.vertical).size, 1, 'both sides of vertical border hit the same target');
+    assert.equal(new Set(sameTarget.horizontal).size, 1, 'both sides of horizontal border hit the same target');
+    assert.ok(sameTarget.vertical[0]?.startsWith('pane-resize-'));
+    assert.ok(sameTarget.horizontal[0]?.startsWith('pane-resize-'));
+    // Align the top divider to the stationary bottom divider, then drag away again.
+    await drag('agent:a', 'right', 100);
+    const bottomBeforeSnap = (await boxes())['agent:c'];
+    const snapPoint = await beginDrag('agent:a', 'right');
+    await page.mouse.move(snapPoint.x - 94, snapPoint.y, { steps: 8 }); await frames();
+    near((await boxes())['agent:a'].right, bottomBeforeSnap.right, 'vertical divider snaps within 8px');
+    near((await boxes())['agent:c'].right, bottomBeforeSnap.right, 'stationary divider stays fixed');
+    assert.equal(await page.locator('.pane-resize').count(), 4, 'snapping keeps one target per segment');
+    await page.mouse.move(snapPoint.x - 80, snapPoint.y, { steps: 4 }); await page.mouse.up(); await frames();
+    near((await boxes())['agent:a'].right, bottomBeforeSnap.right + 20, 'drag escapes snapping range');
+    await reset();
+    await drag('agent:a', 'bottom', 70);
+    const rightBeforeSnap = (await boxes())['agent:b'];
+    await drag('agent:a', 'bottom', -64);
+    near((await boxes())['agent:a'].bottom, rightBeforeSnap.bottom, 'horizontal divider snaps within 8px');
+    near((await boxes())['agent:b'].bottom, rightBeforeSnap.bottom, 'stationary horizontal divider stays fixed');
+    await reset();
     await drag('agent:a', 'right', 120);
     let changed = await boxes();
     near(changed['agent:a'].width, original['agent:a'].width + 120, 'right drag expands');
@@ -117,9 +158,9 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     assert.equal(await page.locator('body').evaluate(node => node.classList.contains('resizing-panes')), false);
     point = await beginDrag('agent:a', 'bottom');
     await page.mouse.move(point.x, point.y + 80);
-    await handle('agent:a', 'bottom').dispatchEvent('pointercancel'); await page.mouse.up(); await frames();
+    await (await handle('agent:a', 'bottom')).dispatchEvent('pointercancel'); await page.mouse.up(); await frames();
     near((await boxes())['agent:a'].height, beforeCancel['agent:a'].height, 'pointer cancellation restores');
-    await handle('agent:a', 'right').focus(); await page.keyboard.press('ArrowRight'); await frames();
+    await (await handle('agent:a', 'right')).focus(); await page.keyboard.press('ArrowRight'); await frames();
     near((await boxes())['agent:a'].width, beforeCancel['agent:a'].width + 10, 'keyboard resize');
     // Reading and following retain their distinct behavior while text rewraps.
     const anchor = await page.evaluate(() => {
@@ -172,6 +213,6 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     if (process.env.BOID_RESIZE_SCREENSHOT) await page.screenshot({ path: process.env.BOID_RESIZE_SCREENSHOT });
     assert.deepEqual(mutations, [], 'resizing must not change agent execution');
     assert.deepEqual(errors, []);
-    console.log('PASS: all four edges, independent panes, neighbor constraints, min sizes, refresh/reconnect, cancel, keyboard, scroll anchors, viewport resize, add/remove, incomplete grid, terminal fit, corrupt storage');
+    console.log('PASS: single shared targets, both-side hit tests, two-axis snapping and breakaway, independent panes, neighbor constraints, min sizes, refresh/reconnect, cancel, keyboard, scroll anchors, viewport resize, add/remove, incomplete grid, terminal fit, startup and corrupt storage');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exit(1); });
