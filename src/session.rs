@@ -446,9 +446,16 @@ impl Session {
         }
         let Some(call) = self.pending.pop_front() else {
             self.model_requests += 1;
-            if !hub.apply_inbox(id, self)? {
-                self.model_requests -= 1;
-                return Ok(false);
+            match hub.apply_inbox(id, self) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.model_requests -= 1;
+                    return Ok(false);
+                }
+                Err(error) => {
+                    self.model_requests -= 1;
+                    return Err(error);
+                }
             }
             self.refresh_request_profile(hub, id)?;
             self.request_in_flight = true;
