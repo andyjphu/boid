@@ -47,7 +47,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
         return route.fulfill({ json: { status: 'queued' } });
       }
       if (url.pathname === '/api/sessions' && method === 'POST') {
-        const fields = route.request().postDataJSON(); const a = view(fields.name || 'created'); agents.push(a);
+        const fields = route.request().postDataJSON(); const a = view(fields.name || (agents.length === 2 ? 'second' : 'late-agent')); agents.push(a);
         screens.panes[`agent:${a.id}`] = Number(url.searchParams.get('screen') || 1);
         screens.revision++;
         await emit({ type: 'session', screens_revision: screens.revision, session: { ...a, screen: screens.panes[`agent:${a.id}`] } });
@@ -95,7 +95,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     // Resize a boundary before leaving; the same layout must return.
     const divider = page.locator('.pane-resize-vertical').first(); await divider.focus(); await page.keyboard.press('ArrowLeft'); await frames(page);
     const anchor = await page.evaluate(() => { const ui = sessions.get('a'); rememberPosition(ui); return { id: ui.anchor.node.dataset.entryId, offset: ui.anchor.offset }; });
-    const width = await page.locator('[data-pane-key="agent:a"]').evaluate(n => n.getBoundingClientRect().width);
+    const width = await page.locator('.pane[data-pane-key="agent:a"]').evaluate(n => n.getBoundingClientRect().width);
     await page.locator('#add-screen').click(); await ready(page, 2);
     assert.deepEqual(await keys(page), []);
     assert.equal(await page.evaluate(() => testSockets.filter(s => s.readyState === 1).length), 0, 'inactive terminals disconnected');
@@ -106,8 +106,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     await emit({ type: 'delta', session_id: 'a', entry_id: 'a-79', text: 'hidden output' });
     await frames(page); assert.deepEqual(await keys(page), []);
     await page.locator('#add-agent').click();
-    await page.locator('.setup-form input[name=name]').fill('second');
-    await page.locator('.setup-submit').click(); await page.waitForSelector('[data-pane-key="agent:second"]');
+ await page.waitForSelector('[data-pane-key="agent:second"]');
     assert.equal(screens.panes['agent:second'], 2);
     await page.locator('#add-terminal').click(); await page.waitForSelector('[data-pane-key="terminal:second-terminal"]');
     assert.equal(screens.panes['terminal:second-terminal'], 2);
@@ -123,18 +122,15 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     assert.equal(await page.evaluate(() => screenCatalog.count), 3, 'stale responses do not revert shared screens');
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
     assert.equal(await page.locator('[data-pane-key="agent:a"] .composer textarea').inputValue(), 'Unsent on screen one');
-    assert.ok(Math.abs(await page.locator('[data-pane-key="agent:a"]').evaluate(n => n.getBoundingClientRect().width) - width) < 2, 'per-screen size retained');
+    assert.ok(Math.abs(await page.locator('.pane[data-pane-key="agent:a"]').evaluate(n => n.getBoundingClientRect().width) - width) < 2, 'per-screen size retained');
     const restored = await page.evaluate(id => { const ui = sessions.get('a'); return { follow: ui.follow, offset: ui.entries.get(id).node.getBoundingClientRect().top - ui.trace.getBoundingClientRect().top }; }, anchor.id);
     assert.equal(restored.follow, false); assert.ok(Math.abs(restored.offset - anchor.offset) < 3, 'reading anchor retained');
-    // Unsaved setup forms are local to each screen and survive refresh.
-    await page.locator('#add-agent').click(); await page.locator('.setup-form input[name=name]').fill('draft-one');
+    // Each screen and its active sessions survive refresh without a setup surface.
     await page.locator('#screens [data-screen="2"]').click(); await ready(page, 2);
-    assert.equal(await page.locator('.setup-pane').count(), 0);
     await page.reload(); await ready(page, 2);
     assert.deepEqual(await keys(page), ['agent:second', 'terminal:second-terminal']);
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
-    assert.equal(await page.locator('.setup-form input[name=name]').inputValue(), 'draft-one');
-    await page.locator('[aria-label="Discard agent draft"]').click();
+    assert.equal(await page.locator('.setup-form').count(), 0);
     await page.locator('[data-pane-key="agent:b"] .composer textarea').fill('Unsent while moving');
     await page.locator('[data-pane-key="agent:b"] .pane-tab').dragTo(page.locator('#screens [data-screen="3"]'));
     await page.waitForFunction(() => !sessions.has('b'));
@@ -180,13 +176,12 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), 'Typed since the last save');
     // A newer cross-window move wins over a delayed create response for either pane kind.
     holdAgent = true;
-    await page.locator('#add-agent').click(); await page.locator('.setup-form input[name=name]').fill('late-agent');
-    await page.locator('.setup-submit').click(); await until(() => releaseAgent);
+    await page.locator('#add-agent').click(); await until(() => releaseAgent);
     screens.panes['agent:late-agent'] = 2; screens.revision++;
     await emit({ type: 'screens', screens });
     await page.waitForFunction(() => !sessions.has('late-agent'));
     releaseAgent(); holdAgent = false;
-    await page.waitForFunction(() => drafts.size === 0); await frames(page);
+    await page.waitForFunction(() => !document.querySelector("#add-agent").disabled); await frames(page);
     assert.equal(await page.evaluate(() => paneScreen('agent:late-agent')), 2);
     assert.equal(await page.locator('[data-pane-key="agent:late-agent"]').count(), 0);
     holdTerminal = true;

@@ -23,10 +23,11 @@ const root = path.resolve(__dirname, '../src/web');
         assert.equal(route.request().postDataJSON().key, 'synthetic-browser-key');
         status.api_key_available = true; actions.push('key-saved'); return route.fulfill({ json: { ok: true } });
       }
+      if (url.pathname === '/api/sessions' && route.request().method() === 'POST') return route.fulfill({ status: 400, json: { error: 'Use /login to connect an API key or ChatGPT subscription before creating an agent.' } });
       if (url.pathname.endsWith('/messages')) { actions.push('model-message'); return route.fulfill({ json: {} }); }
       if (url.pathname === '/api/terminals' && route.request().method() === 'POST') return route.fulfill({ status: 500, json: { error: 'Fixture terminal failure' } });
       if (url.pathname === '/api/accounts') return route.fulfill({ json: status });
-      if (url.pathname === '/api/sessions/agent') return route.fulfill({ json: { id: 'agent', profile: profiles.agent } });
+      if (['/api/sessions/agent', '/api/sessions/agent/history'].includes(url.pathname)) return route.fulfill({ json: { id: 'agent', profile: profiles.agent } });
       if (url.pathname === '/api/sessions/agent/model') {
         const body = route.request().postDataJSON(); actions.push({ action: 'model', ...body });
         profiles.agent.model = body.model; return route.fulfill({ json: { profile: profiles.agent } });
@@ -60,7 +61,7 @@ const root = path.resolve(__dirname, '../src/web');
     await page.evaluate(() => snapshot([{ id: 'agent', name: 'canary', cwd: '/tmp', status: 'idle', entries: [], pending: [], profile: { billing_route: 'api_key', model: 'first' } }], []));
     assert.equal(await page.locator('.billing-route').count(), 0);
     assert.equal(await page.locator('#open-accounts, #accounts-dialog').count(), 0);
-    const composer = page.locator('[data-pane-key="agent:agent"] textarea');
+    const composer = page.locator('[data-pane-key="agent:agent"] .composer textarea');
     async function command() {
       await composer.fill('/lo'); await composer.press('Tab'); assert.equal(await composer.inputValue(), '/login');
       await composer.press('Enter'); await page.locator('#provider-login').waitFor({ state: 'visible' });
@@ -99,7 +100,7 @@ const root = path.resolve(__dirname, '../src/web');
     await page.keyboard.press('Escape');
     status.accounts = []; status.api_key_available = false; status.billing_route = 'api_key';
     await page.locator('#add-agent').click();
-    await page.locator('.setup-login').click();
+    await page.getByRole('button', { name: 'Connect provider', exact: true }).click();
     await page.waitForFunction(() => loginStatus && !loginStatus.api_key_available);
     await page.getByRole('button', { name: 'API key', exact: true }).click();
     await page.locator('#provider-api-key').fill('synthetic-browser-key');
