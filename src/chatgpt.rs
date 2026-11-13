@@ -609,20 +609,51 @@ impl Auth {
         self.save(&store)
     }
     pub async fn token(self: &Arc<Self>, id: &str) -> Result<String> {
+        self.bound_token(id, false, false)
+            .await?
+            .context("ChatGPT credential was removed.")
+    }
+    /// Deletion and refresh are serialized by the same lock. Only a retry may
+    /// retain an already-issued bearer when its registry entry has been deleted.
+    pub async fn inference_token(
+        self: &Arc<Self>,
+        id: &str,
+        retry: bool,
+    ) -> Result<Option<String>> {
+        self.bound_token(id, retry, true).await
+    }
+    async fn bound_token(
+        self: &Arc<Self>,
+        id: &str,
+        allow_deleted: bool,
+        inference: bool,
+    ) -> Result<Option<String>> {
         // A cancelled model turn must not discard a rotated refresh token.
         let auth = self.clone();
         let id = id.to_owned();
-        tokio::spawn(async move { auth.token_inner(&id).await })
+        tokio::spawn(async move { auth.token_inner(&id, allow_deleted, inference).await })
             .await
             .context("ChatGPT refresh task failed.")?
     }
-    async fn token_inner(&self, id: &str) -> Result<String> {
+    async fn token_inner(
+        &self,
+        id: &str,
+        allow_deleted: bool,
+        inference: bool,
+    ) -> Result<Option<String>> {
         let _lock = self.lock().await?;
         let mut store = self.load()?;
-        let account = store
-            .accounts
-            .get_mut(id)
-            .context("ChatGPT account is not saved. Continue with ChatGPT in /login.")?;
+        let Some(account) = store.accounts.get_mut(id) else {
+            if allow_deleted {
+                return Ok(None);
+            }
+            bail!("ChatGPT account is not saved. Continue with ChatGPT in /login.");
+        };
+        if inference && account.paused {
+            bail!(
+                "ChatGPT requests are paused after a usage limit. Resume this account in Boid; no API-key fallback was used."
+            );
+        }
         if !account.allowed() {
             bail!(
                 "ChatGPT plan usage is disabled. Enable it in /login; no API-key fallback was used."
@@ -632,7 +663,7 @@ impl Auth {
             bail!("Reconnect this ChatGPT account in /login.");
         }
         if account.expires_at > now() + 60 {
-            return Ok(account.access_token.clone());
+            return Ok(Some(account.access_token.clone()));
         }
         let (status, tokens) = self
             .exchange(&[
@@ -677,7 +708,7 @@ impl Auth {
         if !allowed {
             bail!("ChatGPT plan permission was removed. Enable it in /login.");
         }
-        Ok(access)
+        Ok(Some(access))
     }
     pub async fn models(self: &Arc<Self>, id: &str) -> Result<Vec<Value>> {
         let token = self.token(id).await?;

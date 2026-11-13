@@ -371,6 +371,34 @@ async fn deleted_subscription_finishes_bound_retries_without_restoring_credentia
     assert_eq!(f.provider.requests.lock().unwrap().len(), 3);
 }
 
+#[tokio::test]
+async fn oauth_retry_waiting_for_credential_lock_observes_atomic_deletion() {
+    let f = Fixture::new().await;
+    let id = f.login().await;
+    let locked = f.auth.lock().await.unwrap();
+    let auth = f.auth.clone();
+    let retry_id = id.clone();
+    let retry = tokio::spawn(async move { auth.inference_token(&retry_id, true).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !retry.is_finished(),
+        "Retry waits for the credential transaction"
+    );
+    let mut store = f.auth.load().unwrap();
+    store.accounts.remove(&id);
+    f.auth.save(&store).unwrap();
+    drop(locked);
+    assert!(
+        retry.await.unwrap().unwrap().is_none(),
+        "Deleted account retains the caller's captured bearer for this retry"
+    );
+    assert!(
+        f.auth.inference_token(&id, false).await.is_err(),
+        "A new request cannot use the removed account"
+    );
+    assert_eq!(f.provider.refreshes.load(Ordering::SeqCst), 0);
+}
+
 async fn inference(
     State(p): State<Provider>,
     headers: HeaderMap,

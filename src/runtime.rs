@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 #[path = "pane_groups.rs"]
 mod pane_groups;
+pub use pane_groups::GroupRevisionConflict;
 mod persistence;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -481,6 +482,7 @@ impl Hub {
                 for record in restored_records {
                     hub.install_locked(&mut data, record, false)?;
                 }
+                hub.prune_absent_agent_groups_locked(&mut data)?;
             }
             Ok(hub)
         })

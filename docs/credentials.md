@@ -34,11 +34,11 @@ authenticated write request and the server's owner-only credential file.
 
 Registry rows contain `id`, `type` (`api_key` or `chatgpt`), `name`, `connected`,
 `paused`, and `plan_enabled`. Registry metadata includes `revision` and
-`default_credential_id`. Credential IDs are random UUIDs, never secret material.
+`default_credential_id`. Credential IDs are random UUIDs, never secret material. An omitted or blank new API-key name receives the first unused `openai-api-key-N` name under the credential lock.
 Creating a row does not implicitly assign it or replace the default.
 
 Group rows contain `id`, `screen`, ordered `tabs` (`agent:ID` or `terminal:ID`),
-`credential_id`, and `credential_type`. A stale revision rejects the mutation;
+`credential_id`, and `credential_type`. A stale revision returns HTTP 409 with `code: "pane_groups_changed"`;
 fetch the current catalog before retrying. The browser owns active-tab selection
 and outer geometry. The server owns membership, tab order, and credential choice.
 The existing `/api/screens/move` route moves only its specified member tab.

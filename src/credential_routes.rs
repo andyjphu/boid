@@ -31,6 +31,7 @@ async fn credentials(State(app): State<App>) -> ApiResult<Json<Value>> {
 #[serde(deny_unknown_fields)]
 struct AddCredential {
     r#type: String,
+    #[serde(default)]
     name: String,
     key: String,
 }
@@ -107,6 +108,16 @@ struct MoveTab {
     before: Option<String>,
     revision: u64,
 }
+fn group_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if error.is::<crate::runtime::GroupRevisionConflict>() {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error":error.to_string(),"code":"pane_groups_changed"})),
+        )
+    } else {
+        invalid(error)
+    }
+}
 async fn move_tab(State(app): State<App>, Json(input): Json<MoveTab>) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(move || {
         app.hub.move_tab(
@@ -119,7 +130,7 @@ async fn move_tab(State(app): State<App>, Json(input): Json<MoveTab>) -> ApiResu
     .await
     .map_err(invalid)?
     .map(Json)
-    .map_err(invalid)
+    .map_err(group_error)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,7 +150,7 @@ async fn assign_credential(
     .await
     .map_err(invalid)?
     .map(Json)
-    .map_err(invalid)
+    .map_err(group_error)
 }
 
 #[cfg(test)]
@@ -182,7 +193,7 @@ mod tests {
         let result: Value = http
             .post(&url)
             .bearer_auth(&token)
-            .json(&json!({"type":"api_key","name":"Fixture","key":"fixture-secret-value"}))
+            .json(&json!({"type":"api_key","key":"fixture-secret-value"}))
             .send()
             .await
             .unwrap()
@@ -191,6 +202,10 @@ mod tests {
             .json()
             .await
             .unwrap();
+        assert_eq!(
+            result["registry"]["credentials"][0]["name"],
+            "openai-api-key-1"
+        );
         assert!(!result.to_string().contains("fixture-secret-value"));
         let id = result["id"].as_str().unwrap();
         assert!(Uuid::parse_str(id).is_ok());
@@ -224,6 +239,18 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .is_empty()
+        );
+        let conflict = http
+            .patch(url.replace("/api/credentials", "/api/pane-groups/missing"))
+            .bearer_auth(&token)
+            .json(&json!({"credential_id":null,"revision":999}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            conflict.json::<Value>().await.unwrap()["code"],
+            "pane_groups_changed"
         );
         hub.shutdown().await;
         server.abort();

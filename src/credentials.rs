@@ -46,6 +46,22 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(id, extra["id"]);
+        let (automatic_one, automatic_two) = tokio::join!(
+            auth.create_credential("", "fixture-auto-one"),
+            auth.create_credential("   ", "fixture-auto-two")
+        );
+        let one = automatic_one.unwrap()["id"].as_str().unwrap().to_owned();
+        let two = automatic_two.unwrap()["id"].as_str().unwrap().to_owned();
+        assert_ne!(one, two);
+        let registry = auth.credentials().unwrap();
+        let names: Vec<_> = registry["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] == one || row["id"] == two)
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["openai-api-key-1", "openai-api-key-2"]);
         let public = auth.credentials().unwrap();
         assert_eq!(public["credentials"][0]["name"], "alpha");
         for secret in [
@@ -313,12 +329,30 @@ impl Auth {
         self.save(&store)
     }
     pub async fn create_credential(&self, label: &str, secret: &str) -> Result<Value> {
-        let entry = ApiKey {
-            name: name(label)?,
-            key: key(secret)?,
+        let label = if label.trim().is_empty() {
+            None
+        } else {
+            Some(name(label)?)
         };
+        let key = key(secret)?;
         let _lock = self.lock().await?;
         let mut store = self.load()?;
+        let name = label.unwrap_or_else(|| {
+            (1..)
+                .map(|n| format!("openai-api-key-{n}"))
+                .find(|candidate| {
+                    !store
+                        .api_keys
+                        .values()
+                        .any(|key| key.name.eq_ignore_ascii_case(candidate))
+                        && !store
+                            .accounts
+                            .values()
+                            .any(|account| account.name.eq_ignore_ascii_case(candidate))
+                })
+                .unwrap()
+        });
+        let entry = ApiKey { name, key };
         let id = Uuid::new_v4().to_string();
         store.api_keys.insert(id.clone(), entry);
         // New credentials never silently replace a selected or deleted credential.

@@ -1,6 +1,15 @@
 //! Shared pane membership and credentials; browser geometry/active tab remain local.
 use super::*;
 
+#[derive(Debug)]
+pub struct GroupRevisionConflict;
+impl std::fmt::Display for GroupRevisionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pane groups changed. Refresh and try again.")
+    }
+}
+impl std::error::Error for GroupRevisionConflict {}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct PaneGroup {
     pub id: String,
@@ -88,6 +97,16 @@ mod tests {
             auth.named_api_key(&first_key).is_ok(),
             "Unrelated key remains available, never used as fallback"
         );
+        {
+            let mut data = hub.0.data.lock().unwrap();
+            hub.remove_group_member_locked(&mut data, &format!("agent:{}", one.id))
+                .unwrap();
+        }
+        assert_eq!(
+            hub.profile(&one.id).unwrap()["billing_route"],
+            "unassigned",
+            "A missing authoritative group must not expose the older stored key"
+        );
         hub.shutdown().await;
     }
 }
@@ -158,6 +177,10 @@ impl Hub {
         let key = format!("agent:{id}");
         let mut profile = source.clone();
         let Some(group) = data.screens.groups.values().find(|g| g.tabs.contains(&key)) else {
+            profile["credential_id"] = Value::Null;
+            profile["billing_route"] = json!("unassigned");
+            profile["chatgpt_account"] = Value::Null;
+            profile["pane_group_id"] = Value::Null;
             return profile;
         };
         profile["pane_group_id"] = json!(group.id);
@@ -172,7 +195,11 @@ impl Hub {
             Value::Null
         };
         profile["cyber_access_program"] = if group.credential_type.as_deref() == Some("api_key") {
-            data.api_program.clone()
+            if source["billing_route"].as_str().unwrap_or("api_key") == "api_key" {
+                source["cyber_access_program"].clone()
+            } else {
+                data.api_program.clone()
+            }
         } else {
             Value::Null
         };
@@ -208,6 +235,34 @@ impl Hub {
         next.groups_revision += 1;
         self.0.store.save_screens(&next)?;
         data.screens = next;
+        Ok(())
+    }
+    pub(super) fn prune_absent_agent_groups_locked(&self, data: &mut Data) -> Result<()> {
+        let keep = |key: &str| {
+            key.strip_prefix("agent:").is_none_or(|id| {
+                data.sessions
+                    .get(id)
+                    .is_some_and(|h| !h.record.view.archived)
+            })
+        };
+        let mut next = data.screens.clone();
+        let mut changed = false;
+        for group in next.groups.values_mut() {
+            let before = group.tabs.len();
+            group.tabs.retain(|key| keep(key));
+            changed |= before != group.tabs.len();
+        }
+        next.groups.retain(|_, group| !group.tabs.is_empty());
+        let previous = next.panes.len();
+        next.panes.retain(|key, _| keep(key));
+        changed |= previous != next.panes.len();
+        if changed {
+            next.groups_revision += 1;
+            next.revision += 1;
+            self.0.store.save_screens(&next)?;
+            data.screens = next;
+            self.groups_changed(data);
+        }
         Ok(())
     }
     pub(super) fn remove_group_member_locked(&self, data: &mut Data, key: &str) -> Result<()> {
@@ -302,7 +357,7 @@ impl Hub {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
             if revision != data.screens.groups_revision {
-                bail!("Pane groups changed. Refresh and try again.");
+                return Err(GroupRevisionConflict.into());
             }
             if !Self::live_pane(&data, pane) {
                 bail!("Tab is no longer open.");
@@ -369,7 +424,7 @@ impl Hub {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
             if revision != data.screens.groups_revision {
-                bail!("Pane groups changed. Refresh and try again.");
+                return Err(GroupRevisionConflict.into());
             }
             let kind = credential_id
                 .map(|id| {

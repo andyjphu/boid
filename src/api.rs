@@ -9,6 +9,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REASONING_EFFORT: &str = "medium";
 
+fn redact_event(value: &mut Value, redact: &impl Fn(&str) -> String) {
+    match value {
+        Value::String(text) => *text = redact(text),
+        Value::Array(items) => items.iter_mut().for_each(|item| redact_event(item, redact)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|item| redact_event(item, redact)),
+        _ => (),
+    }
+}
+
 fn encode_input<I: Serialize + ?Sized>(metadata: &Value, input: &I) -> Result<Vec<u8>> {
     #[derive(Serialize)]
     struct Request<'a, I: Serialize + ?Sized> {
@@ -155,8 +166,9 @@ impl Client {
                     .as_str()
                     .or_else(|| profile["chatgpt_account"].as_str())
                     .context("This pane has no subscription credential.")?;
-                auth.check_inference(id)?;
-                auth.token(id).await
+                auth.inference_token(id, false)
+                    .await?
+                    .context("This pane has no subscription credential.")
             }
             "unassigned" => bail!("This pane has no credential. Choose one in the lock view."),
             _ => bail!("Unknown agent billing route."),
@@ -224,13 +236,14 @@ impl Client {
                     .as_str()
                     .or_else(|| profile["chatgpt_account"].as_str())
                     .context("Missing request account.")?;
-                if self
+                if let Some(refreshed) = self
                     .auth
                     .as_ref()
                     .context("Credential storage unavailable.")?
-                    .account_exists(id)?
+                    .inference_token(id, true)
+                    .await?
                 {
-                    credential = self.credential(profile).await?;
+                    credential = refreshed;
                     if !request_secrets.contains(&credential) {
                         request_secrets.push(credential.clone());
                     }
@@ -371,6 +384,8 @@ impl Client {
                             &event,
                             profile,
                         ));
+                        let mut event = event;
+                        redact_event(&mut event, &redact);
                         terminal_event = Some(event);
                         bail!("OpenAI response stopped: {message}");
                     }
