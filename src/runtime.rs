@@ -12,6 +12,8 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
+#[path = "pane_groups.rs"]
+mod pane_groups;
 mod persistence;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -239,6 +241,10 @@ struct Inner {
 #[derive(Clone, Serialize, Deserialize)]
 struct Screens {
     #[serde(default)]
+    groups: BTreeMap<String, pane_groups::PaneGroup>,
+    #[serde(default)]
+    groups_revision: u64,
+    #[serde(default)]
     revision: u64,
     count: u32,
     panes: BTreeMap<String, u32>,
@@ -247,6 +253,8 @@ impl Default for Screens {
     fn default() -> Self {
         Self {
             revision: 0,
+            groups: BTreeMap::new(),
+            groups_revision: 0,
             count: 1,
             panes: BTreeMap::new(),
         }
@@ -264,6 +272,7 @@ impl Screens {
     }
 }
 struct Data {
+    api_program: Value,
     screens: Screens,
     seq: u64,
     closing: bool,
@@ -366,7 +375,8 @@ impl Hub {
             for name in &agent_names {
                 validate_agent_name(name)?;
             }
-            let screens: Screens = store.load_screens()?;
+            let mut screens: Screens = store.load_screens()?;
+            Self::validate_groups(&mut screens, client.auth.as_deref())?;
             if screens.count == 0
                 || screens
                     .panes
@@ -375,6 +385,7 @@ impl Hub {
             {
                 bail!("Invalid screen assignments; original retained");
             }
+            store.save_screens(&screens)?;
             let records: Vec<Record> = store.load()?;
             let messages: BTreeMap<_, _> = records
                 .iter()
@@ -386,6 +397,7 @@ impl Hub {
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
                 data: Mutex::new(Data {
+                    api_program: client.api_profile()["cyber_access_program"].clone(),
                     screens,
                     seq: 0,
                     closing: false,
@@ -440,11 +452,15 @@ impl Hub {
                 for (kind, text) in recovery {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
-                record.view.profile = record.engine.profile.clone();
+                if !record.view.profile.is_object() {
+                    record.view.profile = record.engine.profile.clone();
+                }
                 if !record.view.profile.is_object() {
                     record.view.profile = json!({});
                 }
-                record.view.profile["model"] = json!(record.engine.model);
+                if record.view.profile["model"].as_str().is_none() {
+                    record.view.profile["model"] = json!(record.engine.model);
+                }
                 record.paused = !listen;
                 record.listen_on_restart = Some(listen);
                 record.view.working_since_ms = None;
@@ -488,6 +504,7 @@ impl Hub {
             bail!("Duplicate persisted session ID: {id}");
         }
         let archived = record.view.archived;
+        self.ensure_agent_group_locked(data, &record.view)?;
         data.sessions.insert(
             id.clone(),
             Handle {
@@ -583,7 +600,7 @@ impl Hub {
             communications: vec![],
             id: source.id.clone(),
             name: source.name.clone(),
-            profile: source.profile.clone(),
+            profile: Self::effective_profile(data, &source.id, &source.profile),
             cwd: source.cwd.clone(),
             status: source.status.clone(),
             working_since_ms: source.working_since_ms,
@@ -593,7 +610,8 @@ impl Hub {
         };
         let engine = &data.sessions[&source.id].record.engine;
         view.context_usage = engine.context_usage.clone();
-        view.context_window = crate::api::context_window(&engine.model);
+        view.context_window =
+            crate::api::context_window(view.profile["model"].as_str().unwrap_or(&engine.model));
         view.communications = data
             .messages
             .values()
@@ -625,12 +643,17 @@ impl Hub {
                 .map(|h| Self::project_view(&data, &h.record.view))
         })
     }
-    pub fn record_usage(&self, id: &str, mut report: crate::usage::Report) {
+    pub fn record_usage(
+        &self,
+        id: &str,
+        mut report: crate::usage::Report,
+        request_profile: &Value,
+    ) {
+        report.billing_route = request_profile["billing_route"]
+            .as_str()
+            .unwrap_or("api_key")
+            .into();
         if let Err(error) = self.update(id, |record| {
-            report.billing_route = record.engine.profile["billing_route"]
-                .as_str()
-                .unwrap_or("api_key")
-                .into();
             record.usage.record(report);
             Ok(())
         }) {
@@ -730,32 +753,48 @@ impl Hub {
     // Used before a newly created terminal can emit its first catalog event.
     pub fn assign_terminal_screen(&self, id: &str, screen: u32) -> Result<()> {
         crate::blocking::run(|| {
-            self.assign_screen_locked(
-                &mut self.0.data.lock().unwrap(),
-                &format!("terminal:{id}"),
-                screen,
-            )
+            let mut data = self.0.data.lock().unwrap();
+            self.assign_screen_locked(&mut data, &format!("terminal:{id}"), screen)?;
+            self.ensure_terminal_group_locked(&mut data, id, screen)
         })
     }
     pub fn move_pane(&self, key: &str, screen: u32) -> Result<Value> {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
-            let exists = if let Some(id) = key.strip_prefix("agent:") {
-                data.sessions
-                    .get(id)
-                    .is_some_and(|h| !h.record.view.archived)
-            } else if let Some(id) = key.strip_prefix("terminal:") {
-                data.terminal_summaries
-                    .get(id)
-                    .is_some_and(|v| v["running"] == true && v["archived"] != true)
-            } else {
-                false
-            };
-            if !exists {
+            data.screens.validate(screen)?;
+            let group_id = data
+                .screens
+                .groups
+                .values()
+                .find(|g| g.tabs.iter().any(|p| p == key))
+                .map(|g| g.id.clone())
+                .context("Pane is no longer open.")?;
+            if !Self::live_pane(&data, key) {
                 bail!("Pane is no longer open.");
             }
-            self.assign_screen_locked(&mut data, key, screen)?;
-            let result = json!(data.screens);
+            let mut next = data.screens.clone();
+            if next.groups[&group_id].tabs.len() == 1 {
+                let group = next.groups.get_mut(&group_id).unwrap();
+                group.screen = screen;
+                for key in &group.tabs {
+                    next.panes.insert(key.clone(), screen);
+                }
+            } else {
+                let source = next.groups.get_mut(&group_id).unwrap();
+                source.tabs.retain(|p| p != key);
+                let mut group = source.clone();
+                group.id = format!("group:{}", Uuid::new_v4());
+                group.screen = screen;
+                group.tabs = vec![key.to_owned()];
+                next.panes.insert(key.to_owned(), screen);
+                next.groups.insert(group.id.clone(), group);
+            }
+            next.revision += 1;
+            next.groups_revision += 1;
+            self.0.store.save_screens(&next)?;
+            data.screens = next;
+            let mut result = json!(data.screens);
+            result["pane_groups"] = self.groups_changed(&mut data);
             self.emit(&mut data, json!({"type":"screens", "screens":result}));
             Ok(result)
         })
@@ -803,7 +842,7 @@ impl Hub {
             (
                 json!({"seq":data.seq,"type":"snapshot","sessions":views,
                 "catalog":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| &h.record.view.id).collect::<Vec<_>>(),
-                "screens":data.screens,"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
+                "screens":data.screens,"pane_groups":Self::pane_groups_value(&data),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
                 receiver,
             )
         })
@@ -814,6 +853,7 @@ impl Hub {
                 let screen = data.screens.screen(&format!("{kind}:{id}"));
                 event[field]["screen"] = json!(screen);
                 event["screens_revision"] = json!(data.screens.revision);
+                event["pane_groups"] = Self::pane_groups_value(data);
             }
         }
         if let Some(id) = event["session_id"].as_str() {
@@ -842,6 +882,13 @@ impl Hub {
                 return;
             };
             let mut data = self.0.data.lock().unwrap();
+            if summary["archived"] == true || summary["running"] == false {
+                if let Err(error) =
+                    self.remove_group_member_locked(&mut data, &format!("terminal:{id}"))
+                {
+                    eprintln!("Cannot save terminal pane-group removal: {error}");
+                }
+            }
             data.terminal_summaries.insert(id.into(), summary.clone());
             self.emit(&mut data, json!({"type":"terminal","terminal":summary}));
         })
@@ -949,11 +996,8 @@ impl Hub {
         }
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
-        // Connection selection belongs to the record, not an older worker clone.
-        next.engine.profile = next.view.profile.clone();
-        if let Some(model) = next.view.profile["model"].as_str() {
-            next.engine.model = model.to_owned();
-        }
+        // Engine profile describes the last/current request. Pane assignment and
+        // View.model describe the next request and must not rewrite its accounting.
         next.view.working_since_ms = if next.view.status == "working" {
             let previous = if handle.record.view.status == "working" {
                 handle.record.view.working_since_ms
@@ -1238,10 +1282,6 @@ impl Hub {
                     handle.storage_error.is_none()
                         && r.view.status == status
                         && r.view.working_since_ms.is_some() == (status == "working")
-                        && r.engine.profile == r.view.profile
-                        && r.view.profile["model"]
-                            .as_str()
-                            .is_none_or(|model| model == r.engine.model)
                 })
         });
         if unchanged {
@@ -1259,7 +1299,15 @@ impl Hub {
     pub fn create(&self, input: Create) -> Result<View> {
         self.create_on_screen(input, 1)
     }
-    pub fn create_on_screen(&self, mut input: Create, screen: u32) -> Result<View> {
+    pub fn create_on_screen(&self, input: Create, screen: u32) -> Result<View> {
+        self.create_in_group(input, screen, None)
+    }
+    pub fn create_in_group(
+        &self,
+        mut input: Create,
+        screen: u32,
+        group_id: Option<&str>,
+    ) -> Result<View> {
         self.validate_screen(screen)?;
         crate::blocking::run(|| {
             input.name = input.name.trim().to_owned();
@@ -1282,26 +1330,6 @@ impl Hub {
             let model = profile["model"].as_str().context(
                 "Billing settings are unavailable; repair account storage before creating agents.",
             )?;
-            if profile["billing_route"] == "api_key" && !self.0.client.key_available() {
-                bail!(
-                    "Use /login to connect an API key or ChatGPT subscription before creating an agent."
-                );
-            }
-            if profile["billing_route"] == "chatgpt"
-                && profile["chatgpt_account"].as_str().is_none()
-            {
-                bail!(
-                    "Continue with ChatGPT and choose a model in /login before creating an agent."
-                );
-            }
-            if profile["billing_route"] == "chatgpt" {
-                self.0
-                    .client
-                    .auth
-                    .as_ref()
-                    .context("ChatGPT account storage is unavailable.")?
-                    .check_inference(profile["chatgpt_account"].as_str().unwrap())?;
-            }
             let mut engine = Session::new(
                 model.into(),
                 crate::skills::instructions(&skills),
@@ -1363,7 +1391,28 @@ impl Hub {
                 let identity = session_identity(&record.view);
                 Arc::make_mut(&mut record.view.entries[0].text)
                     .push_str(&format!("\n\n{identity}"));
+                if let Some(group_id) = group_id {
+                    let group = data
+                        .screens
+                        .groups
+                        .get(group_id)
+                        .context("Pane group no longer exists.")?;
+                    if group.screen != screen {
+                        bail!("Pane group is on another screen.");
+                    }
+                }
                 self.assign_screen_locked(&mut data, &format!("agent:{id}"), screen)?;
+                if let Some(group_id) = group_id {
+                    let mut next = data.screens.clone();
+                    next.groups
+                        .get_mut(group_id)
+                        .unwrap()
+                        .tabs
+                        .push(format!("agent:{id}"));
+                    next.groups_revision += 1;
+                    self.0.store.save_screens(&next)?;
+                    data.screens = next;
+                }
                 let snapshot = record.clone();
                 self.install_locked(&mut data, record, true)?;
                 let receipt = data
@@ -1409,24 +1458,31 @@ impl Hub {
     pub fn profile(&self, id: &str) -> Result<Value> {
         crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
-            Ok(data
+            let source = &data
                 .sessions
                 .get(id)
                 .context("Unknown session.")?
                 .record
                 .view
-                .profile
-                .clone())
+                .profile;
+            Ok(Self::effective_profile(&data, id, source))
         })
     }
     pub fn select_profile(&self, id: &str, expected: &Value, profile: Value) -> Result<()> {
+        if self.profile(id)? != *expected {
+            bail!("This agent's connection changed. Reopen the chooser and try again.");
+        }
+        if profile["credential_id"] != expected["credential_id"]
+            || profile["billing_route"] != expected["billing_route"]
+            || profile["chatgpt_account"] != expected["chatgpt_account"]
+        {
+            bail!("Change credentials for the whole pane through its lock view.");
+        }
         self.update(id, |record| {
             if record.view.archived || record.view.status == "ending" {
                 bail!("Session has ended. Reopen its history first.");
             }
-            if &record.view.profile != expected {
-                bail!("This agent's connection changed. Reopen the chooser and try again.");
-            }
+            if record.view.profile["model"] != expected["model"] { bail!("This model changed. Reopen the chooser and try again."); }
             if record.view.status == "working" || record.engine.request_in_flight()
                 || record.engine.has_pending_tools() || !record.inputs.is_empty()
                 || (!record.paused && !record.inbox.is_empty()) {

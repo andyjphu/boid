@@ -8,26 +8,36 @@ routes after an error.
 
 ## Connect
 
-Type `/login` in an agent composer and press Enter. The inline chooser offers
-**API key** or **ChatGPT subscription**. With no agents yet, choose **+agent**,
-then **/login** in the new-agent setup. There is no separate account page.
+Open the lock view to manage named API keys and ChatGPT subscriptions. Every
+pane selects one saved credential for all its agent tabs, including hidden and
+background tabs. The registry and pane assignments are shared across browser
+windows. Adding a credential does not switch an existing pane.
 
-Boid can start without model credentials. Choose **API key** to use the server's
-configured key or enter one in the password field. A key entered here is stored
-privately on the server, never in model messages or browser storage. API-key
-validity is checked by the provider when an agent makes its first request.
+Choose **API key** to enter a name and key. Keys are stored privately on the
+server, never in model messages or browser storage. Boid makes no provider call
+to validate a key during creation, editing, or assignment.
 
-Choose **ChatGPT subscription**, then **Continue with ChatGPT** and finish consent
-in the new tab. Return to `/login`, select an account,
-then **Use subscription**. Signing in alone does not change the selected route.
-Use `/model` to choose from that account's available models. Login keeps the
-agent's current model when available, otherwise uses the first listed model.
-**Escape** returns to the composer without interrupting the agent.
+Choose **Subscription** and finish ChatGPT consent in the new tab. Return to the
+lock view and select the saved credential for the pane. Reauthorizing retains
+that credential's ID and pane assignments. `/model` chooses a model from the
+connected account's catalog. Credential changes preserve each agent's model;
+a provider rejection remains an explicit error rather than selecting another
+model or billing route automatically.
 
-Selections in an existing pane apply to that agent. Selections in new-agent setup
-set the default for future agents. Other agents keep their connections. Wait for
-a busy agent to finish or interrupt it before changing its connection or model.
-`BOID_AUTH_ROUTE` can initialize the default on a new state directory; saved selections take precedence.
+Credential changes apply at the next model request. An already-started request
+continues with its captured account or API key, including retries. Deletion
+removes the local credential and leaves affected panes unassigned. It does not
+cancel current requests or revoke the provider's authorization. Provider errors
+or token expiry can still end an existing request.
+
+An existing environment/configuration API key is imported once into the named
+registry. Deleting it prevents an environment fallback on later requests and
+restarts. Existing agents retain their original credential on migration.
+`BOID_AUTH_ROUTE` can initialize a new state directory; saved selections win.
+
+`/login` remains a compatibility chooser and applies its credential selection
+to the whole pane. New-agent default selection never changes existing panes.
+See [credential API and persistence](credentials.md) for authenticated agent CRUD.
 
 Open Boid through `http://127.0.0.1:<port>` for ChatGPT's loopback callback.
 
@@ -37,11 +47,9 @@ For a remote server, forward its loopback port before signing in. For example,
 through sign-in. Use the workspace's existing private token to authenticate to
 Boid. Neither the Boid token nor OAuth credentials belong in shared URLs or logs.
 
-Each agent keeps its selected billing route, account, model, and history across
-restarts. Legacy agents keep API-key billing until `/login` changes that pane.
-Signing out stops agents using that account and removes its
-local tokens. Account identity remains available for reconnecting. If revocation
-could not be confirmed, disconnect Boid in ChatGPT settings too.
+Pane membership, credential assignment, model selection, and active session
+history survive restarts. Active-tab selection and outer geometry remain local
+to each browser window.
 
 ## Limits and recovery
 

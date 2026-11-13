@@ -19,6 +19,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "credentials.rs"]
+mod credentials;
+
 const ISSUER: &str = "https://auth.openai.com";
 const RESOURCE: &str = "https://api.openai.com/v1";
 const SCOPES: &str =
@@ -36,6 +39,8 @@ fn random() -> String {
 #[derive(Clone, Serialize, Deserialize)]
 struct Account {
     id: String,
+    #[serde(default)]
+    name: String,
     client_id: String,
     subject: String,
     email: String,
@@ -74,8 +79,19 @@ struct Store {
     accounts: BTreeMap<String, Account>,
     #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    registry_migrated: bool,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    default_credential_id: Option<String>,
+    #[serde(default)]
+    legacy_api_credential_id: Option<String>,
+    #[serde(default)]
+    api_keys: BTreeMap<String, credentials::ApiKey>,
 }
 struct Attempt {
+    name: Option<String>,
     state: String,
     nonce: String,
     verifier: String,
@@ -138,6 +154,11 @@ impl Auth {
                 model: model.into(),
                 accounts: BTreeMap::new(),
                 api_key: String::new(),
+                registry_migrated: false,
+                revision: 0,
+                default_credential_id: None,
+                legacy_api_credential_id: None,
+                api_keys: BTreeMap::new(),
             })?;
         }
         auth.load()?;
@@ -188,18 +209,18 @@ impl Auth {
         }
     }
     pub fn api_key(&self) -> Result<Option<String>> {
-        let key = self.load()?.api_key;
-        Ok(if key.is_empty() { None } else { Some(key) })
+        let store = self.load()?;
+        if let Some(id) = &store.default_credential_id {
+            if let Some(key) = store.api_keys.get(id) {
+                return Ok(Some(key.key.clone()));
+            }
+        }
+        Ok((!store.api_key.is_empty()).then_some(store.api_key))
     }
     pub async fn save_api_key(&self, key: &str) -> Result<()> {
-        let key = key.trim();
-        if key.is_empty() || key.len() > 4096 || key.chars().any(char::is_whitespace) {
-            bail!("Enter a non-empty OpenAI API key without whitespace.");
-        }
-        let _lock = self.lock().await?;
-        let mut store = self.load()?;
-        store.api_key = key.to_owned();
-        self.save(&store)
+        let created = self.create_credential("OpenAI API", key).await?;
+        self.select_credential_default(created["id"].as_str().unwrap())
+            .await
     }
     pub fn profile(&self) -> Result<Value> {
         let store = self.load()?;
@@ -207,7 +228,8 @@ impl Auth {
             bail!("Invalid saved billing route.");
         }
         Ok(
-            json!({"billing_route":store.route,"chatgpt_account":store.selected,"model":store.model}),
+            json!({"billing_route":store.route,"chatgpt_account":store.selected,"model":store.model,
+                "credential_id":store.default_credential_id}),
         )
     }
     pub fn status(&self, api_key_available: bool) -> Result<Value> {
@@ -217,7 +239,7 @@ impl Auth {
             "connected":!a.id_token.is_empty() || !a.refresh_token.is_empty(),"plan_enabled":a.allowed(),"paused":a.paused})).collect();
         Ok(
             json!({"billing_route":store.route,"selected_account":store.selected,"model":store.model,
-            "accounts":accounts,"api_key_available":api_key_available || !store.api_key.is_empty(),"usage_url":"https://chatgpt.com/settings/usage"}),
+            "accounts":accounts,"api_key_available":if store.registry_migrated { !store.api_keys.is_empty() } else { api_key_available || !store.api_key.is_empty() },"usage_url":"https://chatgpt.com/settings/usage"}),
         )
     }
     pub async fn select(
@@ -255,6 +277,12 @@ impl Auth {
             selected.welcomed = true;
         }
         store.route = route.into();
+        store.default_credential_id = if route == "chatgpt" {
+            account.map(str::to_owned)
+        } else {
+            store.api_keys.keys().next().cloned()
+        };
+        store.revision += 1;
         self.save(&store)?;
         Ok(welcome)
     }
@@ -343,6 +371,7 @@ impl Auth {
         attempts.insert(
             ticket.clone(),
             Attempt {
+                name: None,
                 state,
                 nonce,
                 verifier,
@@ -506,19 +535,29 @@ impl Auth {
         }
         let _lock = self.lock().await?;
         let mut store = self.load()?;
-        let mut account = attempt.account.unwrap_or_else(|| Account {
-            welcomed: false,
-            paused: false,
-            id: Uuid::new_v4().to_string(),
-            client_id: client.clone(),
-            subject: claims.sub.clone(),
-            email: claims.email.clone(),
-            access_token: String::new(),
-            refresh_token: String::new(),
-            id_token: String::new(),
-            expires_at: 0,
-            scopes: vec![],
-        });
+        if let Some(previous) = &attempt.account {
+            if !store.accounts.contains_key(&previous.id) {
+                bail!("This credential was deleted while sign-in was open. Start a new sign-in.");
+            }
+        }
+        let mut account = attempt
+            .account
+            .as_ref()
+            .and_then(|previous| store.accounts.get(&previous.id).cloned())
+            .unwrap_or_else(|| Account {
+                welcomed: false,
+                paused: false,
+                id: Uuid::new_v4().to_string(),
+                name: String::new(),
+                client_id: client.clone(),
+                subject: claims.sub.clone(),
+                email: claims.email.clone(),
+                access_token: String::new(),
+                refresh_token: String::new(),
+                id_token: String::new(),
+                expires_at: 0,
+                scopes: vec![],
+            });
         if store
             .accounts
             .values()
@@ -527,9 +566,20 @@ impl Auth {
             bail!("This ChatGPT registration is already saved; reconnect the saved account.");
         }
         account.email = claims.email;
+        if let Some(name) = attempt.name {
+            account.name = name;
+        }
+        if account.name.is_empty() {
+            account.name = if account.email.is_empty() {
+                "ChatGPT".into()
+            } else {
+                account.email.clone()
+            };
+        }
         account.paused = false;
         apply_tokens(&mut account, &tokens, false)?;
         store.accounts.insert(account.id.clone(), account);
+        store.revision += 1;
         self.save(&store)
     }
     pub fn check_inference(&self, id: &str) -> Result<()> {
@@ -555,6 +605,7 @@ impl Auth {
             .get_mut(id)
             .context("Unknown ChatGPT account.")?
             .paused = paused;
+        store.revision += 1;
         self.save(&store)
     }
     pub async fn token(self: &Arc<Self>, id: &str) -> Result<String> {

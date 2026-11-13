@@ -73,6 +73,7 @@ impl Client {
             &route,
             &model,
         )?;
+        auth.migrate_credentials(&key)?;
         Ok(Self {
             auth: Some(Arc::new(auth)),
             http,
@@ -95,30 +96,38 @@ impl Client {
             None => Value::Null,
         };
         let plan = selected["billing_route"] == "chatgpt";
-        json!({
+        let mut profile = json!({
             "model": if plan { selected["model"].as_str().unwrap_or(&self.model) } else { &self.model },
             "reasoning_effort": REASONING_EFFORT,
             "cyber_access_program": if plan { None } else { self.cyber_access_program.as_deref() },
-            "billing_route": if plan { "chatgpt" } else { "api_key" },
+            "billing_route": if self.auth.is_some() && selected["credential_id"].is_null() { "unassigned" } else if plan { "chatgpt" } else { "api_key" },
+            "credential_id": selected["credential_id"],
             "chatgpt_account": if plan { selected["chatgpt_account"].clone() } else { Value::Null },
-        })
+        });
+        if self.auth.is_none() {
+            profile.as_object_mut().unwrap().remove("credential_id");
+        }
+        profile
     }
     pub fn api_profile(&self) -> Value {
         json!({"model":self.model,"reasoning_effort":REASONING_EFFORT,
             "cyber_access_program":self.cyber_access_program,"billing_route":"api_key","chatgpt_account":null})
     }
     pub fn key_available(&self) -> bool {
-        !self.key.is_empty()
-            || self
-                .auth
-                .as_ref()
-                .is_some_and(|auth| auth.api_key().ok().flatten().is_some())
+        match &self.auth {
+            Some(auth) => auth.credentials().ok().is_some_and(|r| {
+                r["credentials"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["type"] == "api_key"))
+            }),
+            None => !self.key.is_empty(),
+        }
     }
     fn api_key(&self) -> Result<String> {
         if let Some(auth) = &self.auth {
-            if let Some(key) = auth.api_key()? {
-                return Ok(key);
-            }
+            return auth
+                .api_key()?
+                .context("Choose a saved API credential. No environment fallback was used.");
         }
         if self.key.is_empty() {
             bail!("Use /login to connect an API key before creating API agents.");
@@ -127,18 +136,29 @@ impl Client {
     }
     async fn credential(&self, profile: &Value) -> Result<String> {
         match profile["billing_route"].as_str().unwrap_or("api_key") {
-            "api_key" => self.api_key(),
+            "api_key" => {
+                if let Some(auth) = &self.auth {
+                    let id = profile["credential_id"]
+                        .as_str()
+                        .context("This pane has no credential. Choose one in the lock view.")?;
+                    auth.named_api_key(id)
+                } else {
+                    self.api_key()
+                }
+            }
             "chatgpt" => {
                 let auth = self
                     .auth
                     .as_ref()
                     .context("ChatGPT account storage is unavailable.")?;
-                let id = profile["chatgpt_account"]
+                let id = profile["credential_id"]
                     .as_str()
-                    .context("Choose a ChatGPT account for new agents in /login.")?;
+                    .or_else(|| profile["chatgpt_account"].as_str())
+                    .context("This pane has no subscription credential.")?;
                 auth.check_inference(id)?;
                 auth.token(id).await
             }
+            "unassigned" => bail!("This pane has no credential. Choose one in the lock view."),
             _ => bail!("Unknown agent billing route."),
         }
     }
@@ -192,11 +212,37 @@ impl Client {
             .post(endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
+        // Keep the API key bound through retries. OAuth may refresh only this
+        // account; deletion keeps the already-issued bearer for this request.
+        let mut credential = self.credential(profile).await?;
+        let mut request_secrets = vec![credential.clone()];
         let mut http_attempt = 0;
         let mut waited = Duration::ZERO;
         loop {
-            // Recheck the same account after backoff; another request may have paused it.
-            let credential = self.credential(profile).await?;
+            if http_attempt > 0 && profile["billing_route"] == "chatgpt" {
+                let id = profile["credential_id"]
+                    .as_str()
+                    .or_else(|| profile["chatgpt_account"].as_str())
+                    .context("Missing request account.")?;
+                if self
+                    .auth
+                    .as_ref()
+                    .context("Credential storage unavailable.")?
+                    .account_exists(id)?
+                {
+                    credential = self.credential(profile).await?;
+                    if !request_secrets.contains(&credential) {
+                        request_secrets.push(credential.clone());
+                    }
+                }
+            }
+            let redact = |text: &str| {
+                request_secrets
+                    .iter()
+                    .fold(self.redact(text), |text, secret| {
+                        text.replace(secret, "[redacted]")
+                    })
+            };
             http_attempt += 1;
             let sent = request
                 .try_clone()
@@ -217,12 +263,10 @@ impl Client {
                     } else {
                         "send"
                     };
-                    let message = self
-                        .redact(&format!(
-                            "Cannot reach the OpenAI API: {:#}",
-                            anyhow::Error::new(error)
-                        ))
-                        .replace(&credential, "[redacted]");
+                    let message = redact(&format!(
+                        "Cannot reach the OpenAI API: {:#}",
+                        anyhow::Error::new(error)
+                    ));
                     on_event(&failure_event(
                         model,
                         profile,
@@ -260,14 +304,12 @@ impl Client {
                 let delay = retryable_status(status, &error)
                     .then(|| retry_delay(http_attempt, waited, advised))
                     .flatten();
-                let message = self
-                    .redact(&provider_error(
-                        status,
-                        request_id.as_deref().unwrap_or("unavailable"),
-                        &error,
-                        profile,
-                    ))
-                    .replace(&credential, "[redacted]");
+                let message = redact(&provider_error(
+                    status,
+                    request_id.as_deref().unwrap_or("unavailable"),
+                    &error,
+                    profile,
+                ));
                 // Diagnostics retain timestamps and retries even if the next attempt succeeds.
                 on_event(&failure_event(
                     model,
@@ -301,11 +343,7 @@ impl Client {
                 while let Some(event) = stream.next().await {
                     let event = event.map_err(|error| {
                         retryable_stream = true;
-                        anyhow::anyhow!(
-                            "Cannot read API stream: {}",
-                            self.redact(&error.to_string())
-                                .replace(&credential, "[redacted]")
-                        )
+                        anyhow::anyhow!("Cannot read API stream: {}", redact(&error.to_string()))
                     })?;
                     let event: Value = serde_json::from_str(&event.data)
                         .context("Invalid JSON in the API stream.")?;
@@ -327,14 +365,12 @@ impl Client {
                             && !has_usage
                             && retryable_stream_error(&event);
                         self.pause_for_limit(profile, &event).await?;
-                        let message = self
-                            .redact(&provider_error(
-                                status.as_u16(),
-                                request_id,
-                                &event,
-                                profile,
-                            ))
-                            .replace(&credential, "[redacted]");
+                        let message = redact(&provider_error(
+                            status.as_u16(),
+                            request_id,
+                            &event,
+                            profile,
+                        ));
                         terminal_event = Some(event);
                         bail!("OpenAI response stopped: {message}");
                     }
@@ -376,9 +412,7 @@ impl Client {
                             on_event(event);
                         }
                     }
-                    let message = self
-                        .redact(&format!("{error:#}"))
-                        .replace(&credential, "[redacted]");
+                    let message = redact(&format!("{error:#}"));
                     let mut failure = failure_event(
                         model,
                         profile,
