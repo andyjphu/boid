@@ -1346,6 +1346,7 @@ impl Hub {
                 }
                 r.order += 1;
                 r.stop_through = r.order;
+                r.cancel_queued_question_answers();
                 r.paused = true;
                 r.listen_on_restart = Some(false);
                 Ok(r.order)
@@ -1368,6 +1369,7 @@ impl Hub {
             r.listen_on_restart = Some(false);
             r.order += 1;
             r.stop_through = r.order;
+            r.cancel_queued_question_answers();
             let users = r.inputs.len();
             let peers = r.inbox.len();
             r.inputs.clear();
@@ -1435,6 +1437,7 @@ impl Hub {
             h.record.paused = true;
             h.record.order += 1;
             h.record.stop_through = h.record.order;
+            h.record.cancel_queued_question_answers();
             let users = h.record.inputs.len();
             let peers = h.record.inbox.len();
             h.record.inputs.clear();

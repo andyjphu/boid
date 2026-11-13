@@ -5,6 +5,8 @@ const empty = document.querySelector("#empty");
 const workspaceError = document.querySelector("#workspace-error");
 const login = document.querySelector("#login");
 const sessions = new Map();
+// Requests outlive pane DOM when switching screens.
+const questionSubmissions = new Map();
 const communications = new Map();
 const communicationEntries = new Map();
 const composerPadding = 8;
@@ -966,17 +968,19 @@ function createQuestions(ui) {
     event.preventDefault();
     const id = ui.questionId;
     const text = ui.questionInput.value;
-    if (ui.questionSending || !id || !text.trim()) return;
+    if (ui.questionSending || questionSubmissions.has(ui.id) || !id || !text.trim()) return;
     ui.questionSending = true;
     ui.questionSubmit.disabled = true;
     ui.questionError.hidden = true;
     try {
-      await request(`/api/sessions/${encodeURIComponent(ui.id)}/questions/${encodeURIComponent(id)}/answer`, "POST", { text });
+      const submission = request(`/api/sessions/${encodeURIComponent(ui.id)}/questions/${encodeURIComponent(id)}/answer`, "POST", { text });
+      questionSubmissions.set(ui.id, submission);
+      await submission;
       ui.questionDrafts.delete(id);
       // The SSE update can arrive before the HTTP response. Never remove a different question.
       setQuestions(ui, ui.questions.filter(q => q.id !== id));
     } catch (error) { showError(ui.questionError, error); }
-    finally { ui.questionSending = false; ui.questionSubmit.disabled = false; }
+    finally { questionSubmissions.delete(ui.id); ui.questionSending = false; ui.questionSubmit.disabled = false; }
   };
 }
 
@@ -2927,6 +2931,7 @@ document.addEventListener("keydown", async event => {
   ui.error.hidden = true;
   try {
     await ui.submission?.catch(() => {});
+    await questionSubmissions.get(ui.id)?.catch(() => {});
     await request(`/api/sessions/${encodeURIComponent(ui.id)}/interrupt`, "POST");
   }
   catch (error) {

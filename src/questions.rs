@@ -56,6 +56,21 @@ impl Question {
     }
 }
 
+impl Record {
+    pub(super) fn cancel_queued_question_answers(&mut self) {
+        for question in &mut self.view.questions {
+            if question.answer.as_ref().is_some_and(|answer| {
+                self.inputs
+                    .iter()
+                    .any(|input| input.id == answer.message_id && input.order <= self.stop_through)
+            }) {
+                question.answer = None;
+                question.wait_outcome = Some("answer_cancelled".into());
+            }
+        }
+    }
+}
+
 impl Hub {
     pub fn recover_questions(&self, id: &str, session: &mut Session) -> Result<()> {
         self.update(id, |r| {

@@ -18,6 +18,8 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
     const errors = [], answers = [];
     const screens = {revision: 1, count: 2, panes: {}};
     let rejectAnswer = false, seq = 100;
+    let holdAnswer = false, releaseAnswer;
+    const interrupts = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.addInitScript(() => {window.EventSource = class {constructor() {window.testEvents = this;} close() {}};});
     await page.route('**/*', async route => {
@@ -27,8 +29,10 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
         const text = route.request().postDataJSON().text;
         if (rejectAnswer) return route.fulfill({status: 400, json: {error: 'Session input queue is full.'}});
         answers.push({path: u.pathname, text});
+        if (holdAnswer) await new Promise(resolve => { releaseAnswer = resolve; });
         return route.fulfill({status: 202, json: {message_id: `answer-${answers.length}`, status: 'queued'}});
       }
+      if (u.pathname.endsWith('/interrupt')) { interrupts.push(u.pathname); return route.fulfill({json: {status: 'interrupt_requested'}}); }
       if (u.pathname === '/api/config') return route.fulfill({json: {cwd: '/work/boid', next_agent_name: 'canary', agent_names: ['canary', 'swift']}});
       if (u.pathname === '/api/screens') return route.fulfill({json: screens});
       if (u.pathname.startsWith('/api/')) return route.fulfill({json: []});
@@ -116,7 +120,22 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
     const pane = await a.boundingBox();
     assert.ok(panel.height <= pane.height * .56);
     assert.ok(await a.locator('.trace').evaluate(e => e.clientHeight) > 60);
+    // Escape must follow an in-flight answer, even after the pane was recreated.
+    holdAnswer = true;
+    await a.locator('.question-reply').fill('Use staging');
+    await a.locator('.question-submit').click();
+    for (let i = 0; !releaseAnswer; i++) { assert.ok(i < 100); await new Promise(resolve => setTimeout(resolve, 10)); }
+    await page.locator('#screens [data-screen="2"]').click();
+    await page.evaluate(() => snapshot([], [], ['a']));
+    await page.locator('#screens [data-screen="1"]').click();
+    await page.evaluate(v => snapshot([v], []), view('a', [pending]));
+    await a.locator('.question-reply').press('Escape');
+    await page.waitForFunction(() => sessions.get('a').interruptRequested);
+    assert.equal(interrupts.length, 0, 'interrupt cannot overtake the answer POST');
+    releaseAnswer();
+    for (let i = 0; !interrupts.length; i++) { assert.ok(i < 100); await new Promise(resolve => setTimeout(resolve, 10)); }
+    assert.equal(interrupts.length, 1);
     assert.deepEqual(errors, []);
-    console.log('PASS: urgent pane, question picker, per-question drafts, ordinary draft, reconnect, screen switches, failed submission, reply stream, timeout, late answer, narrow pane');
+    console.log('PASS: urgent pane, question picker, drafts, reconnect, screen switches, failed submission, reply stream, timeout, late answer, narrow pane, Escape ordering across remount');
   } finally {await browser.close();}
 })().catch(error => {console.error(error); process.exitCode = 1;});

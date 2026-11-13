@@ -105,6 +105,53 @@ fn result(request: &Value, call_id: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_queued_answer_can_be_submitted_again_after_stop_or_end() {
+    for end in [false, true] {
+        let work = tempfile::tempdir().unwrap();
+        let (hub, mut rx, server) = fixture(None).await;
+        let a = agent(&hub, work.path(), "cancel-reply", "Start");
+        next(&mut rx)
+            .await
+            .1
+            .send(json!([prompt("queued", "Which target?", None)]))
+            .unwrap();
+        let (_, hold_response) = next(&mut rx).await;
+        let q = question(&hub, &a.id).await;
+        let first = hub.answer_question(&a.id, &q.id, "Staging".into()).unwrap();
+        if end {
+            hub.close(&a.id).await.unwrap();
+            hub.reopen(&a.id).unwrap();
+        } else {
+            hub.stop(&a.id).unwrap();
+            idle(&hub, &a.id, "stopped").await;
+        }
+        let open = hub.view(&a.id).unwrap().questions;
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, q.id);
+        assert_eq!(open[0].wait_outcome.as_deref(), Some("answer_cancelled"));
+        let second = hub.answer_question(&a.id, &q.id, "Staging".into()).unwrap();
+        assert_ne!(first, second);
+        let (request, release) = next(&mut rx).await;
+        assert_eq!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["role"] == "user"
+                    && item["content"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("Staging")))
+                .count(),
+            1
+        );
+        release.send(json!([])).unwrap();
+        drop(hold_response);
+        hub.shutdown().await;
+        server.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nonblocking_questions_continue_and_deduplicate_with_durable_answers() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
