@@ -10,6 +10,7 @@ const TRACE_KINDS: &[&str] = &[
     "tool_result",
     "tool_arguments",
     "context",
+    "skill",
     "notice",
     "error",
 ];

@@ -92,7 +92,14 @@ async fn trace_pages_preserve_latest_tail_utf8_attribution_and_identity() {
         json!({"to":peer.id,"kind":"assistant","limit":2,"before":latest["next_before"]}),
     );
     assert_eq!(older["entries"][1]["text"], "entry 22");
+    hub.entry(&peer.id, "skill", "Operator-selected guidance");
+    hub.entry(&peer.id, "skill", "Catalog refresh warning");
+    let skills = read(&hub, &reader, json!({"to":peer.id,"kind":"skill"}));
+    assert_eq!(skills["entries"][0]["text"], "Operator-selected guidance");
+    assert_eq!(skills["entries"][1]["text"], "Catalog refresh warning");
     let all = read(&hub, &reader, json!({"to":peer.id}));
+    assert!(all.to_string().contains("Operator-selected guidance"));
+    assert!(all.to_string().contains("Catalog refresh warning"));
     assert!(!all.to_string().contains("not a visible trace message"));
     assert!(!all.to_string().contains("partial args"));
     let text = "🐦".repeat(12000) + "NEWEST";
@@ -172,18 +179,27 @@ async fn restored_sessions_receive_the_tool_without_operator_refresh() {
     let state = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
     let old = create(&hub, "old", "");
-    hub.update(&old.id, |record| {
-        record
-            .engine
-            .tools
-            .as_array_mut()
-            .unwrap()
-            .retain(|tool| tool["name"] != "read_peer_trace");
-        Ok(())
-    })
-    .unwrap();
     hub.shutdown().await;
     drop(hub);
+    // Emulate a pre-tool saved session only after all workers have stopped.
+    let path = state
+        .path()
+        .join("sessions")
+        .join(format!("{}.json", old.id));
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["engine"]["tools"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tool| tool["name"] != "read_peer_trace");
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        saved["engine"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["name"] != "read_peer_trace")
+    );
     let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
     {
         let data = restored.0.data.lock().unwrap();

@@ -94,7 +94,7 @@ pub fn peer_trace_definition() -> Value {
             ("to", json!({"type":"string"})),
             (
                 "kind",
-                json!({"type":["string","null"],"enum":["all","assistant","user","peer","tool_call","tool_result","tool_arguments","context","notice","error",null]}),
+                json!({"type":["string","null"],"enum":["all","assistant","user","peer","tool_call","tool_result","tool_arguments","context","skill","notice","error",null]}),
             ),
             (
                 "limit",
