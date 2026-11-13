@@ -702,7 +702,8 @@ function withRenderSelection(render) {
 
 function rememberPosition(ui) {
   if (ui.follow) { ui.anchor = null; return; }
-  const top = ui.trace.getBoundingClientRect().top;
+  const viewport = ui.trace.getBoundingClientRect();
+  const top = viewport.top;
   const anchor = ui.anchor?.node;
   if (anchor?.isConnected && !anchor.hidden) {
     const bounds = anchor.getBoundingClientRect();
@@ -711,8 +712,11 @@ function rememberPosition(ui) {
       return;
     }
   }
-  const node = [...ui.trace.querySelectorAll(".entry")].find(node =>
-    !node.hidden && node.getBoundingClientRect().bottom > top);
+  const node = [...ui.trace.querySelectorAll(".entry")].find(node => {
+    if (node.hidden) return false;
+    const bounds = node.getBoundingClientRect();
+    return bounds.bottom > top && bounds.top < viewport.bottom;
+  });
   ui.anchor = node ? { node, offset: node.getBoundingClientRect().top - top } : null;
 }
 
@@ -1414,12 +1418,14 @@ function compactOutput(ui, item, content, text, label = "Output") {
     details.open = !details.open;
     item[openKey] = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected) return;
     if (Boolean(item[openKey]) === details.open) return;
     item[openKey] = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   return block;
 }
@@ -1530,12 +1536,14 @@ function renderToolEntry(ui, item) {
     showResult(details.open);
     for (const entry of [call, result].filter(Boolean)) if (ui.mounted.has(entry)) entry.height = measuredHeight(entry);
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected || Boolean(owner.expandedTool) === details.open) return;
     for (const entry of [call, result].filter(Boolean)) entry.expandedTool = details.open;
     showResult(details.open);
     restorePosition(ui);
+    scheduleViewport(ui);
   });
 }
 
@@ -1568,11 +1576,13 @@ function renderSkillEntry(ui, item) {
     rememberPosition(ui);
     item.expandedSkill = details.open = !details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
   details.addEventListener("toggle", () => {
     if (!details.isConnected || Boolean(item.expandedSkill) === details.open) return;
     item.expandedSkill = details.open;
     restorePosition(ui);
+    scheduleViewport(ui);
   });
 }
 
@@ -1663,7 +1673,13 @@ function mountTranscript(ui) {
   if (ui.history && history.length) {
     const heights = history.map(item => item.node.isConnected ? measuredHeight(item) : (item.height ?? 60));
     let start = 0, end = history.length;
-    if (ui.follow) start = Math.max(0, end - 35);
+    if (ui.follow) {
+      // A count of entries does not describe viewport coverage: collapsed tool
+      // results can have zero height. Include enough pixels above the tail.
+      let height = 0;
+      start = end;
+      while (start > 0 && (end - start < 35 || height < ui.trace.clientHeight + 700)) height += heights[--start];
+    }
     else {
       const top = Math.max(0, ui.trace.scrollTop - 700);
       const bottom = ui.trace.scrollTop + ui.trace.clientHeight + 700;
@@ -1674,7 +1690,7 @@ function mountTranscript(ui) {
         position += heights[i];
       }
       end = start;
-      while (end < history.length && position < bottom && end - start < 100) position += heights[end++];
+      while (end < history.length && position < bottom) position += heights[end++];
       end = Math.max(start + 1, end);
     }
     if (ui.historyRebase && ui.anchor?.node) {
@@ -1816,6 +1832,7 @@ function scheduleTranscript(ui) {
     if (sessions.get(ui.id) !== ui) return;
     withRenderSelection(() => {
       rememberPosition(ui);
+      const readingTop = !ui.follow ? ui.trace.scrollTop : null;
       if (ui.structureDirty) {
         mountTranscript(ui);
         ui.structureDirty = false;
@@ -1833,7 +1850,17 @@ function scheduleTranscript(ui) {
       ui.dirty.clear();
       if (ui.groupDirty) groupUserEntries(ui);
       activatePromptSpace(ui);
+      if (readingTop !== null && !ui.anchor?.node.isConnected) scrollTrace(ui, readingTop);
       restorePosition(ui);
+      if (ui.history) {
+        // Newly measured entries can be much shorter than their cached estimates.
+        // Refill only when a virtual spacer intrudes into the visible viewport.
+        const bounds = ui.trace.getBoundingClientRect();
+        const before = ui.spacerBefore.getBoundingClientRect();
+        const after = ui.spacerAfter.getBoundingClientRect();
+        if ((before.height > 0 && before.bottom > bounds.top + 10)
+            || (after.height > 0 && after.top < bounds.bottom - 10)) scheduleViewport(ui);
+      }
       if (ui.history && ui.history.start > 0 && ui.content.offsetHeight < ui.trace.clientHeight) loadHistory(ui, "before");
     });
   });
