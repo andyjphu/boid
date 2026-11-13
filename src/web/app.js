@@ -483,6 +483,13 @@ function promptVisible(ui) {
 }
 
 function followTarget(ui) {
+  const contentHeight = ui.content.offsetHeight;
+  // History replacement and collapsed entries can shorten the transcript.
+  // Retain only the composer gap, not the removed transcript's coordinates.
+  if (contentHeight < ui.promptContentHeight) {
+    ui.retainedPromptEnd = Math.max(0, ui.retainedPromptEnd - (ui.promptContentHeight - contentHeight));
+  }
+  ui.promptContentHeight = contentHeight;
   const clearance = ui.autoClearance && promptVisible(ui)
     ? ui.overlay.getBoundingClientRect().height : 0;
   const bottom = messageBottom(ui);
@@ -768,6 +775,7 @@ function addSession(view) {
   ui.followClearance = 0;
   ui.autoClearance = false;
   ui.retainedPromptEnd = 0;
+  ui.promptContentHeight = 0;
   ui.overlayHeight = 0;
   ui.trace = element("div", "trace");
   ui.trace.tabIndex = 0;
@@ -1038,7 +1046,10 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const hint = ui.interruptRequested ? "Interrupt requested" : pickerOpen(ui) ? "" : "Esc to interrupt";
+  ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : "Working";
+  if (ui.interruptRequested) ui.pane.dataset.interruptRequested = "true";
+  else delete ui.pane.dataset.interruptRequested;
+  const hint = ui.interruptRequested || pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
 }
 

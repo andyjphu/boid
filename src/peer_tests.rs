@@ -75,6 +75,156 @@ fn call(id: &str, name: &str, arguments: Value) -> Value {
     json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments.to_string()})
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn escape_cancels_running_work_before_storage_lock_and_preserves_followup() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let target = agent(&hub, work.path(), "interrupt-test", "Start");
+    let (_, release) = next(&mut rx).await;
+    release.send(json!([
+        call("done", "write_file", json!({"path":"completed","content":"retained"})),
+        call("running", "exec_command", json!({"command":"echo $$ > running.pid; while :; do sleep 1; done", "timeout_ms":60000})),
+        call("unstarted", "write_file", json!({"path":"must-not-run","content":"bad"}))
+    ])).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !work.path().join("running.pid").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pid: i32 = std::fs::read_to_string(work.path().join("running.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    hub.message(&target.id, "Continue with the corrected task".into())
+        .unwrap();
+
+    // A concurrent session save owns this lock. Escape must reach the running
+    // process without waiting for that save or its own recovery checkpoint.
+    let (locked, wait_locked) = oneshot::channel();
+    let (unlock, wait_unlock) = std::sync::mpsc::channel();
+    let locked_hub = hub.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        let _data = locked_hub.0.data.lock().unwrap();
+        locked.send(()).unwrap();
+        let _ = wait_unlock.recv();
+    });
+    wait_locked.await.unwrap();
+    let control_hub = hub.clone();
+    let id = target.id.clone();
+    let started = std::time::Instant::now();
+    let mut control = tokio::task::spawn_blocking(move || control_hub.interrupt(&id));
+    let accepted = tokio::time::timeout(Duration::from_millis(500), &mut control).await;
+    let acceptance_ms = started.elapsed().as_millis();
+    let cancelled = tokio::time::timeout(Duration::from_millis(500), async {
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let cancellation_ms = started.elapsed().as_millis();
+    // Always release the fixture lock before asserting, including on old code.
+    unlock.send(()).unwrap();
+    writer.await.unwrap();
+    let accepted_without_save = accepted.is_ok();
+    if let Ok(result) = accepted {
+        result.unwrap().unwrap();
+    } else {
+        control.await.unwrap().unwrap();
+    }
+
+    let (input, release) = next(&mut rx).await;
+    let history = input["input"].as_array().unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|i| i["content"] == "Continue with the corrected task")
+            .count(),
+        1
+    );
+    for (id, expected) in [
+        ("done", "true"),
+        ("running", "partially completed"),
+        ("unstarted", "Not executed"),
+    ] {
+        assert!(
+            history.iter().any(|i| i["call_id"] == id
+                && i["output"].as_str().is_some_and(|s| s.contains(expected)))
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("completed")).unwrap(),
+        "retained"
+    );
+    assert!(!work.path().join("must-not-run").exists());
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    hub.interrupt(&target.id).unwrap();
+    wait_status(&hub, &target.id, "stopped").await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    assert_eq!(restored.view(&target.id).unwrap().status, "stopped");
+    assert!(restored.view(&target.id).unwrap().pending.is_empty());
+    restored.shutdown().await;
+    eprintln!(
+        "Escape under held storage lock: accepted={acceptance_ms}ms, process gone={cancellation_ms}ms"
+    );
+    assert!(
+        accepted_without_save,
+        "Escape acceptance waited for session storage"
+    );
+    assert!(
+        cancelled,
+        "running process survived until the storage lock was released"
+    );
+}
+
+#[tokio::test]
+async fn escape_storage_failure_stays_stopped_and_controls_follow_lifecycle() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert!(hub.interrupt("missing").is_err());
+    let target = agent(&hub, work.path(), "interrupt-failure", "Start");
+    let (_, _release) = next(&mut rx).await;
+    let sessions = state.path().join("sessions");
+    let backup = state.path().join("saved-sessions");
+    std::fs::rename(&sessions, &backup).unwrap();
+    std::fs::write(&sessions, "fixture blocks checkpoint").unwrap();
+    // Acceptance cancels even when the subsequent recovery save will fail.
+    hub.interrupt(&target.id).unwrap();
+    wait_status(&hub, &target.id, "error").await;
+    assert!(hub.interrupt(&target.id).is_err());
+    assert!(
+        hub.message(&target.id, "Must not resume after failed save".into())
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    std::fs::remove_file(&sessions).unwrap();
+    std::fs::rename(&backup, &sessions).unwrap();
+    let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    assert_eq!(restored.view(&target.id).unwrap().status, "stopped");
+    restored.close(&target.id).await.unwrap();
+    assert!(restored.interrupt(&target.id).is_err());
+    restored.reopen(&target.id).unwrap();
+    restored.interrupt(&target.id).unwrap();
+    restored.shutdown().await;
+    assert!(restored.interrupt(&target.id).is_err());
+}
+
 #[tokio::test]
 async fn diagnostics_preserve_reports_failed_usage_and_unknown_attempts_across_recovery() {
     let work = tempfile::tempdir().unwrap();

@@ -209,7 +209,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .slash-option { padding: 3px 4px; cursor: pointer; }
 .slash-option:hover { background: #292929; }
 .working-status { flex-shrink: 0; height: calc(1.5em + 4px); line-height: 1.5; white-space: nowrap; overflow: hidden; padding: 0 4px 4px; color: #999; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.agent-pane:not([data-status="working"]) .working-status { visibility: hidden; }
+.agent-pane:not([data-status="working"]):not([data-interrupt-requested]) .working-status { visibility: hidden; }
 .agent-pane[data-status="working"] .pane-title, .working-label {
   font-weight: 400;
   color: transparent;
@@ -219,6 +219,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
   animation: working-shimmer 1s linear infinite;
 }
 .working-label { font-weight: 600; background-image: linear-gradient(110deg, #999 35%, #eee 50%, #999 65%); }
+.agent-pane[data-interrupt-requested] .pane-title,
+.agent-pane[data-interrupt-requested] .working-label { animation: none; background: none; color: #ccc; }
 @keyframes working-shimmer { from { background-position: 200% 0; } to { background-position: 0 0; } }
 @media (prefers-reduced-motion: reduce) {
   .agent-pane[data-status="working"] .pane-title, .working-label { animation: none; background: none; color: #eee; }
