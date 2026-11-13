@@ -498,6 +498,7 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
             message: String::new(),
         })
         .unwrap();
+    hub.entry(&view.id, "assistant", "Prior transcript remains");
     tokio::task::yield_now().await; // The existing worker has already captured its API profile.
     let other = hub
         .create(Create {
@@ -506,7 +507,6 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
             message: String::new(),
         })
         .unwrap();
-    hub.entry(&view.id, "notice", "Prior transcript remains");
     let mut model_selection = view.profile.clone();
     model_selection["model"] = json!("second");
     hub.select_profile(&view.id, &view.profile, model_selection)
