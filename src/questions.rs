@@ -200,11 +200,12 @@ impl Hub {
             bail!("Answer must contain 1 to 32000 characters.");
         }
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             if data.closing {
                 bail!("Server is shutting down.");
             }
-            let message_id = self.update_locked(&mut data, id, |r| {
+            let (message_id, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 if r.view.archived || r.view.status == "ending" {
                     bail!("Session has ended. Reopen its history first.");
                 }
@@ -229,7 +230,9 @@ impl Hub {
                 r.listen_on_restart = Some(true);
                 Ok(message_id)
             })?;
-            data.sessions[id].wake.notify_one();
+            drop(data);
+            receipt.wait()?;
+            self.0.data.lock().unwrap().sessions[id].wake.notify_one();
             Ok(message_id)
         })
     }
