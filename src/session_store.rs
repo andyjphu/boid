@@ -47,6 +47,33 @@ impl SessionStore {
         })
     }
 
+    pub fn load_screens<T: DeserializeOwned + Default>(&self) -> Result<T> {
+        let Some(directory) = &self.directory else {
+            return Ok(T::default());
+        };
+        let path = directory.parent().unwrap().join("screens.json");
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context("Cannot read screen assignments; original retained"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub fn save_screens<T: Serialize>(&self, screens: &T) -> Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        let root = directory.parent().unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+        temporary.write_all(&serde_json::to_vec(screens)?)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(root.join("screens.json"))
+            .map_err(|e| e.error)?;
+        File::open(root)?.sync_all()?;
+        Ok(())
+    }
+
     pub fn load<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
         let Some(directory) = &self.directory else {
             return Ok(vec![]);
