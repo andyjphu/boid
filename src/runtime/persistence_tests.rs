@@ -150,8 +150,29 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
     let receipt = {
         let mut data = hub.0.data.lock().unwrap();
         let handle = data.sessions.get_mut(&target.id).unwrap();
-        let record = handle.record.clone();
-        let seq = record.stream_seq + 1;
+        let mut record = handle.record.clone();
+        handle
+            .persistence
+            .enqueue(Operation::Snapshot(Box::new(record.clone())))
+            .unwrap();
+        for seq in 1..=2 {
+            handle
+                .persistence
+                .enqueue(Operation::Delta(Delta {
+                    seq,
+                    entry: entry.clone(),
+                    text: "before ".into(),
+                }))
+                .unwrap();
+        }
+        record.stream_seq = 2;
+        record
+            .view
+            .entries
+            .iter_mut()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .text = "before before ".into();
         handle
             .persistence
             .enqueue(Operation::Snapshot(Box::new(record)))
@@ -159,9 +180,17 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
         handle
             .persistence
             .enqueue(Operation::Delta(Delta {
-                seq,
+                seq: 3,
                 entry: entry.clone(),
-                text: "newer output".into(),
+                text: "newer ".into(),
+            }))
+            .unwrap();
+        handle
+            .persistence
+            .enqueue(Operation::Delta(Delta {
+                seq: 4,
+                entry: entry.clone(),
+                text: "output".into(),
             }))
             .unwrap()
     };
@@ -198,7 +227,7 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
     let view = restored.view(&target.id).unwrap();
     assert_eq!(
         view.entries.iter().find(|e| e.id == entry).unwrap().text,
-        "newer output"
+        "before before newer output"
     );
     restored.shutdown().await;
     hub.shutdown().await;
@@ -561,4 +590,247 @@ async fn admission_timings_separate_roster_wait_from_locked_work() {
     assert!(result.is_err());
     assert!(timings.lock_wait.is_none() && timings.mutation.is_none());
     hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admitted_stream_bytes_backpressure_before_mutation_and_fence_tools() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "delta-byte-bound").await;
+    let entry = hub.entry(&target.id, "assistant", "");
+    let gate = hold_writer(&hub, &target.id).await;
+    let h = hub.clone();
+    let id = target.id.clone();
+    let e = entry.clone();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            h.delta(&id, &e, &"x".repeat(5000));
+            h.delta(&id, &e, &"y".repeat(5000));
+        }),
+    )
+    .await
+    .expect("admitted deltas waited for disk")
+    .unwrap();
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .stream_seq,
+        2
+    );
+    let h = hub.clone();
+    let id = target.id.clone();
+    let e = entry.clone();
+    let mut third = tokio::task::spawn_blocking(move || h.delta(&id, &e, &"z".repeat(5000)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut third)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .stream_seq,
+        2
+    );
+    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
+    let mut serialized = serde_json::to_value(
+        &hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .engine,
+    )
+    .unwrap();
+    serialized["running"] =
+        json!({"id":"fenced", "name":"write_file", "arguments":"{}", "argument_entry":null});
+    let session: Session = serde_json::from_value(serialized).unwrap();
+    let h = hub.clone();
+    let id = target.id.clone();
+    let mut claim = tokio::task::spawn_blocking(move || h.claim_tool(&id, &session));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut claim)
+            .await
+            .is_err()
+    );
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(3), third)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), claim)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    // The third delta can be ordered after the tool claim; fence it separately.
+    let session = hub.0.data.lock().unwrap().sessions[&target.id]
+        .record
+        .engine
+        .clone();
+    hub.checkpoint(&target.id, &session).unwrap();
+    let saved: Record = serde_json::from_slice(
+        &std::fs::read(
+            state
+                .path()
+                .join("sessions")
+                .join(format!("{}.json", target.id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved.stream_seq, 3);
+    assert_eq!(
+        saved
+            .view
+            .entries
+            .iter()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .text
+            .len(),
+        15000
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "delta-failure").await;
+    let entry = hub.entry(&target.id, "assistant", "");
+    let gate = hold_writer(&hub, &target.id).await;
+    let h = hub.clone();
+    let id = target.id.clone();
+    let e = entry.clone();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            h.delta(&id, &e, "admitted before disk failure");
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stream = state
+        .path()
+        .join("sessions")
+        .join(format!("{}.stream", target.id));
+    std::fs::remove_file(&stream).unwrap();
+    std::fs::create_dir(&stream).unwrap();
+    let mut serialized = serde_json::to_value(
+        &hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .engine,
+    )
+    .unwrap();
+    serialized["running"] = json!({"id":"must-not-execute", "name":"write_file", "arguments":"{}", "argument_entry":null});
+    let session: Session = serde_json::from_value(serialized).unwrap();
+    let h = hub.clone();
+    let id = target.id.clone();
+    let claim = tokio::task::spawn_blocking(move || h.claim_tool(&id, &session));
+    gate.release();
+    assert!(!matches!(
+        tokio::time::timeout(Duration::from_secs(3), claim)
+            .await
+            .unwrap()
+            .unwrap(),
+        Ok(true)
+    ));
+    assert_eq!(hub.view(&target.id).unwrap().status, "error");
+    assert!(hub.message(&target.id, "must not accept".into()).is_err());
+    hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_delta_waits_for_exclusive_capacity_and_durable_receipt() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "large-delta").await;
+    let entry = hub.entry(&target.id, "assistant", "");
+    let gate = hold_writer(&hub, &target.id).await;
+    let h = hub.clone();
+    let id = target.id.clone();
+    let e = entry.clone();
+    let mut writing = tokio::task::spawn_blocking(move || h.delta(&id, &e, &"x".repeat(70000)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut writing)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .stream_seq,
+        0
+    );
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(3), writing)
+        .await
+        .unwrap()
+        .unwrap();
+    let deltas = hub.0.store.deltas::<Delta>(&target.id).unwrap();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].text.len(), 70000);
+    hub.shutdown().await;
+}
+
+// Isolated filesystem fixture. No provider or agent requests. Include the final
+// durability fence so async admission cannot hide an unpaid persistence cost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn stream_persistence_fixture() {
+    for paced in [false, true] {
+        for round in 0..3 {
+            let state = tempfile::tempdir().unwrap();
+            let work = tempfile::tempdir().unwrap();
+            let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+            let target = idle_agent(&hub, work.path(), "stream-fixture").await;
+            let entry = hub.entry(&target.id, "assistant", "");
+            let start = std::time::Instant::now();
+            for _ in 0..128 {
+                hub.delta(&target.id, &entry, &"x".repeat(256));
+                if paced {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            let admitted_ms = start.elapsed().as_secs_f64() * 1000.;
+            let session = hub.0.data.lock().unwrap().sessions[&target.id]
+                .record
+                .engine
+                .clone();
+            hub.checkpoint(&target.id, &session).unwrap();
+            let fenced_ms = start.elapsed().as_secs_f64() * 1000.;
+            let record: Record = serde_json::from_slice(
+                &std::fs::read(
+                    state
+                        .path()
+                        .join("sessions")
+                        .join(format!("{}.json", target.id)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(record.stream_seq, 128);
+            assert_eq!(
+                record
+                    .view
+                    .entries
+                    .iter()
+                    .find(|e| e.id == entry)
+                    .unwrap()
+                    .text
+                    .len(),
+                128 * 256
+            );
+            println!(
+                "{{\"paced\":{paced},\"round\":{round},\"records\":128,\"admitted_ms\":{admitted_ms:.3},\"fenced_ms\":{fenced_ms:.3}}}"
+            );
+            hub.shutdown().await;
+        }
+    }
 }

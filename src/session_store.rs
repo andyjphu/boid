@@ -257,6 +257,10 @@ impl SessionStore {
     }
 
     pub fn append<T: Serialize>(&self, id: &str, delta: &T) -> Result<()> {
+        self.append_batch(id, std::slice::from_ref(delta))
+    }
+
+    pub fn append_batch<T: Serialize>(&self, id: &str, deltas: &[T]) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
         };
@@ -265,9 +269,12 @@ impl SessionStore {
             .create(true)
             .mode(0o600)
             .open(directory.join(format!("{id}.stream")))?;
-        let mut line = serde_json::to_vec(delta)?;
-        line.push(b'\n');
-        file.write_all(&line)?;
+        let mut bytes = Vec::new();
+        for delta in deltas {
+            serde_json::to_writer(&mut bytes, delta)?;
+            bytes.push(b'\n');
+        }
+        file.write_all(&bytes)?;
         file.sync_data()?;
         Ok(())
     }
@@ -302,6 +309,25 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_journal_preserves_complete_records_before_torn_tail() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(root.path().into()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let records = [
+            serde_json::json!({"seq":1,"text":"first\n"}),
+            serde_json::json!({"seq":2,"text":"🦉"}),
+        ];
+        store.append_batch(&id, &records).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(root.path().join("sessions").join(format!("{id}.stream")))
+            .unwrap();
+        f.write_all(b"{\"seq\":3").unwrap();
+        f.sync_data().unwrap();
+        assert_eq!(store.deltas::<serde_json::Value>(&id).unwrap(), records);
+    }
 
     #[test]
     fn backup_failure_does_not_publish_and_retry_preserves_original() {
