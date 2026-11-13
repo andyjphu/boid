@@ -462,7 +462,7 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
             .unwrap()
             .entries
             .iter()
-            .any(|e| e.text == "Prior transcript remains")
+            .any(|e| e.text.as_str() == "Prior transcript remains")
     );
     assert_eq!(
         hub.diagnostics()["sessions"]

@@ -223,7 +223,7 @@ impl Hub {
                 r.order += 1;
                 r.inputs.push_back(Input { id: message_id.clone(), text: content.clone(),
                     order: r.order, compact: false, clear: false });
-                r.view.entries.push(Entry { id: message_id.clone(), kind: "user".into(), text: content,
+                r.view.entries.push(Entry { id: message_id.clone(), kind: "user".into(), text: content.into(),
                     replaces: None, input_batch: None });
                 r.view.pending.push(message_id.clone());
                 r.paused = false;

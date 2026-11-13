@@ -35,7 +35,8 @@ pub(crate) struct MessageTimings {
 pub struct Entry {
     pub id: String,
     pub kind: String,
-    pub text: String,
+    // Snapshots share completed text. Streaming detaches only its active entry.
+    pub text: Arc<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,7 +179,8 @@ impl Record {
                 "user" | "assistant" => return true,
                 "error" => return false,
                 "context"
-                    if entry.text == "Stop the current task. Wait for new user direction." =>
+                    if entry.text.as_str()
+                        == "Stop the current task. Wait for new user direction." =>
                 {
                     return false;
                 }
@@ -394,7 +396,7 @@ impl Hub {
                     if let Some(entry) =
                         record.view.entries.iter_mut().find(|e| e.id == delta.entry)
                     {
-                        entry.text.push_str(&delta.text);
+                        Arc::make_mut(&mut entry.text).push_str(&delta.text);
                         if entry.kind == "assistant" {
                             record.engine.partial_text.push_str(&delta.text);
                         }
@@ -446,7 +448,7 @@ impl Hub {
         Entry {
             id: Uuid::new_v4().to_string(),
             kind: kind.into(),
-            text,
+            text: text.into(),
             replaces: None,
             input_batch: None,
         }
@@ -1141,7 +1143,7 @@ impl Hub {
                     .rev()
                     .find(|e| e.id == entry)
                 {
-                    item.text.push_str(text);
+                    Arc::make_mut(&mut item.text).push_str(text);
                     if item.kind == "assistant" {
                         handle.record.engine.partial_text.push_str(text);
                     }
@@ -1336,8 +1338,7 @@ impl Hub {
                     record.view.name = next_agent_name(&data, &self.0.agent_names);
                 }
                 let identity = session_identity(&record.view);
-                record.view.entries[0]
-                    .text
+                Arc::make_mut(&mut record.view.entries[0].text)
                     .push_str(&format!("\n\n{identity}"));
                 self.assign_screen_locked(&mut data, &format!("agent:{id}"), screen)?;
                 let snapshot = record.clone();
@@ -1474,7 +1475,7 @@ impl Hub {
                 let entry = Entry {
                     id: message_id.clone(),
                     kind: "user".into(),
-                    text: text.clone(),
+                    text: text.clone().into(),
                     replaces: None,
                     input_batch: None,
                 };
@@ -2371,6 +2372,21 @@ impl Hub {
 mod tests {
     use super::*;
 
+    #[test]
+    fn transcript_snapshots_share_text_and_isolate_streaming_edits() {
+        let mut entry = Hub::make_entry("assistant", "saved text".into());
+        let snapshot = entry.clone();
+        assert!(Arc::ptr_eq(&entry.text, &snapshot.text));
+        let expected = json!({"id":entry.id,"kind":"assistant","text":"saved text"});
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), expected);
+        Arc::make_mut(&mut entry.text).push_str("; new delta");
+        assert!(!Arc::ptr_eq(&entry.text, &snapshot.text));
+        assert_eq!(snapshot.text.as_str(), "saved text");
+        assert_eq!(entry.text.as_str(), "saved text; new delta");
+        let restored: Entry = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn default_names_are_unique_and_renames_survive_recovery() {
         let state = tempfile::tempdir().unwrap();
@@ -2929,7 +2945,7 @@ mod tests {
         assert_eq!(
             view.entries
                 .iter()
-                .find(|entry| entry.text == "Start")
+                .find(|entry| entry.text.as_str() == "Start")
                 .unwrap()
                 .input_batch,
             Some(1)
@@ -2965,9 +2981,8 @@ mod tests {
         assert!(
             view.entries
                 .iter()
-                .filter(
-                    |entry| entry.text == "First correction" || entry.text == "Second correction"
-                )
+                .filter(|entry| entry.text.as_str() == "First correction"
+                    || entry.text.as_str() == "Second correction")
                 .all(|entry| entry.input_batch == Some(2))
         );
         let mut batches = Vec::new();
@@ -3018,9 +3033,8 @@ mod tests {
                 .unwrap()
                 .entries
                 .iter()
-                .filter(
-                    |entry| entry.text == "Third correction" || entry.text == "Fourth correction"
-                )
+                .filter(|entry| entry.text.as_str() == "Third correction"
+                    || entry.text.as_str() == "Fourth correction")
                 .all(|entry| entry.input_batch == Some(3))
         );
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
@@ -3093,7 +3107,7 @@ mod tests {
                 .unwrap()
                 .entries
                 .iter()
-                .find(|entry| entry.text == "Keep the completed tool result")
+                .find(|entry| entry.text.as_str() == "Keep the completed tool result")
                 .unwrap()
                 .input_batch,
             Some(4)
@@ -3565,7 +3579,13 @@ mod tests {
         let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
         let record = restored.view(&view.id).unwrap();
         assert_eq!(
-            record.entries.iter().find(|e| e.id == entry).unwrap().text,
+            record
+                .entries
+                .iter()
+                .find(|e| e.id == entry)
+                .unwrap()
+                .text
+                .as_str(),
             "hello"
         );
         restored.shutdown().await;

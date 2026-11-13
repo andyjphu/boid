@@ -99,23 +99,46 @@ impl Hub {
             }
             (start, end)
         };
-        let mut view = json!(Self::project_entries(
-            data,
-            source,
-            &source.entries[start..end]
-        ));
+        let mut projected = Self::project_entries(data, source, &source.entries[start..end]);
+        // Bound text before materializing JSON, rather than copying a complete
+        // large tool result only to discard all but its preview immediately.
+        let lengths: Vec<_> = projected
+            .entries
+            .iter_mut()
+            .map(|entry| {
+                let bytes = entry.text.len();
+                if bytes <= PREVIEW_BYTES {
+                    return None;
+                }
+                let mut end = PREVIEW_BYTES;
+                while !entry.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                entry.text = entry.text[..end].to_owned().into();
+                Some(bytes)
+            })
+            .collect();
+        let mut view = json!(projected);
         let superseded: std::collections::HashSet<&str> = source
             .entries
             .iter()
             .filter_map(|e| e.replaces.as_deref())
             .collect();
-        for entry in view["entries"].as_array_mut().unwrap() {
+        for (entry, bytes) in view["entries"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(lengths)
+        {
+            if let Some(bytes) = bytes {
+                entry["text_complete"] = json!(false);
+                entry["text_bytes"] = json!(bytes);
+            }
             entry["superseded"] = json!(
                 entry["id"]
                     .as_str()
                     .is_some_and(|id| superseded.contains(id))
             );
-            preview(entry);
         }
         for message in view["communications"].as_array_mut().into_iter().flatten() {
             preview(message);
@@ -250,12 +273,12 @@ mod tests {
                 .map(|i| Entry {
                     id: format!("e{i}"),
                     kind: "assistant".into(),
-                    text: format!("Message {i}"),
+                    text: format!("Message {i}").into(),
                     replaces: None,
                     input_batch: None,
                 })
                 .collect();
-            r.view.entries[20].text = "界".repeat(100_000);
+            r.view.entries[20].text = "界".repeat(100_000).into();
             r.view.entries[249].replaces = Some("e4".into());
             Ok(())
         })
@@ -294,7 +317,8 @@ mod tests {
             .unwrap();
         assert_eq!(last["id"], "e20");
         assert_eq!(last["text_complete"], false);
-        assert!(last["text"].as_str().unwrap().len() <= PREVIEW_BYTES);
+        assert_eq!(last["text"], "界".repeat(PREVIEW_BYTES / 3));
+        assert_eq!(last["text_bytes"], 300_000);
         assert_eq!(
             hub.history_entry(&view.id, "e20").unwrap()["entries"][0]["text"]
                 .as_str()

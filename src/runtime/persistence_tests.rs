@@ -226,7 +226,7 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
     let restored = Hub::open(Client::test_client(), restored_state.path().into()).unwrap();
     let view = restored.view(&target.id).unwrap();
     assert_eq!(
-        view.entries.iter().find(|e| e.id == entry).unwrap().text,
+        view.entries.iter().find(|e| e.id == entry).unwrap().text.as_str(),
         "before before newer output"
     );
     restored.shutdown().await;
@@ -474,7 +474,8 @@ async fn saturated_storage_waits_without_faulting_or_blocking_the_roster() {
             .iter()
             .find(|e| e.id == entry)
             .unwrap()
-            .text,
+            .text
+            .as_str(),
         "retained after backpressure"
     );
     hub.shutdown().await;
