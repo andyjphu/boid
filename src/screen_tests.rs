@@ -10,6 +10,7 @@ async fn screen_membership_filters_streams_and_survives_restart_without_changing
         message: String::new(),
     };
     let first = hub.create(input()).unwrap();
+    hub.entry(&first.id, "assistant", "retained fixture work");
     assert_eq!(hub.screens()["count"], 1);
     assert_eq!(hub.screens()["panes"], json!({}));
     assert_eq!(
@@ -21,6 +22,7 @@ async fn screen_membership_filters_streams_and_survives_restart_without_changing
     let second = hub.create_on_screen(input(), 2).unwrap();
     let creation = events.try_recv().unwrap();
     assert_eq!(creation["session"]["screen"], 2);
+    hub.entry(&second.id, "assistant", "retained fixture work");
     let (one, _) = hub.subscribe_screen(true, Some(1));
     let (two, _) = hub.subscribe_screen(true, Some(2));
     assert_eq!(one["sessions"].as_array().unwrap().len(), 1);
