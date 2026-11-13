@@ -88,7 +88,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     const keys = p => p.locator('.pane').evaluateAll(nodes => nodes.map(n => n.dataset.paneKey).sort());
     await page.goto('http://boid.test'); await ready(page, 1);
     assert.deepEqual(await keys(page), ['agent:a', 'agent:b', 'terminal:t']);
-    await page.locator('.agent-pane').first().locator('textarea').fill('Unsent on screen one');
+    await page.locator('.agent-pane').first().locator('.composer textarea').fill('Unsent on screen one');
     await page.evaluate(() => {
       const ui = sessions.get('a'); ui.follow = false; scrollTrace(ui, 200); rememberPosition(ui);
     });
@@ -122,7 +122,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     await page.evaluate(() => receiveScreens({ revision: 0, count: 1, panes: {} }));
     assert.equal(await page.evaluate(() => screenCatalog.count), 3, 'stale responses do not revert shared screens');
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
-    assert.equal(await page.locator('[data-pane-key="agent:a"] textarea').inputValue(), 'Unsent on screen one');
+    assert.equal(await page.locator('[data-pane-key="agent:a"] .composer textarea').inputValue(), 'Unsent on screen one');
     assert.ok(Math.abs(await page.locator('[data-pane-key="agent:a"]').evaluate(n => n.getBoundingClientRect().width) - width) < 2, 'per-screen size retained');
     const restored = await page.evaluate(id => { const ui = sessions.get('a'); return { follow: ui.follow, offset: ui.entries.get(id).node.getBoundingClientRect().top - ui.trace.getBoundingClientRect().top }; }, anchor.id);
     assert.equal(restored.follow, false); assert.ok(Math.abs(restored.offset - anchor.offset) < 3, 'reading anchor retained');
@@ -135,7 +135,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
     assert.equal(await page.locator('.setup-form input[name=name]').inputValue(), 'draft-one');
     await page.locator('[aria-label="Discard agent draft"]').click();
-    await page.locator('[data-pane-key="agent:b"] textarea').fill('Unsent while moving');
+    await page.locator('[data-pane-key="agent:b"] .composer textarea').fill('Unsent while moving');
     await page.locator('[data-pane-key="agent:b"] .pane-tab').dragTo(page.locator('#screens [data-screen="3"]'));
     await page.waitForFunction(() => !sessions.has('b'));
     await other.waitForFunction(() => sessions.has('b'));
@@ -143,7 +143,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     assert.equal(await other.evaluate(() => activeScreen), 3);
     assert.equal(screens.panes['agent:b'], 3);
     await page.locator('#screens [data-screen="3"]').click(); await ready(page, 3);
-    assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), 'Unsent while moving');
+    assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), 'Unsent while moving');
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
     const peer = { id: 'b-0', sender_id: 'a', recipient_id: 'b', sender_name: 'a', recipient_name: 'b', sender_entry: 'a-0', text: 'Cross-screen message', state: 'delivered' };
     agents[0].communications = [peer]; agents[1].communications = [peer];
@@ -160,24 +160,24 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     for (const edit of [false, true]) {
       releaseMessage = null;
       const text = edit ? 'Second accepted message' : 'First accepted message';
-      await page.locator('[data-pane-key="agent:b"] textarea').fill(text);
-      await page.locator('[data-pane-key="agent:b"] textarea').press('Enter');
+      await page.locator('[data-pane-key="agent:b"] .composer textarea').fill(text);
+      await page.locator('[data-pane-key="agent:b"] .composer textarea').press('Enter');
       await until(() => releaseMessage);
       await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
       await page.locator('#screens [data-screen="3"]').click(); await ready(page, 3);
-      assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), text);
-      if (edit) await page.locator('[data-pane-key="agent:b"] textarea').fill('Newer edit');
+      assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), text);
+      if (edit) await page.locator('[data-pane-key="agent:b"] .composer textarea').fill('Newer edit');
       releaseMessage();
       if (!edit) await page.waitForFunction(() => sessions.get('b').input.value === '');
-      else { await frames(page); assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), 'Newer edit'); }
+      else { await frames(page); assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), 'Newer edit'); }
     }
     // A move missed while disconnected arrives only in the reconnect snapshot.
-    await page.locator('[data-pane-key="agent:b"] textarea').fill('Typed since the last save');
+    await page.locator('[data-pane-key="agent:b"] .composer textarea').fill('Typed since the last save');
     screens.panes['agent:b'] = 1; screens.revision++;
     await snapshot(page); await frames(page);
     assert.equal(await page.locator('[data-pane-key="agent:b"]').count(), 0);
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
-    assert.equal(await page.locator('[data-pane-key="agent:b"] textarea').inputValue(), 'Typed since the last save');
+    assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), 'Typed since the last save');
     // A newer cross-window move wins over a delayed create response for either pane kind.
     holdAgent = true;
     await page.locator('#add-agent').click(); await page.locator('.setup-form input[name=name]').fill('late-agent');
