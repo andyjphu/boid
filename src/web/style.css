@@ -40,6 +40,7 @@ body.disconnected #workspace,
 body.disconnected .workspace-actions,
 .pane.disconnected { opacity: .45; filter: grayscale(1); }
 #workspace {
+  position: relative;
   --columns: 1;
   --rows: 1;
   min-height: 0;
@@ -66,14 +67,14 @@ body.disconnected .workspace-actions,
   border-bottom: 1px solid #353535;
   background: #1e1e1e;
 }
-.pane-resize { position: absolute; z-index: 6; touch-action: none; user-select: none; }
-.pane-resize-left, .pane-resize-right { top: 0; bottom: 0; width: 4px; cursor: col-resize; }
-.pane-resize-top, .pane-resize-bottom { left: 0; right: 0; height: 4px; cursor: row-resize; }
-.pane-resize-left { left: 0; }
-.pane-resize-right { right: 0; }
-.pane-resize-top { top: 0; }
-.pane-resize-bottom { bottom: 0; }
-.pane-resize:hover, .pane-resize:focus-visible { background: #8bafd04d; outline: none; }
+.pane-resize-layer { position: absolute; top: 0; left: 0; z-index: 6; pointer-events: none; }
+.pane-resize { position: absolute; pointer-events: auto; touch-action: none; user-select: none; outline: none; }
+.pane-resize-vertical { cursor: col-resize; }
+.pane-resize-horizontal { cursor: row-resize; }
+.pane-resize::after { content: ""; position: absolute; pointer-events: none; }
+.pane-resize-vertical::after { left: 3px; top: 0; bottom: 0; width: 1px; }
+.pane-resize-horizontal::after { top: 3px; left: 0; right: 0; height: 1px; }
+.pane-resize:hover::after, .pane-resize:focus-visible::after { background: #8bafd0; }
 body.resizing-panes, body.resizing-panes * { cursor: var(--resize-cursor) !important; user-select: none !important; }
 .pane-header {
   display: flex;
