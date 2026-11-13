@@ -9,6 +9,7 @@ pub fn definitions() -> Value {
     let string = json!({"type": "string"});
     json!([
         compaction_definition(),
+        prompt_user_definition(),
         peer_trace_definition(),
         definition(
             "list_skills",
@@ -112,6 +113,24 @@ pub fn compaction_definition() -> Value {
         "oai_compact",
         "Request manual OpenAI context compaction when the operator asks. Runs after this tool batch; preserves the visible transcript. Do not schedule automatic compaction.",
         &[],
+    )
+}
+
+pub fn prompt_user_definition() -> Value {
+    definition(
+        "prompt_user",
+        "Ask the operator an important question in this agent's pane. Use blocking=true only when work needs the answer; wait_seconds sets how long to wait (1–86400 seconds, null defaults to 300). Nonblocking questions return immediately; use wait_seconds=null. The question stays answerable after a timeout. Answers arrive as user messages. The result confirms the saved question and its ID: do not ask it again. Repeating the same open question reuses it and does not restart its wait. After timeout, decide what authorized work can proceed; silence is not an answer or approval.",
+        &[
+            (
+                "question",
+                json!({"type":"string","minLength":1,"maxLength":8000}),
+            ),
+            ("blocking", json!({"type":"boolean"})),
+            (
+                "wait_seconds",
+                json!({"type":["integer","null"],"minimum":1,"maximum":86400}),
+            ),
+        ],
     )
 }
 

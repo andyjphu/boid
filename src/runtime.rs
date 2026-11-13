@@ -12,6 +12,10 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
+#[path = "questions.rs"]
+mod questions;
+pub use questions::{PromptArgs, Question};
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -24,6 +28,8 @@ pub struct Entry {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct View {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<crate::session::ContextUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,11 +340,12 @@ impl Hub {
             }));
             let mut restored_records = Vec::new();
             for mut record in records {
+                record.engine.refresh_tools();
                 record.engine.ensure_peer_trace_tool();
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3) {
+                if !matches!(record.version, 1 | 2 | 3 | 4) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -359,6 +366,9 @@ impl Hub {
                     record.stream_seq = delta.seq;
                 }
                 for (kind, text) in record.engine.recover_sends(&record.view.id, &messages) {
+                    record.view.entries.push(Self::make_entry(&kind, text));
+                }
+                for (kind, text) in record.engine.recover_questions(&mut record.view.questions) {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
                 // Completed API items survive; unresolved side effects must not replay.
@@ -488,6 +498,12 @@ impl Hub {
     }
     fn project_entries(data: &Data, source: &View, entries: &[Entry]) -> View {
         let mut view = View {
+            questions: source
+                .questions
+                .iter()
+                .filter(|q| q.answer.is_none())
+                .cloned()
+                .collect(),
             context_usage: None,
             context_window: None,
             communications: vec![],
@@ -768,6 +784,10 @@ impl Hub {
             self.0.store.backup(id)?;
             record.version = 3;
         }
+        if !record.view.questions.is_empty() && record.version < 4 {
+            self.0.store.backup_before_questions(id)?;
+            record.version = 4;
+        }
         self.0.store.save(id, record)
     }
 
@@ -838,6 +858,15 @@ impl Hub {
             self.0.interrupts.lock().unwrap().remove(id);
         }
         let mut events = vec![];
+        if current.view.questions != previous.view.questions {
+            let questions: Vec<_> = current
+                .view
+                .questions
+                .iter()
+                .filter(|q| q.answer.is_none())
+                .collect();
+            events.push(json!({"type":"questions","session_id":id,"questions":questions}));
+        }
         if current.view.profile != previous.view.profile {
             events.push(
                 json!({"type":"profile","session_id":id,"profile":current.view.profile,
@@ -1109,6 +1138,7 @@ impl Hub {
             engine.skill_warnings = snapshot.warnings;
             engine.profile = profile;
             let view = View {
+                questions: vec![],
                 context_usage: None,
                 context_window: crate::api::context_window(&engine.model),
                 communications: vec![],
@@ -1317,6 +1347,7 @@ impl Hub {
                 }
                 r.order += 1;
                 r.stop_through = r.order;
+                r.cancel_queued_question_answers();
                 r.paused = true;
                 r.listen_on_restart = Some(false);
                 Ok(r.order)
@@ -1339,6 +1370,7 @@ impl Hub {
             r.listen_on_restart = Some(false);
             r.order += 1;
             r.stop_through = r.order;
+            r.cancel_queued_question_answers();
             let users = r.inputs.len();
             let peers = r.inbox.len();
             r.inputs.clear();
@@ -1406,6 +1438,7 @@ impl Hub {
             h.record.paused = true;
             h.record.order += 1;
             h.record.stop_through = h.record.order;
+            h.record.cancel_queued_question_answers();
             let users = h.record.inputs.len();
             let peers = h.record.inbox.len();
             h.record.inputs.clear();
@@ -1965,8 +1998,9 @@ impl Hub {
                     active = false;
                     // The select has dropped the active request/tool future.
                     // Recover and persist once, after cancellation, before new work.
-                    let recovery = session.recover();
                     if let Err(error) = self.update(&id, |r| {
+                        let mut recovery = session.recover_questions(&mut r.view.questions);
+                        recovery.extend(session.recover());
                         r.engine = session.clone();
                         r.paused = r.view.archived
                             || r.inputs.iter().all(|input| input.order <= r.stop_through);
@@ -3283,6 +3317,10 @@ mod history;
 #[cfg(test)]
 #[path = "terminal_speed_tests.rs"]
 mod terminal_speed_tests;
+
+#[cfg(test)]
+#[path = "prompt_user_tests.rs"]
+mod prompt_user_tests;
 
 #[cfg(test)]
 #[path = "screen_tests.rs"]
