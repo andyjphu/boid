@@ -23,6 +23,8 @@ use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
 mod draft_tests;
 #[cfg(test)]
+mod image_tests;
+#[cfg(test)]
 mod persistence_tests;
 #[path = "questions.rs"]
 mod questions;
@@ -45,6 +47,8 @@ pub struct Entry {
     pub kind: String,
     // Snapshots share completed text. Streaming detaches only its active entry.
     pub text: Arc<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::images::Image>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +139,8 @@ pub struct Create {
 struct Input {
     id: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<crate::images::Image>,
     order: u64,
     #[serde(default)]
     compact: bool,
@@ -240,6 +246,7 @@ struct Inner {
     events: broadcast::Sender<Value>,
     client: Client,
     store: SessionStore,
+    images: Arc<crate::images::ImageStore>,
     pub cwd: PathBuf,
     #[cfg(test)]
     skill_scan_gate: Mutex<Option<Arc<SkillScanGate>>>,
@@ -430,6 +437,7 @@ impl Hub {
                 }),
                 events,
                 client,
+                images: Arc::new(crate::images::ImageStore::new(store.image_directory())),
                 store,
                 cwd: std::env::current_dir()?,
                 #[cfg(test)]
@@ -444,7 +452,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -543,6 +551,7 @@ impl Hub {
             id: Uuid::new_v4().to_string(),
             kind: kind.into(),
             text: text.into(),
+            images: vec![],
             replaces: None,
             input_batch: None,
         }
@@ -977,6 +986,10 @@ impl Hub {
         })
     }
     fn prepare_record(&self, record: &mut Record) -> Result<()> {
+        if record.engine.has_image_refs() {
+            // Older binaries must refuse these records instead of dropping images.
+            record.version = record.version.max(5);
+        }
         // Older binaries must reject records that rely on external skill snapshots.
         if record.engine.skill_base.is_some() || !record.engine.skills.is_empty() {
             record.version = record.version.max(2);
@@ -1658,17 +1671,70 @@ impl Hub {
             )
         })
     }
+    pub(crate) fn image_store(&self) -> Arc<crate::images::ImageStore> {
+        self.0.images.clone()
+    }
+    pub(crate) fn ensure_image_target(&self, id: &str) -> Result<()> {
+        let data = self.0.data.lock().unwrap();
+        if data.closing || data.ending.contains(id) {
+            bail!("Session is ending or the server is shutting down.");
+        }
+        if !data
+            .sessions
+            .get(id)
+            .is_some_and(|h| !h.record.view.archived)
+        {
+            bail!("Unknown or ended session.");
+        }
+        Ok(())
+    }
+    pub(crate) fn upload_image(
+        &self,
+        id: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<crate::images::Image> {
+        self.ensure_image_target(id)?;
+        let image = self.0.images.put(id, mime, bytes)?;
+        // End may have won while decoding/writing. Retain the unused blob, but
+        // do not acknowledge an attachment to a pane that no longer exists.
+        self.ensure_image_target(id)?;
+        Ok(image)
+    }
+    pub(crate) fn message_images_timed(
+        &self,
+        id: &str,
+        text: String,
+        ids: Vec<String>,
+    ) -> (Result<String>, MessageTimings) {
+        let started = Instant::now();
+        let result = self.0.images.for_message(id, &ids);
+        let (result, mut timings) = match result {
+            Ok(images) => self.admit_message(id, text, images),
+            Err(error) => (Err(error), MessageTimings::default()),
+        };
+        timings.admission = started.elapsed();
+        (result, timings)
+    }
     pub fn message(&self, id: &str, text: String) -> Result<String> {
         self.message_timed(id, text).0
     }
     pub(crate) fn message_timed(&self, id: &str, text: String) -> (Result<String>, MessageTimings) {
+        self.admit_message(id, text, vec![])
+    }
+    fn admit_message(
+        &self,
+        id: &str,
+        text: String,
+        images: Vec<crate::images::Image>,
+    ) -> (Result<String>, MessageTimings) {
         let started = Instant::now();
         let mut timings = MessageTimings::default();
         let result = crate::blocking::run(|| {
-            if text.trim().is_empty() {
-                bail!("Message must not be empty.");
+            if text.trim().is_empty() && images.is_empty() {
+                bail!("Message must contain text or an image.");
             }
-            if text.trim() == "/login" {
+            if images.is_empty() && text.trim() == "/login" {
                 bail!("Open /login in the Boid web composer to select API or subscription access.");
             }
             let waiting = Instant::now();
@@ -1684,6 +1750,7 @@ impl Hub {
                     id: message_id.clone(),
                     kind: "user".into(),
                     text: text.clone().into(),
+                    images: images.clone(),
                     replaces: None,
                     input_batch: None,
                 };
@@ -1699,12 +1766,16 @@ impl Hub {
                     if r.inputs.len() >= 32 {
                         bail!("Session input queue is full.");
                     }
+                    if !images.is_empty() {
+                        r.version = r.version.max(5);
+                    }
                     r.order += 1;
                     r.inputs.push_back(Input {
                         id: message_id.clone(),
-                        compact: text.trim() == "/oai-compact",
-                        clear: text.trim() == "/clear",
+                        compact: images.is_empty() && text.trim() == "/oai-compact",
+                        clear: images.is_empty() && text.trim() == "/clear",
                         text,
+                        images,
                         order: r.order,
                     });
                     r.view.entries.push(entry.clone());
@@ -2323,7 +2394,7 @@ impl Hub {
                     session.request_compaction(active);
                     vec![]
                 } else {
-                    session.operator(input.text)
+                    session.operator_with_images(input.text, id, &input.images)
                 };
                 for text in selected {
                     r.view

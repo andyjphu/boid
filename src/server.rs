@@ -32,6 +32,8 @@ use uuid::Uuid;
 
 #[path = "credential_routes.rs"]
 mod credential_routes;
+#[path = "image_routes.rs"]
+mod image_routes;
 
 #[derive(Clone)]
 struct App {
@@ -121,6 +123,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
     };
     let protected = Router::new()
         .merge(credential_routes::routes())
+        .merge(image_routes::routes())
         .route("/api/login", post(login))
         .route("/api/server", get(server_info))
         .route("/api/shutdown", post(shutdown_server))
@@ -262,7 +265,7 @@ async fn headers(request: Request, next: Next) -> Response {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"));
+    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"));
     response
 }
 async fn login(State(app): State<App>, request_headers: HeaderMap) -> Response {
@@ -435,7 +438,10 @@ async fn rename_session(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
+    #[serde(default)]
     text: String,
+    #[serde(default)]
+    images: Vec<String>,
 }
 async fn message(
     State(app): State<App>,
@@ -445,7 +451,18 @@ async fn message(
     // Axum authentication/body extraction has already completed. This measures
     // handler entry to response construction, not socket flush or client receipt.
     let started = Instant::now();
-    let (result, timings) = app.hub.message_timed(&id, input.text);
+    let (result, timings) = if input.images.is_empty() {
+        app.hub.message_timed(&id, input.text)
+    } else {
+        match tokio::task::spawn_blocking(move || {
+            app.hub.message_images_timed(&id, input.text, input.images)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => return invalid(error).into_response(),
+        }
+    };
     message_response(result, timings, started)
 }
 fn message_response(result: Result<String>, timings: MessageTimings, started: Instant) -> Response {

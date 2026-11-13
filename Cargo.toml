@@ -1,6 +1,6 @@
 [package]
 name = "boid"
-version = "1.1.32"
+version = "1.1.33"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+image = { version = "=0.25.8", default-features = false, features = ["png", "jpeg", "webp"] }
 jsonwebtoken = "9.3"
 axum = { version = "0.8", features = ["ws"] }
 eventsource-stream = "0.2"

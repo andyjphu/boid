@@ -218,7 +218,7 @@ impl Client {
         }
         // Encode borrowed input once. Building a Value with json! would copy all
         // historical payloads before serialization; retries can reuse these bytes.
-        let body = encode_input(&request, input)?;
+        let body = crate::blocking::run(|| encode_input(&request, input))?;
         let request = self
             .http
             .post(endpoint)
@@ -492,7 +492,9 @@ impl Client {
             .as_ref()
             .map(|url| format!("{}/compact", url.trim_end_matches('/')))
             .unwrap_or(endpoint);
-        let body = encode_input(&json!({"model":model,"instructions":instructions}), input)?;
+        let body = crate::blocking::run(|| {
+            encode_input(&json!({"model":model,"instructions":instructions}), input)
+        })?;
         let response = self
             .http
             .post(endpoint)

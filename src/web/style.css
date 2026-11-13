@@ -255,7 +255,8 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .composer { position: relative; display: flex; gap: .5ch; min-height: 0; overflow: hidden; border-top: 1px solid #383838; padding: 6px 4px; background: #1e1e1e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: 0; pointer-events: none; }
 .pane:hover .composer,
 .composer:focus-within,
-.composer:has(textarea:not(:placeholder-shown)) { opacity: 1; pointer-events: auto; }
+.composer:has(textarea:not(:placeholder-shown)),
+.composer.has-images { opacity: 1; pointer-events: auto; }
 .composer textarea {
   display: block;
   width: 100%;
@@ -411,3 +412,18 @@ body.disconnected #screens { opacity: .45; }
 .credential-empty { color: #999; margin: 6px 0; }
 
 .credential-workspace { inset: 0; }
+
+.composer-content { flex: 1; min-width: 0; }
+.composer-images { display: flex; flex-wrap: wrap; gap: 3px 7px; padding: 1px 0 3px; }
+.composer-images[hidden] { display: none; }
+.image-chip, .image-marker { color: #78b7ff; }
+.image-chip { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.image-chip button { color: inherit; border: 0; padding: 0 3px; background: transparent; }
+.image-chip[aria-busy="true"] { opacity: .7; }
+.image-failed { text-decoration: underline dotted; }
+.entry-images { display: inline-flex; flex-wrap: wrap; gap: 7px; margin-left: .5ch; }
+.image-marker { text-decoration: none; }
+
+.image-preview { max-width: 90vw; max-height: 90vh; padding: 22px 8px 8px; background: #222; color: #ddd; border: 1px solid #555; }
+.image-preview > button { position: absolute; top: 1px; right: 3px; padding: 0 4px; background: transparent; border: 0; }
+.image-preview img { display: block; max-width: calc(90vw - 18px); max-height: calc(90vh - 32px); object-fit: contain; }

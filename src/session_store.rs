@@ -62,6 +62,12 @@ impl SessionStore {
         })
     }
 
+    pub fn image_directory(&self) -> Option<PathBuf> {
+        self.directory
+            .as_ref()
+            .map(|directory| directory.parent().unwrap().join("images"))
+    }
+
     pub fn load_screens<T: DeserializeOwned + Default>(&self) -> Result<T> {
         let Some(directory) = &self.directory else {
             return Ok(T::default());
