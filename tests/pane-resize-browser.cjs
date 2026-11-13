@@ -83,7 +83,7 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
       }
     }
     await page.goto('http://boid.test'); await page.waitForFunction(() => window.testEvents);
-    // Restored drafts are interactive before the first catalog establishes a layout.
+    // Historical setup drafts must not reappear or create resize targets.
     await page.evaluate(() => sessionStorage.setItem(orderKey, JSON.stringify({
       version: 2, order: ['draft:saved'], layout: null,
       drafts: [{ id: 'saved', name: '', cwd: '' }],
@@ -93,7 +93,7 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
     assert.equal(await page.locator('.pane-resize').count(), 0, 'no resize targets before initial layout');
     assert.equal(await page.evaluate(() => paneResizeGroup('draft:saved', 'right')), null);
     assert.deepEqual(errors, [], 'restored draft resize before the first snapshot must be harmless');
-    await page.evaluate(() => discardSetup(drafts.get('saved')));
+    assert.equal(await page.locator('.setup-pane').count(), 0, 'legacy creation forms stay retired');
     await snapshot();
     const original = await boxes();
     assert.equal(await page.locator('.pane-resize:not(.pane-resize-corner)').count(), 4, '2x2 grid has four shared boundary segments');

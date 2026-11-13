@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require(process.env.BOID_PLAYWRIGHT || 'playwright-core');
 const root = path.resolve(__dirname, '../src/web');
-const views = ['a', 'b'].map(id => ({ id, name: id, cwd: '/tmp', status: id === 'b' ? 'working' : 'idle', pending: [],
+const views = ['a', 'b', 'c'].map(id => ({ id, name: id, cwd: '/tmp', status: id === 'b' ? 'working' : 'idle', pending: [],
   entries: Array.from({ length: 40 }, (_, i) => ({ id: `${id}-${i}`, kind: 'assistant', text: `Message ${i}\n` + 'Existing output\n'.repeat(3) })) }));
 const terms = [{ id: 't', name: '#1', cwd: '/tmp', running: true }];
 (async () => {
@@ -57,9 +57,8 @@ const terms = [{ id: 't', name: '#1', cwd: '/tmp', running: true }];
     }
     await page.goto('http://boid.test'); await snapshot();
     await pane('agent:b').locator('.composer textarea').fill('Keep this unsent instruction');
-    await page.locator('#add-agent').click();
-    await page.locator('.setup-form input[name=name]').fill('draft-name');
-    const draft = await page.locator('.setup-pane').getAttribute('data-pane-key');
+    const draft = 'agent:c';
+    await pane(draft).locator('.composer textarea').fill('draft-name');
     const original = await keys();
     assert.deepEqual(original, ['terminal:t', 'agent:a', 'agent:b', draft]);
     await page.evaluate(() => {
@@ -77,7 +76,7 @@ const terms = [{ id: 't', name: '#1', cwd: '/tmp', running: true }];
     await drag(draft, 'agent:b', true);
     assert.deepEqual(await keys(), ['agent:b', draft, 'agent:a', 'terminal:t']);
     assert.equal(await pane('agent:b').locator('.composer textarea').inputValue(), 'Keep this unsent instruction');
-    assert.equal(await page.locator('.setup-form input[name=name]').inputValue(), 'draft-name');
+    assert.equal(await pane(draft).locator('.composer textarea').inputValue(), 'draft-name');
     assert.ok(await page.evaluate(() => [...retainedPanes].every(([key, node]) => node === document.querySelector(`[data-pane-key="${key}"]`))), 'reordering retains the original pane nodes');
     assert.equal(await page.evaluate(() => testSockets.length), 1, 'reordering does not reconnect the terminal');
     const position = await page.evaluate(() => { const ui = sessions.get('b'); const item = ui.entries.get(retainedAnchor.id); return { follow: ui.follow, offset: item.node.getBoundingClientRect().top - ui.trace.getBoundingClientRect().top, expected: retainedAnchor.offset }; });
@@ -104,10 +103,10 @@ const terms = [{ id: 't', name: '#1', cwd: '/tmp', running: true }];
     await page.reload(); await snapshot();
     assert.deepEqual(await keys(), reordered, 'refresh restores the chosen order');
     assert.equal(await pane('agent:b').locator('.composer textarea').inputValue(), 'Keep this unsent instruction');
-    assert.equal(await page.locator('.setup-form input[name=name]').inputValue(), 'draft-name');
+    assert.equal(await pane(draft).locator('.composer textarea').inputValue(), 'draft-name');
     assert.deepEqual(await page.evaluate(() => [...paneOrder].map(key => { const { key: _, ...rect } = paneLayout.tiles.find(tile => tile.key === key); return rect; })), slots);
     assert.deepEqual(errors, []);
     if (process.env.SCREENSHOT) await page.screenshot({ path: process.env.SCREENSHOT });
-    console.log('PASS: agent, terminal and draft reordering; insertion marker; retained text/nodes/terminal connection/reading anchor; resized slots; Escape/outside cancellation; refresh; no lifecycle or input requests');
+    console.log('PASS: agent and terminal group reordering; insertion marker; retained text/nodes/terminal connection/reading anchor; resized slots; Escape/outside cancellation; refresh; no lifecycle or input requests');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

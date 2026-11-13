@@ -263,7 +263,7 @@ let lastSequence = -1;
 let catalogRevision = 0;
 const sessionLifecycle = new Map();
 let events;
-const drafts = new Map();
+
 let paneOrder = [];
 let orderKey = "";
 let catalogReady = false;
@@ -282,6 +282,173 @@ let screenCatalog = { count: 1, panes: {} };
 let activeScreen = 1;
 let screenLoaded;
 let agentScreenState = {};
+const paneGroups = new Map();
+const subpanes = new Map();
+let groupRecords = [];
+let tabDrag = null;
+const pendingGroupSaves = new Map();
+let groupSaveTimer;
+function savePaneGroups() {
+  if (!orderKey || !catalogReady || reconcilingCatalog) return;
+  pendingGroupSaves.set(orderKey, groupRecords.map(record => ({ ...record, tabs: [...record.tabs] })));
+  clearTimeout(groupSaveTimer); groupSaveTimer = setTimeout(flushPaneGroups, 0);
+}
+function flushPaneGroups() {
+  clearTimeout(groupSaveTimer);
+  for (const [key, groups] of pendingGroupSaves) {
+    try { sessionStorage.setItem(`${key}:groups`, JSON.stringify(groups)); pendingGroupSaves.delete(key); } catch {}
+  }
+}
+function uiFromTarget(target) {
+  const tab = target.closest('.pane-tab');
+  return tab ? subpanes.get(tab.dataset.subpaneKey) : [...subpanes.values()].find(ui => ui.pane === target.closest('.subpane'));
+}
+function renderPaneGroup(group) {
+  const live = group.record.tabs.map(key => subpanes.get(key)).filter(ui => ui?.group === group);
+  const active = live.find(ui => ui.pane.dataset.paneKey === group.record.active) || live[0];
+  for (const [index, ui] of live.entries()) {
+    if (group.strip.children[index] !== ui.tab) group.strip.insertBefore(ui.tab, group.strip.children[index] || group.plus);
+    const inactive = ui !== active;
+    if (inactive && !ui.inactive && ui.trace) { rememberPosition(ui); ui.hiddenScroll = ui.trace.scrollTop; }
+    const changed = ui.inactive !== inactive;
+    ui.inactive = inactive;
+    ui.pane.hidden = inactive;
+    ui.tab.classList.toggle('inactive', inactive);
+    ui.tab.setAttribute('aria-selected', String(!inactive));
+    ui.tab.tabIndex = inactive ? -1 : 0;
+    ui.title.tabIndex = inactive ? -1 : 0;
+    if (changed && !inactive && ui.trace) {
+      if (ui.hiddenScroll != null) ui.trace.scrollTop = ui.hiddenScroll;
+      if (ui.restoreAnchorPending) { ui.historyRebase = true; ui.structureDirty = true; }
+      scheduleTranscript(ui);
+      requestAnimationFrame(() => { restorePosition(ui); ui.traceHeight = ui.trace.clientHeight; });
+    }
+    if (changed && !inactive) ui.onReveal?.();
+  }
+  group.pane.setAttribute('aria-label', active?.name || active?.title.textContent || 'Pane');
+  group.pane.classList.toggle('needs-answer', live.some(ui => ui.pane.classList.contains('needs-answer')));
+}
+function revealSubpaneTab(ui) {
+  if (!ui?.tab.isConnected) return;
+  const strip = ui.group.strip, box = ui.tab.getBoundingClientRect(), bounds = strip.getBoundingClientRect();
+  if (box.left < bounds.left) strip.scrollLeft += box.left - bounds.left;
+  else if (box.right > bounds.right) strip.scrollLeft += box.right - bounds.right;
+}
+function selectSubpane(ui, focus = false) {
+  const group = ui?.group;
+  if (!group) return;
+  group.record.active = ui.pane.dataset.paneKey;
+  renderPaneGroup(group);
+  selected = ui.pane;
+  revealSubpaneTab(ui);
+  if (focus) (ui.input || ui.title).focus({ preventScroll: true });
+  savePaneGroups();
+}
+function createPaneGroup(record) {
+  const pane = element('section', 'pane pane-group'); pane.dataset.paneKey = record.id;
+  const header = element('header', 'pane-header');
+  const strip = element('div', 'pane-tabs'); strip.setAttribute('role', 'tablist'); strip.setAttribute('aria-label', 'Sessions');
+  const plus = element('button', 'subpane-add', '+'); plus.type = 'button'; plus.setAttribute('aria-label', 'New agent tab');
+  plus.title = 'New agent · right-click for session history';
+  const body = element('div', 'pane-body');
+  const group = { record, pane, header, strip, plus, body };
+  plus.addEventListener('click', () => createAgent(group, plus));
+  plus.addEventListener('contextmenu', event => { event.preventDefault(); openSessionHistory(group); });
+  strip.append(plus); header.append(strip); pane.append(header, body); workspace.append(pane);
+  header.draggable = true;
+  header.addEventListener('dragstart', event => {
+    if (event.target.closest('.pane-tab, button')) return;
+    beginPaneDrag(event, group);
+  });
+  strip.addEventListener('dragover', event => {
+    if (!tabDrag) return;
+    event.preventDefault(); event.stopPropagation(); clearPaneDropTarget();
+    const target = event.target.closest('.pane-tab');
+    if (target && target !== tabDrag.tab) target.dataset.tabDrop = event.clientX > target.getBoundingClientRect().left + target.getBoundingClientRect().width / 2 ? 'after' : 'before';
+    else if (!target) plus.dataset.tabDrop = 'before';
+    const box = strip.getBoundingClientRect();
+    if (event.clientX < box.left + 24) strip.scrollLeft -= 20;
+    else if (event.clientX > box.right - 24) strip.scrollLeft += 20;
+  });
+  strip.addEventListener('drop', event => {
+    if (!tabDrag) return;
+    event.preventDefault(); event.stopPropagation();
+    const ui = tabDrag, target = event.target.closest('.pane-tab');
+    const targetKey = target?.dataset.subpaneKey;
+    const after = target?.dataset.tabDrop === 'after';
+    finishPaneDrag();
+    moveSubpane(ui, group, targetKey, after);
+  });
+  strip.addEventListener('keydown', event => {
+    if (event.target.closest('input, button') || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const tabs = record.tabs.map(key => subpanes.get(key)).filter(Boolean), current = tabs.findIndex(ui => ui.pane.dataset.paneKey === record.active);
+    const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
+    event.preventDefault(); selectSubpane(tabs[index]); tabs[index]?.tab.focus({ preventScroll: true });
+  });
+  let stripWidth = null;
+  group.resizeObserver = new ResizeObserver(() => {
+    if (strip.clientWidth === stripWidth) return;
+    stripWidth = strip.clientWidth;
+    revealSubpaneTab(subpanes.get(record.active));
+  });
+  group.resizeObserver.observe(strip);
+  paneGroups.set(record.id, group);
+  return group;
+}
+function beginPaneDrag(event, group, ui = null) {
+  if (!catalogReady || event.target.closest('button, input, textarea, [contenteditable=true]')) { event.preventDefault(); return; }
+  finishPaneResize(true); finishPaneDrag();
+  tabDrag = ui;
+  paneDrag = { pane: group.pane, screen: activeScreen };
+  group.pane.classList.add('pane-dragging');
+  event.dataTransfer.setData('application/x-boid-local-pane', group.record.id);
+  if (ui) event.dataTransfer.setData('application/x-boid-pane', ui.pane.dataset.paneKey);
+  event.dataTransfer.effectAllowed = 'move';
+}
+function attachSubpane(ui) {
+  const key = ui.pane.dataset.paneKey;
+  let record = groupRecords.find(record => record.tabs.includes(key));
+  if (!record) { record = { id: groupRecords.some(record => record.id === key) ? `group:${newDraftRevision()}` : key, tabs: [key], active: key }; groupRecords.push(record); }
+  const group = paneGroups.get(record.id) || createPaneGroup(record);
+  subpanes.set(key, ui); ui.group = group;
+  group.body.append(ui.pane); group.strip.insertBefore(ui.tab, group.plus);
+  ui.tab.dataset.subpaneKey = key; ui.tab.dataset.kind = key.split(':')[0]; ui.tab.setAttribute('role', 'tab');
+  ui.tab.addEventListener('click', event => { if (!event.target.closest('button, input')) selectSubpane(ui); });
+  ui.tab.addEventListener('keydown', event => { if (event.target === ui.tab && ['Enter', ' '].includes(event.key)) { event.preventDefault(); selectSubpane(ui, true); } });
+  ui.tab.addEventListener('dragstart', event => { event.stopPropagation(); beginPaneDrag(event, ui.group, ui); });
+  renderPaneGroup(group);
+}
+function detachSubpane(ui, moving = false) {
+  const group = ui.group, key = ui.pane.dataset.paneKey;
+  const wasSelected = selected === ui.pane;
+  if (!group) { ui.pane.remove(); return; }
+  const index = group.record.tabs.indexOf(key);
+  group.record.tabs = group.record.tabs.filter(item => item !== key);
+  if (group.record.active === key) group.record.active = group.record.tabs[Math.min(index, group.record.tabs.length - 1)];
+  ui.tab.remove(); ui.pane.remove();
+  if (!moving) subpanes.delete(key);
+  if (!group.record.tabs.some(key => subpanes.get(key)?.group === group)) {
+    group.resizeObserver.disconnect(); group.pane.remove(); paneGroups.delete(group.record.id);
+    if (!reconcilingCatalog) groupRecords = groupRecords.filter(record => record !== group.record);
+  } else renderPaneGroup(group);
+  if (wasSelected) selected = subpanes.get(group.record.active)?.pane || null;
+}
+function moveSubpane(ui, group, targetKey, after = false) {
+  if (!ui || !group || ui.pane.dataset.paneKey === targetKey) return;
+  const key = ui.pane.dataset.paneKey;
+  if (ui.group === group) group.record.tabs = group.record.tabs.filter(item => item !== key);
+  else {
+    if (ui.trace) rememberPosition(ui);
+    detachSubpane(ui, true); ui.group = group; group.body.append(ui.pane);
+  }
+  let index = group.record.tabs.indexOf(targetKey);
+  if (index < 0) index = group.record.tabs.length;
+  else if (after) index++;
+  group.record.tabs.splice(index, 0, key);
+  // Moving changes order; merely selecting a tab never does.
+  group.record.active = key; renderPaneGroup(group); layout();
+}
+
 const screensNav = document.querySelector("#screens");
 const addScreenButton = document.querySelector("#add-screen");
 const activeScreenKey = `boid:screen:${location.origin}`;
@@ -396,6 +563,7 @@ async function restoreAgentState(ui) {
     if (!ui.follow && item) {
       ui.jumpEntry = null;
       ui.anchor = { node: item.node, offset: state.anchor.offset };
+      if (ui.inactive) ui.restoreAnchorPending = true;
       restorePosition(ui);
     }
     ui.restoringScreen = false;
@@ -406,8 +574,7 @@ function clearScreenPanes() {
   reconcilingCatalog = true;
   for (const ui of [...sessions.values()]) removeSession(ui);
   for (const ui of [...terminals.values()]) ui.dispose();
-  for (const ui of drafts.values()) { if (loginOwner === ui) closeLogin(); ui.pane.remove(); }
-  drafts.clear(); selected = null;
+  paneGroups.clear(); subpanes.clear(); selected = null;
   for (const handle of paneResizeHandles.values()) handle.remove();
   paneResizeHandles.clear();
   reconcilingCatalog = false;
@@ -420,7 +587,7 @@ function switchScreen(number) {
   catalogReady = false;
   clearScreenPanes();
   activeScreen = number;
-  paneOrder = []; paneLayout = null; orderKey = "";
+  paneOrder = []; groupRecords = []; paneLayout = null; orderKey = "";
   storeScreenSelection();
   loadPaneOrder(agentDefaults.cwd);
   layout();
@@ -437,6 +604,7 @@ addScreenButton.addEventListener("click", async () => {
 window.addEventListener("pagehide", () => {
   rememberPaneOrder();
   flushMessageRecovery();
+  flushPaneGroups();
 });
 
 function loadPaneOrder(cwd) {
@@ -447,17 +615,15 @@ function loadPaneOrder(cwd) {
     const saved = JSON.parse(sessionStorage.getItem(key) || "null");
     paneLayout = saved?.layout || null;
     agentScreenState = { ...(saved?.agents || {}), ...agentScreenState };
-    const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
+    const valid = key => typeof key === "string" && /^(agent|terminal|group):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
-    for (const draft of saved?.drafts || []) {
-      if (draft && typeof draft.id === "string" && ["name", "cwd"].every(key => typeof draft[key] === "string")) {
-        const restored = { ...draft };
-        if (saved.version !== 2) {
-          for (const [key, value] of Object.entries(agentDefaults)) if (restored[key] === value) restored[key] = "";
-        }
-        addSetup(restored);
-      }
-    }
+    const members = new Set();
+    const groups = pendingGroupSaves.get(key) || JSON.parse(sessionStorage.getItem(`${key}:groups`) || "null") || saved?.groups;
+    groupRecords = (Array.isArray(groups) ? groups : []).filter(record => record && typeof record.id === "string" && Array.isArray(record.tabs)).map(record => ({
+      id: record.id, active: record.active,
+      tabs: record.tabs.filter(key => /^(agent|terminal):.+/.test(key) && !members.has(key) && members.add(key)),
+    })).filter(record => record.tabs.length);
+
   } catch { paneOrder = []; paneLayout = null; }
 }
 
@@ -481,20 +647,21 @@ function rememberPaneOrder() {
   for (const ui of sessions.values()) captureAgentState(ui);
   try {
     sessionStorage.setItem(orderKey, JSON.stringify({
-      version: 2, order: paneOrder, agents: agentScreenState,
+      version: 3, order: paneOrder, groups: groupRecords, agents: agentScreenState,
       layout: paneLayout?.custom ? paneLayout : null,
-      drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
     }));
   } catch { /* Storage availability must not prevent session access. */ }
+  savePaneGroups();
 }
 
 function clearPaneDropTarget() {
   for (const pane of workspace.querySelectorAll("[data-pane-drop]")) delete pane.dataset.paneDrop;
+  for (const tab of workspace.querySelectorAll("[data-tab-drop]")) delete tab.dataset.tabDrop;
 }
 function finishPaneDrag() {
   clearPaneDropTarget();
   paneDrag?.pane.classList.remove("pane-dragging");
-  paneDrag = null;
+  paneDrag = null; tabDrag = null;
 }
 function paneDropTarget(event) {
   if (!paneDrag || !paneDrag.pane.isConnected || paneDrag.screen !== activeScreen) return null;
@@ -881,11 +1048,13 @@ function paneIcon(kind) {
 }
 
 function makePane(name, cwd, kind, id) {
-  const pane = element("section", `pane ${kind}-pane`);
+  const pane = element("section", `subpane ${kind}-pane`);
   pane.setAttribute("aria-label", name);
   pane.dataset.paneKey = `${kind}:${id}`;
+  pane.id = `subpane-${kind}-${id}`; pane.setAttribute("role", "tabpanel");
   const header = element("header", "pane-header");
   const tab = element("div", "pane-tab");
+  tab.id = `tab-${kind}-${id}`; tab.setAttribute("aria-controls", pane.id); pane.setAttribute("aria-labelledby", tab.id);
   const title = element("span", "pane-title", name);
   const status = element("span", "pane-status", "idle");
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
@@ -898,33 +1067,17 @@ function makePane(name, cwd, kind, id) {
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
-  tab.append(paneIcon(kind), title, directory, close);
+  directory.hidden = true;
+  tab.append(paneIcon(kind), title, close);
   tab.draggable = true;
-  let dragBlocked = false;
-  tab.addEventListener("pointerdown", event => {
-    dragBlocked = Boolean(event.target.closest("button, input, textarea, [contenteditable=true]"));
-  });
-  tab.addEventListener("dragstart", event => {
-    if (!catalogReady || dragBlocked || event.target.closest("button, input, textarea, [contenteditable=true]")
-      || tab.querySelector("input")) { event.preventDefault(); return; }
-    finishPaneResize(true);
-    finishPaneDrag();
-    paneDrag = { pane, screen: activeScreen };
-    pane.classList.add("pane-dragging");
-    const key = pane.dataset.paneKey;
-    event.dataTransfer.setData("application/x-boid-local-pane", key);
-    if (!key.startsWith("draft:")) event.dataTransfer.setData("application/x-boid-pane", key);
-    event.dataTransfer.effectAllowed = "move";
-  });
-  header.append(tab, status);
-  pane.append(header);
-  workspace.append(pane);
-  return { pane, header, tab, title, status, directory, error, close };
+  const ui = { pane, header, tab, title, status, directory, error, close };
+  attachSubpane(ui);
+  return ui;
 }
 
 function enablePaneRename(ui, kind) {
   ui.title.title = "Double-click or press F2 to rename";
-  ui.title.tabIndex = 0;
+  ui.title.tabIndex = ui.inactive ? -1 : 0;
   ui.setName = name => {
     ui.nameRevision = (ui.nameRevision || 0) + 1;
     ui.name = name || ui.id;
@@ -1000,8 +1153,7 @@ function removeSession(ui) {
   ui.skillRequest = (ui.skillRequest || 0) + 1;
   ui.traceResize.disconnect();
   ui.overlayResize.disconnect();
-  if (selected === ui.pane) selected = null;
-  ui.pane.remove();
+  detachSubpane(ui);
   sessions.delete(ui.id);
   layout();
 }
@@ -1081,6 +1233,7 @@ function withRenderSelection(render) {
 }
 
 function rememberPosition(ui) {
+  if (ui.inactive || ui.restoreAnchorPending) return;
   if (ui.follow) { ui.anchor = null; return; }
   const viewport = ui.trace.getBoundingClientRect();
   const top = viewport.top;
@@ -1105,6 +1258,7 @@ function traceEnd(ui) {
 }
 
 function scrollTrace(ui, top) {
+  if (ui.inactive) return;
   top = Math.max(0, Math.min(top, traceEnd(ui)));
   // Scroll metrics round to whole pixels; scrollTop can retain a fraction.
   if (Math.abs(ui.trace.scrollTop - top) > 1) ui.trace.scrollTop = top;
@@ -1117,11 +1271,13 @@ function atTraceEnd(ui) {
 }
 
 function restorePosition(ui) {
+  if (ui.inactive) return;
   if (ui.follow && !selectedWithin(ui.trace)) {
     scrollTrace(ui, followTarget(ui));
   } else if (ui.anchor?.node.isConnected) {
     scrollTrace(ui, ui.trace.scrollTop + ui.anchor.node.getBoundingClientRect().top
       - ui.trace.getBoundingClientRect().top - ui.anchor.offset);
+    ui.restoreAnchorPending = false;
   }
 }
 
@@ -1411,6 +1567,8 @@ function updateQuestionAttention(ui) {
   if (!ui.questionsBox) return;
   const urgent = ui.questions.some(questionWaiting);
   ui.pane.classList.toggle("needs-answer", urgent);
+  ui.tab.classList.toggle("needs-answer", urgent);
+  ui.group.pane.classList.toggle("needs-answer", ui.group.record.tabs.some(key => subpanes.get(key)?.pane.classList.contains("needs-answer")));
   ui.questionsBox.classList.toggle("blocking", urgent);
   const count = ui.questions.length;
   ui.questionsToggle.textContent = `${urgent ? "⚠ Reply needed" : "Questions"} · ${count}`;
@@ -1534,6 +1692,7 @@ function addSession(view) {
     submission: { get: () => ui.messageState.promise },
   });
   ui.trace.addEventListener("scroll", () => {
+    if (ui.inactive) return;
     const top = ui.trace.scrollTop;
     const movedDown = top > ui.lastScrollTop;
     ui.lastScrollTop = top;
@@ -1596,6 +1755,7 @@ function addSession(view) {
   stream.append(ui.trace, overlay, ui.historyLatest);
   ui.pane.append(stream, ui.error, ui.activity, ui.modelPicker, ui.skillPicker);
   const overlayResize = new ResizeObserver(() => {
+    if (ui.inactive) return;
     const height = Math.ceil(overlay.getBoundingClientRect().height);
     if (height < ui.overlayHeight) {
       retainPromptSpace(ui);
@@ -1647,6 +1807,7 @@ function addSession(view) {
   ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
+    if (ui.inactive) return;
     ui.traceHeight = ui.trace.clientHeight;
     restorePosition(ui);
     updateContextVisibility(ui);
@@ -1761,8 +1922,10 @@ function updateActivity(ui) {
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : (ui.questions || []).some(questionWaiting) ? "Waiting for reply" : "Working";
-  if (ui.interruptRequested) ui.pane.dataset.interruptRequested = "true";
-  else delete ui.pane.dataset.interruptRequested;
+  for (const node of [ui.pane, ui.tab]) {
+    if (ui.interruptRequested) node.dataset.interruptRequested = "true";
+    else delete node.dataset.interruptRequested;
+  }
   const hint = ui.interruptRequested || pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
   const state = ui.messageState;
@@ -1783,6 +1946,7 @@ function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
     ui.view.working_since_ms = status === "working" ? workingSince : null;
   }
   ui.pane.dataset.status = status || "idle";
+  ui.tab.dataset.status = status || "idle";
   updateActivity(ui);
   ui.status.textContent = "";
 }
@@ -2016,6 +2180,7 @@ async function locateCommunication(ui, message, otherId) {
     if (screen !== activeScreen) await switchScreen(screen);
     const target = sessions.get(String(otherId));
     if (!target) throw new Error("This agent is no longer open.");
+    selectSubpane(target);
     const entryId = String(otherId === message.recipient_id ? message.id : message.sender_entry);
     if (selectedWithin(target.trace)) getSelection().removeAllRanges();
     target.follow = false;
@@ -2249,7 +2414,7 @@ function scheduleTranscript(ui) {
   ui.renderScheduled = true;
   requestAnimationFrame(() => {
     ui.renderScheduled = false;
-    if (sessions.get(ui.id) !== ui) return;
+    if (sessions.get(ui.id) !== ui || ui.inactive) return;
     withRenderSelection(() => {
       rememberPosition(ui);
       const readingTop = !ui.follow ? ui.trace.scrollTop : null;
@@ -2788,8 +2953,7 @@ function attachTerminal(info) {
     clearTimeout(scrollbarIdle);
     window.removeEventListener("focus", resumeControl);
     term.dispose();
-    if (selected === ui.pane) selected = null;
-    ui.pane.remove();
+    detachSubpane(ui);
     terminals.delete(id);
     layout();
   };
@@ -2811,6 +2975,7 @@ function attachTerminal(info) {
     } catch (error) { showError(ui.error, error); close.disabled = false; }
   });
   ui.reconnect = connect;
+  ui.onReveal = () => { resize(); term.refresh(0, term.rows - 1); };
   terminals.set(id, ui);
   ui.update(info);
   layout();
@@ -2818,213 +2983,83 @@ function attachTerminal(info) {
   return ui;
 }
 
-const agentDefaults = {
-  name: "", cwd: "",
-};
-let agentNames = [];
-let choicesVersion = 0;
-let choicesTimer;
-
+const agentDefaults = { cwd: '' };
 function focusSession(ui) {
-  selected = ui.pane;
-  ui.pane.scrollIntoView({ block: "nearest", inline: "nearest" });
-  if (ui.input) ui.input.focus({ preventScroll: true });
-  else ui.title.focus({ preventScroll: true });
+  if (!ui) return;
+  selectSubpane(ui, true);
 }
-
-function discardSetup(ui, replacement) {
-  if (loginOwner === ui) closeLogin();
-  if (replacement) {
-    const key = replacement.pane.dataset.paneKey;
-    paneOrder = paneOrder.filter(item => item !== key).map(item => item === `draft:${ui.id}` ? key : item);
-  }
-  drafts.delete(ui.id);
-  if (selected === ui.pane) selected = null;
-  ui.pane.remove();
-  layout();
-  if (replacement) focusSession(replacement);
-}
-
-function addSetup(saved) {
-  const values = saved || {
-    id: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join(""),
-    name: "", cwd: "",
-  };
-  if (drafts.has(values.id)) return drafts.get(values.id);
-  const ui = makePane("New agent", "", "draft", values.id);
-  ui.pane.classList.add("setup-pane");
-  ui.id = values.id;
-  ui.screen = activeScreen;
-  ui.directory.hidden = true;
-  ui.status.textContent = "";
-  ui.close.title = "Discard draft";
-  ui.close.setAttribute("aria-label", "Discard agent draft");
-  const body = element("div", "session-setup-grid");
-  ui.form = element("form", "setup-form");
-  for (const [key, label] of [["name", "Name"], ["cwd", "Working directory"]]) {
-    const wrapper = element("label", null, label);
-    const input = element("input");
-    input.name = key;
-    input.value = values[key];
-    input.placeholder = agentDefaults[key];
-    if (key === "name") {
-      input.maxLength = 128;
-      const suggestions = element("datalist");
-      suggestions.id = `agent-names-${ui.id}`;
-      for (const name of agentNames) {
-        const option = element("option");
-        option.value = name;
-        suggestions.append(option);
-      }
-      input.setAttribute("list", suggestions.id);
-      wrapper.append(suggestions);
-    }
-    input.addEventListener("input", rememberPaneOrder);
-    wrapper.append(input);
-    ui.form.append(wrapper);
-  }
-  const submit = element("button", "setup-submit", "Create agent");
-  submit.type = "submit";
-  const loginCommand = element("button", "setup-login", "/login");
-  loginCommand.type = "button";
-  loginCommand.title = "Choose API or subscription";
-  loginCommand.addEventListener("click", () => openLogin(ui));
-  ui.form.append(submit, loginCommand);
-  const choices = element("div", "session-choices");
-  ui.active = element("div", "active-agents");
-  ui.inactive = element("div", "inactive-agents");
-  choices.append(element("h2", null, "Active sessions"), ui.active, element("h2", null, "Inactive sessions"), ui.inactive);
-  body.append(ui.form, choices);
-  ui.setupBody = body;
-  ui.pane.append(body, ui.error);
-  ui.close.addEventListener("click", () => discardSetup(ui));
-  ui.form.addEventListener("submit", async event => {
-    event.preventDefault();
-    if (ui.busy) return;
-    ui.busy = true;
-    submit.disabled = true;
-    ui.close.disabled = true;
-    ui.error.hidden = true;
-    try {
-      const startedAt = catalogRevision;
-      const fields = Object.fromEntries(new FormData(ui.form));
-      fields.cwd ||= agentDefaults.cwd;
-      // Empty names are allocated atomically by the server, including concurrent creation.
-      fields.name = fields.name.trim();
-      const view = await request(`/api/sessions?screen=${ui.screen}`, "POST", fields);
-      const paneKey = `agent:${view.id}`;
-      screenCatalog.panes[paneKey] ??= ui.screen;
-      if (ui.screen !== activeScreen || drafts.get(ui.id) !== ui) {
-        const key = `boid:pane-order:v1:${location.origin}:${agentDefaults.cwd}${ui.screen === 1 ? "" : `:screen:${ui.screen}`}`;
-        try { const saved = JSON.parse(sessionStorage.getItem(key));
-          if (saved) { saved.drafts = saved.drafts.filter(draft => draft.id !== ui.id); sessionStorage.setItem(key, JSON.stringify(saved)); }
-        } catch {}
-        return;
-      }
-      if (paneScreen(paneKey) !== activeScreen) { discardSetup(ui); return; }
-      discardSetup(ui, acceptSessionResponse(view, startedAt));
-    } catch (error) { showError(ui.error, error); }
-    finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
-  });
-  drafts.set(ui.id, ui);
-  layout();
-  refreshChoices();
-  return ui;
-}
-
-function sessionCard(record, action) {
-  const card = element("button", "session-card");
-  card.type = "button";
-  card.dataset.sessionId = String(record.id);
-  const heading = element("span", "session-card-heading");
-  heading.append(element("span", "session-card-name", record.name || "Agent"), element("span", "session-card-status", record.status || "idle"));
-  const cwd = element("span", "session-card-cwd", record.cwd || "");
-  cwd.title = record.cwd || "";
-  card.append(heading, cwd);
-  const task = record.entries?.find(entry => entry.kind === "user")?.text;
-  if (task) {
-    const excerpt = element("span", "session-card-task", task.replace(/\s+/g, " ").slice(0, 160));
-    excerpt.title = task;
-    card.append(excerpt);
-  }
-  card.title = action;
-  return card;
-}
-
-function focusedChoice(container) {
-  const focused = document.activeElement;
-  return container.contains(focused) ? focused.closest(".session-card")?.dataset.sessionId : null;
-}
-
-function restoreChoiceFocus(container, id) {
-  if (!id) return;
-  const card = [...container.querySelectorAll(".session-card")].find(card => card.dataset.sessionId === id);
-  if (card && !card.disabled) card.focus({ preventScroll: true });
-}
-
-function renderAgentChoices(ui, active, inactive) {
-  for (const [container, records, archived] of [[ui.active, active, false], [ui.inactive, inactive, true]]) {
-    const focused = focusedChoice(container);
-    container.replaceChildren();
-    if (!records.length) container.append(element("p", "session-empty", "None"));
-    for (const record of records) {
-      const card = sessionCard(record, archived ? "Reopen paused with history" : "Focus existing agent");
-      card.disabled = record.status === "ending" || (archived && !record.archived);
-      card.addEventListener("click", async () => {
-        if (ui.busy) return;
-        ui.busy = true;
-        card.disabled = true;
-        ui.close.disabled = true;
-        ui.error.hidden = true;
+async function createAgent(group = null, button = document.querySelector('#add-agent')) {
+  button.disabled = true; workspaceError.hidden = true;
+  const screen = activeScreen, startedAt = catalogRevision;
+  try {
+    const view = await request(`/api/sessions?screen=${screen}`, 'POST', { name: '', cwd: '~' });
+    const key = `agent:${view.id}`;
+    screenCatalog.panes[key] ??= screen;
+    if (paneScreen(key) !== activeScreen) {
+      if (group) {
+        const storageKey = `boid:pane-order:v1:${location.origin}:${agentDefaults.cwd}${screen === 1 ? '' : `:screen:${screen}`}`;
         try {
-          const startedAt = catalogRevision;
-          const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen?history=recent" : "/history"}`, archived ? "POST" : "GET");
-          if (ui.screen !== activeScreen || drafts.get(ui.id) !== ui) return;
-          const destination = paneScreen(`agent:${view.id}`);
-          if (destination !== activeScreen) {
-            discardSetup(ui); await switchScreen(destination);
-            const target = sessions.get(String(view.id)); if (target) focusSession(target);
-            return;
-          }
-          const attached = sessions.has(String(view.id));
-          const agent = acceptSessionResponse(view, startedAt);
-          if (archived || !attached) discardSetup(ui, agent);
-          else { discardSetup(ui); focusSession(agent); }
-        } catch (error) { showError(ui.error, error); refreshChoices(); }
-        finally { ui.busy = false; card.disabled = false; ui.close.disabled = false; }
-      });
-      container.append(card);
-    }
-    restoreChoiceFocus(container, focused);
-  }
-}
-
-function refreshChoices() {
-  const version = ++choicesVersion;
-  clearTimeout(choicesTimer);
-  if (!drafts.size) return;
-  choicesTimer = setTimeout(async () => {
-    try {
-      const [active, inactive, config] = await Promise.all([
-        request("/api/sessions?history=recent"), request("/api/sessions/archived?history=recent"), request("/api/config"),
-      ]);
-      if (version !== choicesVersion) return;
-      agentDefaults.name = config.next_agent_name;
-      for (const ui of drafts.values()) {
-        ui.form.elements.name.placeholder = agentDefaults.name;
-        renderAgentChoices(ui, active, inactive);
+          const saved = JSON.parse(sessionStorage.getItem(storageKey));
+          const record = saved?.groups?.find(record => record.id === group.record.id);
+          if (record) { if (!record.tabs.includes(key)) record.tabs.push(key); record.active = key; sessionStorage.setItem(storageKey, JSON.stringify(saved)); }
+        } catch { /* The server-created session remains reachable on its screen. */ }
       }
-    } catch (error) {
-      if (version !== choicesVersion) return;
-      for (const ui of drafts.values()) showError(ui.error, error);
+      return;
     }
-  }, 40);
+    const ui = acceptSessionResponse(view, startedAt);
+    if (group && paneGroups.get(group.record.id) === group) moveSubpane(ui, group);
+    focusSession(ui);
+  } catch (error) {
+    showError(workspaceError, error);
+    if (/\/login|API key|subscription/.test(error.message)) {
+      const login = element('button', '', 'Connect provider'); login.type = 'button';
+      login.onclick = () => openLogin(); workspaceError.append(' ', login);
+    }
+  }
+  finally { button.disabled = false; }
 }
+const sessionHistory = element('dialog', 'session-history');
+sessionHistory.setAttribute('aria-label', 'Session history');
+document.body.append(sessionHistory);
+let historyGeneration = 0;
+async function openSessionHistory(group = null) {
+  const generation = ++historyGeneration;
+  const header = element('header', 'diagnostics-header');
+  const close = element('button', '', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close session history'); close.onclick = () => sessionHistory.close();
+  header.append(element('h1', '', 'Sessions'), close);
+  const body = element('div', 'session-history-list'), error = element('p', 'error-banner'); error.hidden = true;
+  sessionHistory.replaceChildren(header, body, error);
+  if (!sessionHistory.open) sessionHistory.showModal();
+  try {
+    const [active, inactive] = await Promise.all([request('/api/sessions?history=recent'), request('/api/sessions/archived?history=recent')]);
+    if (generation !== historyGeneration || !sessionHistory.open) return;
+    for (const [label, records, archived] of [['Active sessions', active, false], ['Inactive sessions', inactive, true]]) {
+      body.append(element('h2', '', label));
+      if (!records.length) body.append(element('p', 'session-empty', 'None'));
+      for (const record of records) {
+        const card = element('button', 'session-card', record.name || record.id); card.type = 'button'; card.dataset.sessionId = String(record.id);
+        card.disabled = record.status === 'ending' || (archived && !record.archived);
+        card.onclick = async () => {
+          card.disabled = true;
+          try {
+            const startedAt = catalogRevision;
+            const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? '/reopen?history=recent' : '/history'}`, archived ? 'POST' : 'GET');
+            const destination = paneScreen(`agent:${view.id}`);
+            if (destination !== activeScreen) await switchScreen(destination);
+            const ui = acceptSessionResponse(view, startedAt);
+            if (archived && group && paneGroups.get(group.record.id) === group) moveSubpane(ui, group);
+            sessionHistory.close(); focusSession(ui);
+          } catch (failure) { showError(error, failure); card.disabled = false; }
+        };
+        body.append(card);
+      }
+    }
+  } catch (failure) { showError(error, failure); }
+}
+function refreshChoices() { /* The history chooser loads only when opened. */ }
+document.querySelector('#add-agent').addEventListener('click', () => createAgent());
+document.querySelector('#add-agent').addEventListener('contextmenu', event => { event.preventDefault(); openSessionHistory(); });
 
-document.querySelector("#add-agent").addEventListener("click", () => {
-  const ui = addSetup();
-  ui.form.elements.name.focus();
-});
 document.querySelector("#add-terminal").addEventListener("click", async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -3062,8 +3097,8 @@ for (const kind of ["agent", "terminal"]) {
 
 function rememberDiagnosticsAgent(target) {
   if (target.closest(".workspace-actions, #diagnostics-dialog")) return;
-  const pane = target.closest(".pane");
-  diagnosticsAgent = [...sessions.values()].find(ui => ui.pane === pane)?.id || "";
+  const ui = uiFromTarget(target);
+  diagnosticsAgent = ui?.input ? ui.id : "";
 }
 
 function diagnosticNumber(value) {
@@ -3294,9 +3329,7 @@ async function connect(token) {
   login.hidden = true;
   workspaceError.hidden = true;
   agentDefaults.cwd = launchCwd || config.cwd;
-  agentDefaults.name = config.next_agent_name;
-  agentNames = config.agent_names;
-  for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = agentDefaults.cwd;
+
   receiveScreens(await request("/api/screens"), false);
   if (!orderKey) {
     let saved; try { saved = sessionStorage.getItem(activeScreenKey); } catch {}
@@ -3342,14 +3375,18 @@ async function initialize() {
 }
 document.addEventListener("pointerdown", event => {
   rememberDiagnosticsAgent(event.target);
-  selected = event.target.closest(".pane");
+  const ui = uiFromTarget(event.target);
+  if (ui?.inactive) selectSubpane(ui);
+  selected = ui?.pane || null;
 });
 document.addEventListener("focusin", event => {
   rememberDiagnosticsAgent(event.target);
-  selected = event.target.closest(".pane");
+  const ui = uiFromTarget(event.target);
+  if (ui?.inactive) selectSubpane(ui);
+  selected = ui?.pane || null;
 });
 document.addEventListener("keydown", async event => {
-  if (diagnosticsDialog.open || document.querySelector("#plan-welcome").open) return;
+  if (diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
   if (loginOwner && selected === loginOwner.pane) {
     if (event.key === "Escape" && !event.isComposing) { event.preventDefault(); closeLogin(); }
     return;
@@ -3401,6 +3438,10 @@ document.addEventListener("keydown", async event => {
   finally { ui.interrupting = false; }
 });
 const loginPanel = document.querySelector("#provider-login");
+const standaloneLogin = element("dialog", "standalone-login");
+standaloneLogin.setAttribute("aria-label", "Connect provider");
+document.body.append(standaloneLogin);
+standaloneLogin.addEventListener("cancel", event => { event.preventDefault(); closeLogin(); });
 const providerError = document.querySelector("#provider-login-error");
 const providerStatus = document.querySelector("#provider-login-status");
 const subscriptionAccount = document.querySelector("#subscription-account");
@@ -3412,19 +3453,16 @@ function closeLogin() {
   loginPanel.hidden = true; document.body.append(loginPanel);
   document.querySelector("#provider-api-key").value = "";
   if (!owner) return;
-  const form = owner.composer || owner.form;
-  form.hidden = false;
-  if (owner.setupBody) owner.setupBody.hidden = false;
-  if (owner.composer) updateActivity(owner);
-  (owner.input || owner.form.querySelector("input"))?.focus({ preventScroll: true });
+  if (owner.composer) { owner.composer.hidden = false; updateActivity(owner); owner.input.focus({ preventScroll: true }); }
+  else { standaloneLogin.close(); document.querySelector("#add-agent").focus({ preventScroll: true }); }
 }
-function openLogin(ui) {
+function openLogin(ui = { pane: standaloneLogin }) {
   closeLogin(); loginOwner = ui; loginMethod = ""; loginSignature = ""; loginStatus = null;
   subscriptionAccount.replaceChildren();
   if (ui.composer) {
     ui.slashSuggestion.hidden = true; ui.modelPicker.hidden = true; ui.skillPicker.hidden = true;
     ui.composer.hidden = true; clearPromptSpaceWhenHidden(ui); updateActivity(ui);
-  } else { ui.form.hidden = true; ui.setupBody.hidden = true; }
+  } else standaloneLogin.showModal();
   ui.pane.append(loginPanel); loginPanel.hidden = false;
   providerError.hidden = true; providerStatus.textContent = "";
   document.querySelector("#api-key-login").hidden = true;
