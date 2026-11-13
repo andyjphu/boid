@@ -48,6 +48,7 @@ impl Fixture {
             .current_dir(self.directory.path())
             .env("BOID_LISTEN", &self.address)
             .env("BOID_STATE_DIR", self.state())
+            .env("HOME", self.directory.path())
             .env("OPENAI_API_KEY", "synthetic-startup-test-no-provider-call");
         command
     }
@@ -152,6 +153,7 @@ async fn simultaneous_launches_reuse_one_server_and_preserve_invocation_defaults
         fixture
             .command(&[""])
             .current_dir(&work_b)
+            .env("BOID_CWD", &work_a)
             .output()
             .unwrap()
             .status
@@ -161,7 +163,13 @@ async fn simultaneous_launches_reuse_one_server_and_preserve_invocation_defaults
     assert_eq!(sessions.as_array().unwrap().len(), 1);
     assert_eq!(
         sessions[0]["cwd"],
-        work_b.canonicalize().unwrap().to_string_lossy().as_ref()
+        fixture
+            .directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
     );
     let session_id = sessions[0]["id"].clone();
     fixture.ok(&["stop"]);

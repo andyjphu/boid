@@ -33,8 +33,9 @@ BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.
 BOID_LISTEN defaults to 127.0.0.1:7734. Commands run with the server account permissions.
 Client: BOID_URL selects an existing remote server; no local server is started for it.
 Otherwise the launcher connects to BOID_LISTEN (default 127.0.0.1:7734).
-BOID_CWD selects a server-side directory; local launches default to the invocation directory.
-Remote connections without BOID_CWD use the server working directory.
+New agents start in the server home directory with a random unused bird name.
+BOID_CWD selects the terminal/workspace directory, not an agent directory.
+Local workspace launches default to the invocation directory; remote connections use the server working directory.
 BOID_TOKEN overrides the private token file under BOID_STATE_DIR (default ~/.local/share/boid).
 Server shutdown stops execution; saved conversations return paused on restart. End archives a session without erasing its record.";
 
@@ -77,7 +78,7 @@ async fn run() -> Result<()> {
         .build()?
         .post(connection.url.join("api/sessions")?)
         .bearer_auth(&connection.token)
-        .json(&json!({"message":args.join(" "),"cwd":startup::invocation_cwd()?}))
+        .json(&json!({"message":args.join(" ")}))
         .send()
         .await
         .context("Cannot reach the Boid server.")?;

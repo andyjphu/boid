@@ -16,13 +16,15 @@ to a running server does not require it. `BOID_MODEL` defaults to
 `gpt-6-sol`, with medium reasoning effort and Daybreak Blue.
 
 `boid "task"` starts or connects to the server, submits a new session, prints its
-ID, and exits. A local launch uses the invocation directory for new agents and
-terminals; each browser tab retains that default on refresh. Existing sessions
-keep their directories. No project context or `.boid` directory is created.
+ID, and exits. Web and CLI agent creation starts in the server home directory;
+the CLI task path does not override this with its cwd or `BOID_CWD`. Existing
+sessions keep their directories. A local workspace launch still uses its
+invocation directory for terminals; each browser tab retains that default on
+refresh. No project context or `.boid` directory is created.
 `BOID_URL` selects an existing remote server and disables local autostart.
-`BOID_CWD` optionally selects a directory as seen by that server; remote
-connections without it use the server's working directory. `BOID_TOKEN`
-supplies its access token, or the client reads the private token file under
+`BOID_CWD` optionally selects the terminal/workspace directory as seen by that
+server; remote workspace connections without it use the server's working
+directory. `BOID_TOKEN` supplies its access token, or the client reads the private token file under
 `BOID_STATE_DIR` (default `~/.local/share/boid`). The server generates a token
 file when needed.
 
@@ -89,9 +91,12 @@ survives browser refresh.
 
 Agent names come from [`src/agent-names.json`](../src/agent-names.json), bundled
 at build time: canary, swift, falcon, kestrel, lark, and duck. Automatic
-assignment skips names already used by active or archived agents, then adds
-numeric suffixes. The creation form suggests these names and accepts custom
-ones. An empty name uses the next available default.
+assignment randomly selects an unused name, skipping names already used by
+active or archived agents. When those names are exhausted, it selects from the
+next numeric suffix tier. Allocation and installation share the session lock,
+so simultaneous creations cannot receive the same automatic name. Explicit API
+names and directories remain supported; the web creation action has no setup
+form and starts at home.
 
 Double-click an agent or terminal title, or focus it and press F2, to rename it.
 The field selects the current name. Enter saves; Escape or clicking elsewhere

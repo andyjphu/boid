@@ -28,8 +28,10 @@ Use `boid --no-open` to print the URL without opening a browser; SSH sessions
 also print the URL only. Closing the shell or browser leaves agents running.
 
 `boid stop` shuts down the server and active work while preserving saved
-conversations. `boid serve` runs in the foreground for debugging. New panes use
-the directory where `boid` was invoked; existing agents keep their directories.
+conversations. `boid serve` runs in the foreground for debugging. New agents
+start in the server home directory with a random unused bird name; existing
+agents keep their directories. Terminals retain the workspace directory selected
+by the launcher or `BOID_CWD`. `boid "task"` also starts its agent at home.
 State and background server logs live under `~/.local/share/boid` by default.
 For browser access without copying a server token, use
 [SSH-authorized passkey enrollment](docs/passkeys.md).
