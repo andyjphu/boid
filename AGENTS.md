@@ -16,3 +16,9 @@ works on its own implementation. Read the prominent caution in the bootstrap
 brief: development assumptions about failures must not become behavioral goals.
 Select runtime guidance and developer context for the actual task; do not
 automatically inject this whole brief or parent instructions into every session.
+
+Speed is a core mandate: remove proven avoidable harness overhead between tools
+and inference while preserving correct server behavior. Report legitimate
+feature tradeoffs immediately. Read [the performance guide](docs/performance.md)
+when investigating latency or changing admission, persistence, history, or
+rendering; distinguish live measurements from synthetic benchmarks.
