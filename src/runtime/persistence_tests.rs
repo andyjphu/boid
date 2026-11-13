@@ -364,3 +364,163 @@ async fn graceful_shutdown_drains_accepted_inputs_before_returning() {
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saturated_storage_waits_without_faulting_or_blocking_the_roster() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "saturated").await;
+    let other = idle_agent(&hub, work.path(), "unblocked").await;
+    let entry = hub.entry(&target.id, "assistant", "");
+    let gate = hold_writer(&hub, &target.id).await;
+    {
+        let mut data = hub.0.data.lock().unwrap();
+        let handle = data.sessions.get_mut(&target.id).unwrap();
+        // One active gate plus fifteen queued snapshots exhaust the bound.
+        for _ in 0..15 {
+            handle
+                .persistence
+                .enqueue(Operation::Snapshot(Box::new(handle.record.clone())))
+                .unwrap();
+        }
+    }
+    let before =
+        serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&target.id].record).unwrap();
+    assert!(
+        hub.message(&target.id, "retry without accepting".into())
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&target.id].record).unwrap(),
+        before
+    );
+
+    let writing = hub.clone();
+    let id = target.id.clone();
+    let entry_id = entry.clone();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let mut delta = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        writing.delta(&id, &entry_id, "retained after backpressure");
+    });
+    ready.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut delta)
+            .await
+            .is_err(),
+        "a strict write must wait for capacity, not escalate saturation to a fault"
+    );
+    assert!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .storage_error
+            .is_none()
+    );
+    let independent = hub.clone();
+    let other_id = other.id.clone();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            independent.rename(&other_id, "still-unblocked".into())
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(3), delta)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .storage_error
+            .is_none()
+    );
+    assert_eq!(
+        hub.view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .text,
+        "retained after backpressure"
+    );
+    hub.shutdown().await;
+}
+
+async fn wait_for_writer_exit(hub: &Hub, id: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !hub.0.data.lock().unwrap().sessions[id]
+                .persistence
+                .is_running()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("empty persistence lane retained a running worker");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_and_archived_lanes_release_workers_and_restart_on_demand() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "lazy-writer").await;
+    wait_for_writer_exit(&hub, &target.id).await;
+    let gate = hold_writer(&hub, &target.id).await;
+    assert!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .persistence
+            .is_running()
+    );
+    gate.release();
+    wait_for_writer_exit(&hub, &target.id).await;
+    hub.rename(&target.id, "new-drain".into()).unwrap();
+    wait_for_writer_exit(&hub, &target.id).await;
+    assert!(hub.close(&target.id).await.unwrap());
+    wait_for_writer_exit(&hub, &target.id).await;
+    hub.reopen(&target.id).unwrap();
+    wait_for_writer_exit(&hub, &target.id).await;
+    assert_eq!(hub.view(&target.id).unwrap().name, "new-drain");
+    hub.shutdown().await;
+}
+
+#[test]
+fn disk_progress_does_not_depend_on_available_tokio_blocking_workers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let hub = Hub::new(Client::test_client()).unwrap();
+        let mut lane = Lane::new(Arc::downgrade(&hub.0), Uuid::new_v4().to_string()).unwrap();
+        let (occupied, ready) = tokio::sync::oneshot::channel();
+        let (release_pool, wait_pool) = std::sync::mpsc::channel();
+        let pool_guard = WriterGate(Some(release_pool));
+        let pool_task = tokio::task::spawn_blocking(move || {
+            occupied.send(()).unwrap();
+            let _ = wait_pool.recv();
+        });
+        ready.await.unwrap();
+        let (started, release_writer) = lane.gate();
+        let writer_guard = WriterGate(Some(release_writer));
+        // Do not use spawn_blocking for the observer: the pool is deliberately full.
+        let progressed = started.recv_timeout(Duration::from_secs(1)).is_ok();
+        pool_guard.release();
+        writer_guard.release();
+        pool_task.await.unwrap();
+        assert!(
+            progressed,
+            "receipt waiters can starve the persistence writer"
+        );
+    });
+}

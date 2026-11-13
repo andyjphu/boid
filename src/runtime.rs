@@ -13,7 +13,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
 mod persistence;
-use persistence::{Lane, Operation, Receipt};
+use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
 mod persistence_tests;
 
@@ -831,10 +831,22 @@ impl Hub {
             );
         }
     }
+    fn reserve_persistence(&self, id: &str, slots: usize) -> Result<Permit> {
+        let capacity = {
+            let data = self.0.data.lock().unwrap();
+            data.sessions
+                .get(id)
+                .context("Unknown session.")?
+                .persistence
+                .capacity()
+        };
+        capacity.reserve(slots)
+    }
     fn update<T>(&self, id: &str, change: impl FnOnce(&mut Record) -> Result<T>) -> Result<T> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
-            let (result, receipt) = self.update_locked(&mut data, id, change)?;
+            let (result, receipt) = self.update_locked(&mut data, id, Some(&mut permit), change)?;
             drop(data);
             receipt.wait()?;
             Ok(result)
@@ -844,6 +856,7 @@ impl Hub {
         &self,
         data: &mut Data,
         id: &str,
+        permit: Option<&mut Permit>,
         change: impl FnOnce(&mut Record) -> Result<T>,
     ) -> Result<(T, Receipt)> {
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
@@ -884,9 +897,11 @@ impl Hub {
         }
         // Admission and event publication describe the actual in-memory state.
         // Disk I/O is ordered by the lane and never holds the roster lock.
-        let receipt = handle
-            .persistence
-            .enqueue(Operation::Snapshot(Box::new(next.clone())))?;
+        let operation = Operation::Snapshot(Box::new(next.clone()));
+        let receipt = match permit {
+            Some(permit) => handle.persistence.enqueue_reserved(operation, permit)?,
+            None => handle.persistence.enqueue(operation)?,
+        };
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
         if current.view.archived {
@@ -1024,6 +1039,7 @@ impl Hub {
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
             let result = (|| -> Result<()> {
+                let mut permit = self.reserve_persistence(session, 1)?;
                 let mut data = self.0.data.lock().unwrap();
                 let handle = data.sessions.get_mut(session).context("Unknown session")?;
                 if handle.storage_error.is_some() {
@@ -1035,7 +1051,9 @@ impl Hub {
                     text: text.into(),
                 };
                 let seq = delta.seq;
-                let receipt = handle.persistence.enqueue(Operation::Delta(delta))?;
+                let receipt = handle
+                    .persistence
+                    .enqueue_reserved(Operation::Delta(delta), &mut permit)?;
                 handle.record.stream_seq = seq;
                 if let Some(item) = handle
                     .record
@@ -1070,11 +1088,13 @@ impl Hub {
     }
     pub fn archive_context(&self, id: &str, attempt: u64) -> Result<()> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get_mut(id).context("Unknown session.")?;
-            let receipt = handle
-                .persistence
-                .enqueue(Operation::Context(attempt, Box::new(handle.record.clone())))?;
+            let receipt = handle.persistence.enqueue_reserved(
+                Operation::Context(attempt, Box::new(handle.record.clone())),
+                &mut permit,
+            )?;
             drop(data);
             receipt.wait()
         })
@@ -1351,7 +1371,7 @@ impl Hub {
                 .context("Unknown session.")?
                 .persistence
                 .check_input_capacity()?;
-            let (_, receipt) = self.update_locked(&mut data, id, |r| {
+            let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
                 if r.view.archived {
                     bail!("Session has ended. Reopen its history first.");
                 }
@@ -1641,25 +1661,35 @@ impl Hub {
             if text.trim().is_empty() || text.len() > 65536 {
                 bail!("Peer messages must contain 1 to 65536 bytes.");
             }
-            let mut data = self.0.data.lock().unwrap();
-            if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
-                if message.recipient_id != to || message.text != text || message.urgency != urgency
-                {
-                    bail!("A send operation cannot change its recipient, text or urgency.");
+            let mut permit = None;
+            let mut data = loop {
+                let data = self.0.data.lock().unwrap();
+                if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
+                    if message.recipient_id != to
+                        || message.text != text
+                        || message.urgency != urgency
+                    {
+                        bail!("A send operation cannot change its recipient, text or urgency.");
+                    }
+                    let mut message = message.clone();
+                    message.blocked = message.state == "queued"
+                        && data.sessions.get(to).is_some_and(|h| h.record.paused);
+                    let receipt = data
+                        .message_receipts
+                        .get(&(from.into(), call_id.into()))
+                        .cloned();
+                    drop(data);
+                    if let Some(receipt) = receipt {
+                        receipt.wait()?;
+                    }
+                    return Ok(message.receipt());
                 }
-                let mut message = message.clone();
-                message.blocked = message.state == "queued"
-                    && data.sessions.get(to).is_some_and(|h| h.record.paused);
-                let receipt = data
-                    .message_receipts
-                    .get(&(from.into(), call_id.into()))
-                    .cloned();
+                if permit.is_some() {
+                    break data;
+                }
                 drop(data);
-                if let Some(receipt) = receipt {
-                    receipt.wait()?;
-                }
-                return Ok(message.receipt());
-            }
+                permit = Some(self.reserve_persistence(to, 1)?);
+            };
             if data.closing {
                 bail!("Server is shutting down.");
             }
@@ -1695,7 +1725,7 @@ impl Hub {
                 blocked: false,
                 persisted: true,
             };
-            let (_, receipt) = self.update_locked(&mut data, to, |r| {
+            let (_, receipt) = self.update_locked(&mut data, to, permit.as_mut(), |r| {
                 if r.view.archived {
                     bail!("Recipient session has ended.");
                 }
@@ -1756,6 +1786,7 @@ impl Hub {
     }
     pub fn claim_tool(&self, id: &str, session: &Session) -> Result<bool> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let r = &data.sessions[id].record;
             if r.paused
@@ -1766,7 +1797,7 @@ impl Hub {
             {
                 return Ok(false);
             }
-            let (_, receipt) = self.update_locked(&mut data, id, |r| {
+            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 r.engine = session.clone();
                 Ok(())
             })?;
@@ -1785,6 +1816,7 @@ impl Hub {
     }
     pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<bool> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get(id).context("Unknown session.")?;
             if let Some(error) = &handle.storage_error {
@@ -1794,7 +1826,7 @@ impl Hub {
                 return Ok(false);
             }
             let mut staged = session.clone();
-            let (_, receipt) = self.update_locked(&mut data, id, |r| {
+            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 let urgent = r
                     .messages
                     .iter()
@@ -1846,20 +1878,21 @@ impl Hub {
     }
     fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
         crate::blocking::run(|| {
+            let mut permit = self.reserve_persistence(id, 2)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get_mut(id).context("Unknown session.")?;
             if let Some(input) = handle.record.inputs.front().filter(|i| {
                 i.clear && !handle.record.paused && i.order > handle.record.stop_through
             }) {
-                let receipt = handle.persistence.enqueue(Operation::Clear(
-                    input.id.clone(),
-                    Box::new(handle.record.clone()),
-                ))?;
+                let receipt = handle.persistence.enqueue_reserved(
+                    Operation::Clear(input.id.clone(), Box::new(handle.record.clone())),
+                    &mut permit,
+                )?;
                 drop(data);
                 receipt.wait()?;
                 data = self.0.data.lock().unwrap();
             }
-            let (event, receipt) = self.update_locked(&mut data, id, |r| {
+            let (event, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
             let Some(input) = r.inputs.front() else {
                 return Ok(None);
             };
