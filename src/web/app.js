@@ -193,6 +193,7 @@ function paintPaneLayout() {
 }
 
 function paneResizeGroup(key, edge) {
+  if (!catalogReady || !paneLayout) return null;
   const tiles = paneLayout.tiles;
   const tile = tiles.find(tile => tile.key === key);
   if (!tile) return null;

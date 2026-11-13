@@ -69,7 +69,19 @@ const near = (a, b, label) => assert.ok(Math.abs(a - b) < 2, `${label}: ${a} vs 
         }
       }
     }
-    await page.goto('http://boid.test'); await page.waitForFunction(() => window.testEvents); await snapshot();
+    await page.goto('http://boid.test'); await page.waitForFunction(() => window.testEvents);
+    // Restored drafts are interactive before the first catalog establishes a layout.
+    await page.evaluate(() => sessionStorage.setItem(orderKey, JSON.stringify({
+      version: 2, order: ['draft:saved'], layout: null,
+      drafts: [{ id: 'saved', name: '', cwd: '' }],
+    })));
+    await page.reload(); await page.waitForFunction(() => window.testEvents);
+    assert.equal(await page.evaluate(() => paneLayout), null);
+    await handle('draft:saved', 'right').focus(); await page.keyboard.press('ArrowRight');
+    await drag('draft:saved', 'right', 20);
+    assert.deepEqual(errors, [], 'restored draft resize before the first snapshot must be harmless');
+    await page.evaluate(() => discardSetup(drafts.get('saved')));
+    await snapshot();
     const original = await boxes();
     await drag('agent:a', 'right', 120);
     let changed = await boxes();
