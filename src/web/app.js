@@ -29,6 +29,8 @@ let orderKey = "";
 let catalogReady = false;
 let reconcilingCatalog = false;
 let launchCwd = "";
+let paneLayout = null;
+let paneResize = null;
 
 function loadPaneOrder(cwd) {
   const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
@@ -36,6 +38,7 @@ function loadPaneOrder(cwd) {
   orderKey = key;
   try {
     const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+    paneLayout = saved?.layout || null;
     const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
     for (const draft of saved?.drafts || []) {
@@ -47,7 +50,7 @@ function loadPaneOrder(cwd) {
         addSetup(restored);
       }
     }
-  } catch { paneOrder = []; }
+  } catch { paneOrder = []; paneLayout = null; }
 }
 
 function rememberPaneOrder() {
@@ -63,6 +66,7 @@ function rememberPaneOrder() {
   try {
     sessionStorage.setItem(orderKey, JSON.stringify({
       version: 2, order: paneOrder,
+      layout: paneLayout?.custom ? paneLayout : null,
       drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
     }));
   } catch { /* Storage availability must not prevent session access. */ }
@@ -109,6 +113,7 @@ async function request(path, method = "GET", body, headers = {}) {
 }
 
 function layout(event) {
+  if (paneResize) finishPaneResize(true);
   rememberPaneOrder();
   if (event?.type !== "resize") {
     for (const ui of sessions.values()) rememberPosition(ui);
@@ -119,11 +124,192 @@ function layout(event) {
   const columns = Math.max(1, Math.min(panes.length, Math.floor(workspace.clientWidth / 420)));
   workspace.style.setProperty("--columns", columns);
   workspace.style.setProperty("--rows", Math.max(1, Math.ceil(panes.length / columns)));
+  if (catalogReady && !reconcilingCatalog) {
+    arrangePanes(panes, columns);
+    rememberPaneOrder();
+  }
   requestAnimationFrame(() => {
     for (const ui of sessions.values()) restorePosition(ui);
     for (const ui of sessions.values()) ui.reflow = false;
   });
 }
+
+// Rectangles use workspace fractions so a resized arrangement scales with the window.
+// Each shared edge can move independently until it meets another pane's minimum size.
+function validPaneLayout(panes) {
+  const tiles = paneLayout?.tiles;
+  if (!paneLayout?.custom || !Array.isArray(tiles) || tiles.length !== panes.length) return false;
+  if (!tiles.every(tile => tile && typeof tile.key === "string")) return false;
+  if (new Set(tiles.map(tile => tile.key)).size !== panes.length) return false;
+  if (!panes.every(pane => tiles.some(tile => tile.key === pane.dataset.paneKey))) return false;
+  return tiles.every((tile, i) => {
+    if (![tile.left, tile.right, tile.top, tile.bottom].every(Number.isFinite)
+      || tile.left < 0 || tile.right > 1 || tile.top < 0 || tile.bottom > 1
+      || tile.right - tile.left < .001 || tile.bottom - tile.top < .001) return false;
+    return tiles.slice(i + 1).every(other => Math.min(tile.right, other.right) - Math.max(tile.left, other.left) < .000001
+      || Math.min(tile.bottom, other.bottom) - Math.max(tile.top, other.top) < .000001);
+  });
+}
+
+function arrangePanes(panes, columns) {
+  if (!validPaneLayout(panes)) {
+    const rows = Math.max(1, Math.ceil(panes.length / columns));
+    paneLayout = { custom: false, minimumHeight: rows * 240, tiles: panes.map((pane, index) => ({
+      key: pane.dataset.paneKey,
+      left: (index % columns) / columns, right: (index % columns + 1) / columns,
+      top: Math.floor(index / columns) / rows, bottom: (Math.floor(index / columns) + 1) / rows,
+    })) };
+  }
+  paintPaneLayout();
+}
+
+function paneLayoutSize() {
+  const tiles = paneLayout.tiles;
+  return {
+    width: Math.max(workspace.clientWidth, ...tiles.map(tile => 180 / (tile.right - tile.left))),
+    height: Math.max(workspace.clientHeight, Number.isFinite(paneLayout.minimumHeight) ? paneLayout.minimumHeight : 0,
+      ...tiles.map(tile => (paneLayout.custom ? 120 : 240) / (tile.bottom - tile.top))),
+  };
+}
+
+function paintPaneLayout() {
+  const tiles = paneLayout.tiles;
+  const xs = [...new Set([0, 1, ...tiles.flatMap(tile => [tile.left, tile.right])])].sort((a, b) => a - b);
+  const ys = [...new Set([0, 1, ...tiles.flatMap(tile => [tile.top, tile.bottom])])].sort((a, b) => a - b);
+  const size = paneResize?.size || paneLayoutSize();
+  workspace.style.gridTemplateColumns = xs.slice(1).map((x, i) => `${(x - xs[i]) * size.width}px`).join(" ");
+  workspace.style.gridTemplateRows = ys.slice(1).map((y, i) => `${(y - ys[i]) * size.height}px`).join(" ");
+  for (const pane of workspace.querySelectorAll(".pane")) {
+    const tile = tiles.find(tile => tile.key === pane.dataset.paneKey);
+    if (!tile) continue;
+    pane.style.gridColumn = `${xs.indexOf(tile.left) + 1} / ${xs.indexOf(tile.right) + 1}`;
+    pane.style.gridRow = `${ys.indexOf(tile.top) + 1} / ${ys.indexOf(tile.bottom) + 1}`;
+    for (const handle of pane.querySelectorAll(":scope > .pane-resize")) {
+      const edge = handle.dataset.edge;
+      handle.hidden = tile[edge] === 0 || tile[edge] === 1;
+      handle.setAttribute("aria-valuenow", Math.round(tile[edge] * 100));
+    }
+  }
+}
+
+function paneResizeGroup(key, edge) {
+  if (!catalogReady || !paneLayout) return null;
+  const tiles = paneLayout.tiles;
+  const tile = tiles.find(tile => tile.key === key);
+  if (!tile) return null;
+  const horizontal = edge === "left" || edge === "right";
+  const [start, end, crossStart, crossEnd] = horizontal ? ["left", "right", "top", "bottom"] : ["top", "bottom", "left", "right"];
+  const at = tile[edge];
+  if (at === 0 || at === 1) return null;
+  let low = tile[crossStart], high = tile[crossEnd];
+  const members = new Map();
+  // A staggered junction can join several edges. Move the whole connected segment
+  // to keep every pane rectangular, without moving an unrelated row or column.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of tiles) {
+      const side = candidate[start] === at ? start : candidate[end] === at ? end : null;
+      if (!side || members.has(candidate) || candidate[crossEnd] <= low + .000001 || candidate[crossStart] >= high - .000001) continue;
+      members.set(candidate, side);
+      low = Math.min(low, candidate[crossStart]); high = Math.max(high, candidate[crossEnd]);
+      changed = true;
+    }
+  }
+  const size = paneLayoutSize();
+  const pixels = horizontal ? size.width : size.height;
+  const minimum = (horizontal ? 180 : 120) / pixels;
+  let min = 0, max = 1;
+  for (const [candidate, side] of members) {
+    if (side === end) min = Math.max(min, candidate[start] + minimum);
+    else max = Math.min(max, candidate[end] - minimum);
+    // An incomplete last row can leave empty space. Stop at the next occupied
+    // rectangle even when it does not yet share the dragged edge.
+    for (const other of tiles) {
+      if (members.has(other) || other[crossEnd] <= candidate[crossStart] + .000001
+        || other[crossStart] >= candidate[crossEnd] - .000001) continue;
+      if (side === start && other[end] <= at) min = Math.max(min, other[end]);
+      if (side === end && other[start] >= at) max = Math.min(max, other[start]);
+    }
+  }
+  return { members, horizontal, at, pixels, min, max, size };
+}
+
+let paneReflowFrame;
+function resizePaneEdge(group, at) {
+  at = Math.max(group.min, Math.min(group.max, at));
+  for (const ui of sessions.values()) {
+    if (!ui.reflow) rememberPosition(ui);
+    ui.reflow = true;
+  }
+  for (const [tile, side] of group.members) tile[side] = at;
+  paneLayout.custom = true;
+  paintPaneLayout();
+  cancelAnimationFrame(paneReflowFrame);
+  paneReflowFrame = requestAnimationFrame(() => {
+    for (const ui of sessions.values()) { restorePosition(ui); ui.reflow = false; }
+  });
+}
+
+function finishPaneResize(cancel = false) {
+  const drag = paneResize;
+  if (!drag) return;
+  paneResize = null;
+  if (cancel) paneLayout = drag.before;
+  document.body.classList.remove("resizing-panes");
+  document.body.style.removeProperty("--resize-cursor");
+  if (drag.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+  paintPaneLayout();
+  for (const ui of sessions.values()) restorePosition(ui);
+  rememberPaneOrder();
+}
+
+function addPaneResizeHandles(pane) {
+  for (const edge of ["left", "right", "top", "bottom"]) {
+    const handle = element("div", `pane-resize pane-resize-${edge}`);
+    handle.dataset.edge = edge;
+    handle.tabIndex = 0;
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", `Resize ${edge} edge`);
+    handle.setAttribute("aria-orientation", edge === "left" || edge === "right" ? "vertical" : "horizontal");
+    handle.setAttribute("aria-valuemin", "0"); handle.setAttribute("aria-valuemax", "100");
+    handle.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || !event.isPrimary || paneResize) return;
+      const group = paneResizeGroup(pane.dataset.paneKey, edge);
+      if (!group) return;
+      event.preventDefault(); event.stopPropagation();
+      paneResize = { ...group, before: structuredClone(paneLayout), handle, pointerId: event.pointerId,
+        origin: group.horizontal ? event.clientX : event.clientY };
+      handle.setPointerCapture(event.pointerId);
+      document.body.style.setProperty("--resize-cursor", group.horizontal ? "col-resize" : "row-resize");
+      document.body.classList.add("resizing-panes");
+    });
+    handle.addEventListener("pointermove", event => {
+      const drag = paneResize;
+      if (!drag || drag.handle !== handle || drag.pointerId !== event.pointerId) return;
+      resizePaneEdge(drag, drag.at + ((drag.horizontal ? event.clientX : event.clientY) - drag.origin) / drag.pixels);
+    });
+    handle.addEventListener("pointerup", event => { if (paneResize?.pointerId === event.pointerId) finishPaneResize(); });
+    handle.addEventListener("pointercancel", () => finishPaneResize(true));
+    handle.addEventListener("lostpointercapture", () => finishPaneResize(true));
+    handle.addEventListener("keydown", event => {
+      const group = paneResizeGroup(pane.dataset.paneKey, edge);
+      const keys = group?.horizontal ? ["ArrowLeft", "ArrowRight"] : ["ArrowUp", "ArrowDown"];
+      if (!group || !keys.includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      resizePaneEdge(group, group.at + (keys.indexOf(event.key) ? 1 : -1) * (event.shiftKey ? 40 : 10) / group.pixels);
+      rememberPaneOrder();
+    });
+    pane.append(handle);
+  }
+}
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && paneResize) {
+    event.preventDefault(); event.stopImmediatePropagation(); finishPaneResize(true);
+  }
+}, true);
+window.addEventListener("blur", () => finishPaneResize(true));
 
 // Microsoft Codicons 0.0.36, CC-BY-4.0; attribution in vendor/codicons-NOTICE.
 function paneIcon(kind) {
@@ -154,6 +340,7 @@ function makePane(name, cwd, kind, id) {
   tab.append(paneIcon(kind), title, directory, close);
   header.append(tab, status);
   pane.append(header);
+  addPaneResizeHandles(pane);
   workspace.append(pane);
   return { pane, header, tab, title, status, directory, error, close };
 }

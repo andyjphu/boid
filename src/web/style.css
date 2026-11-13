@@ -56,6 +56,7 @@ body.disconnected .workspace-actions,
 }
 #empty { margin: auto; color: #aaa; }
 .pane {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -65,6 +66,15 @@ body.disconnected .workspace-actions,
   border-bottom: 1px solid #353535;
   background: #1e1e1e;
 }
+.pane-resize { position: absolute; z-index: 6; touch-action: none; user-select: none; }
+.pane-resize-left, .pane-resize-right { top: 0; bottom: 0; width: 4px; cursor: col-resize; }
+.pane-resize-top, .pane-resize-bottom { left: 0; right: 0; height: 4px; cursor: row-resize; }
+.pane-resize-left { left: 0; }
+.pane-resize-right { right: 0; }
+.pane-resize-top { top: 0; }
+.pane-resize-bottom { bottom: 0; }
+.pane-resize:hover, .pane-resize:focus-visible { background: #8bafd04d; outline: none; }
+body.resizing-panes, body.resizing-panes * { cursor: var(--resize-cursor) !important; user-select: none !important; }
 .pane-header {
   display: flex;
   align-items: stretch;
