@@ -1,6 +1,7 @@
 use super::*;
 use axum::{
     Json, Router,
+    response::IntoResponse,
     routing::{get, post},
 };
 use futures_util::StreamExt;
@@ -88,6 +89,13 @@ async fn terminal_latency_fixture() {
         })
         .unwrap();
     hub.stop(&view.id).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while hub.view(&view.id).unwrap().status != "stopped" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("fixture worker must finish its stop checkpoint");
     hub.update(&view.id, |record| {
         let text = "x".repeat(32 * 1024 * 1024);
         record
@@ -154,6 +162,21 @@ async fn terminal_latency_fixture() {
     let stop_writes = writes.clone();
     let snapshot = hub.subscribe_history(true).0;
     let config = hub.config();
+    let token_path = PathBuf::from(
+        std::env::var("BOID_FIXTURE_TOKEN_FILE")
+            .expect("supply a fresh token file path for the browser fixture"),
+    );
+    let token = Uuid::new_v4().simple().to_string();
+    {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&token_path)
+            .unwrap();
+        file.write_all(token.as_bytes()).unwrap();
+    }
     let router = Router::new()
         .route(
             "/api/config",
@@ -209,6 +232,17 @@ async fn terminal_latency_fixture() {
             "/{*path}",
             get(
                 |axum::extract::Path(path): axum::extract::Path<String>| async move {
+                    if !matches!(
+                        path.as_str(),
+                        "app.js"
+                            | "style.css"
+                            | "vendor/xterm.js"
+                            | "vendor/xterm.css"
+                            | "vendor/addon-fit.js"
+                            | "vendor/markdown-it.min.js"
+                    ) {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
+                    }
                     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/web");
                     let mime = if path.ends_with(".js") {
                         "text/javascript"
@@ -217,14 +251,35 @@ async fn terminal_latency_fixture() {
                     } else {
                         "text/plain"
                     };
-                    assert!(!path.contains(".."));
                     (
                         [("content-type", mime)],
                         std::fs::read(root.join(path)).unwrap_or_default(),
                     )
+                        .into_response()
                 },
             ),
-        );
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let token = token.clone();
+                async move {
+                    let valid = request
+                        .headers()
+                        .get("cookie")
+                        .and_then(|h| h.to_str().ok())
+                        .is_some_and(|cookie| {
+                            cookie.split(';').any(|part| {
+                                part.trim().strip_prefix("boid_fixture_token=")
+                                    == Some(token.as_str())
+                            })
+                        });
+                    if !valid {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
     let address = std::env::var("BOID_FIXTURE_PORT").unwrap_or_else(|_| "17836".into());
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{address}"))
         .await
@@ -238,4 +293,5 @@ async fn terminal_latency_fixture() {
     contention.abort();
     terminals.shutdown().await.unwrap();
     hub.shutdown().await;
+    std::fs::remove_file(token_path).unwrap();
 }
