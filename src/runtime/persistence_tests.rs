@@ -172,7 +172,7 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
             .iter_mut()
             .find(|e| e.id == entry)
             .unwrap()
-            .text = "before before ".into();
+            .text = "before before ".to_owned().into();
         handle
             .persistence
             .enqueue(Operation::Snapshot(Box::new(record)))
