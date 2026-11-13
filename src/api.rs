@@ -1,12 +1,23 @@
 use anyhow::{Context, Result, bail};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REASONING_EFFORT: &str = "medium";
+
+fn encode_input<I: Serialize + ?Sized>(metadata: &Value, input: &I) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Request<'a, I: Serialize + ?Sized> {
+        #[serde(flatten)]
+        metadata: &'a Value,
+        input: &'a I,
+    }
+    serde_json::to_vec(&Request { metadata, input }).context("Cannot encode model request")
+}
 
 // API limit, not Codex's smaller default budget. Unknown models have no assumed limit.
 // https://developers.openai.com/api/docs/models/gpt-6-sol (2026-11-08)
@@ -134,9 +145,9 @@ impl Client {
 
     /// Stream text and return complete API items for the next request's input.
     /// Dropping the future closes the active request.
-    pub async fn respond_with(
+    pub async fn respond_with<I: Serialize + Sync + ?Sized>(
         &self,
-        input: &[Value],
+        input: &I,
         tools: Value,
         model: &str,
         instructions: &str,
@@ -149,7 +160,6 @@ impl Client {
         let mut request = json!({
             "model": model,
             "instructions": instructions,
-            "input": input,
             "tools": tools,
             "parallel_tool_calls": false,
             "stream": true,
@@ -174,17 +184,24 @@ impl Client {
                 .collect();
             request["tools"] = json!([{"type":"namespace","name":"boid","description":"Local Boid agent tools","tools":functions}]);
         }
+        // Encode borrowed input once. Building a Value with json! would copy all
+        // historical payloads before serialization; retries can reuse these bytes.
+        let body = encode_input(&request, input)?;
+        let request = self
+            .http
+            .post(endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         let mut http_attempt = 0;
         let mut waited = Duration::ZERO;
         loop {
             // Recheck the same account after backoff; another request may have paused it.
             let credential = self.credential(profile).await?;
             http_attempt += 1;
-            let sent = self
-                .http
-                .post(endpoint)
+            let sent = request
+                .try_clone()
+                .expect("In-memory JSON request body can be cloned")
                 .bearer_auth(&credential)
-                .json(&request)
                 .send()
                 .await;
             let response = match sent {
@@ -406,9 +423,9 @@ impl Client {
         Ok(())
     }
 
-    pub async fn compact(
+    pub async fn compact<I: Serialize + Sync + ?Sized>(
         &self,
-        input: &[Value],
+        input: &I,
         model: &str,
         instructions: &str,
         profile: &Value,
@@ -426,11 +443,13 @@ impl Client {
             .as_ref()
             .map(|url| format!("{}/compact", url.trim_end_matches('/')))
             .unwrap_or(endpoint);
+        let body = encode_input(&json!({"model":model,"instructions":instructions}), input)?;
         let response = self
             .http
             .post(endpoint)
             .bearer_auth(&credential)
-            .json(&json!({"model":model,"input":input,"instructions":instructions}))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .timeout(Duration::from_secs(300))
             .send()
             .await
@@ -679,6 +698,86 @@ fn finish(event: &Value, completed: BTreeMap<usize, Value>) -> Result<Vec<Value>
 mod tests {
     use super::*;
 
+    // Explicitly synthetic and opt-in; never reports production request latency.
+    #[test]
+    #[ignore = "bounded synthetic history-copy benchmark"]
+    fn history_copy_and_encoding_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        let input: Vec<Value> = (0..1024).map(|i| json!({
+            "type":"function_call_output", "call_id":format!("call-{i}"), "output":"x".repeat(16 * 1024)
+        })).collect();
+        let shared: Vec<Arc<Value>> = input.iter().cloned().map(Arc::new).collect();
+        let metadata = json!({"model":"fixture", "store":false, "stream":true});
+        let mut old_clone = vec![];
+        let mut shared_clone = vec![];
+        let mut old_encode = vec![];
+        let mut borrowed_encode = vec![];
+        for _ in 0..7 {
+            let t = Instant::now();
+            let first = input.clone();
+            let second = input.clone();
+            black_box((&first, &second));
+            drop(first);
+            drop(second);
+            old_clone.push(t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let first = shared.clone();
+            let second = shared.clone();
+            black_box((&first, &second));
+            drop(first);
+            drop(second);
+            shared_clone.push(t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let mut request = metadata.clone();
+            request["input"] = json!(&input);
+            let bytes = serde_json::to_vec(&request).unwrap();
+            black_box(&bytes);
+            drop(bytes);
+            drop(request);
+            old_encode.push(t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let bytes = encode_input(&metadata, &shared).unwrap();
+            black_box(&bytes);
+            drop(bytes);
+            borrowed_encode.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!(
+            "{}",
+            json!({"synthetic":true, "payload_bytes":16*1024*1024,
+            "items":1024, "two_history_clones_and_drop_ms":old_clone,
+            "two_shared_history_clones_and_drop_ms":shared_clone,
+            "old_request_materialize_and_encode_ms":old_encode,
+            "borrowed_request_encode_ms":borrowed_encode})
+        );
+    }
+
+    #[test]
+    fn borrowed_input_encoding_preserves_request_fields_and_context() {
+        let input = vec![
+            Arc::new(json!({"type":"reasoning","encrypted_content":"opaque"})),
+            Arc::new(
+                json!({"type":"function_call","call_id":"c1","arguments":"{\"cmd\":\"pwd\"}","name":"exec_command"}),
+            ),
+            Arc::new(
+                json!({"type":"function_call_output","call_id":"c1","output":"kept\nverbatim"}),
+            ),
+        ];
+        let metadata = json!({"model":"test", "instructions":"unchanged", "stream":true,
+            "store":false,"reasoning":{"summary":"auto","effort":"medium"},
+            "include":["reasoning.encrypted_content"],"parallel_tool_calls":false,
+            "access_programs":{"cyber":"daybreak_blue"},
+            "tools":[{"type":"function","name":"exec_command","strict":true,
+                "parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]});
+        let mut old_request = metadata.clone();
+        old_request["input"] = json!(&input);
+        let bytes = encode_input(&metadata, &input).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            old_request
+        );
+        assert!(metadata.get("input").is_none());
+    }
+
     #[tokio::test]
     async fn access_program_selection_is_sent_without_changing_the_model() {
         use axum::{Json, Router, routing::post};
@@ -729,7 +828,7 @@ mod tests {
             client.cyber_access_program = Some("changed-server-default".into());
             client
                 .respond_with(
-                    &[],
+                    &[] as &[Value],
                     json!([]),
                     "captured-model",
                     "captured-instructions",

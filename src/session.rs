@@ -4,6 +4,7 @@ use boid::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
@@ -18,6 +19,37 @@ impl ContextUsage {
             input_tokens: usage["input_tokens"].as_u64()?,
             output_tokens: usage["output_tokens"].as_u64()?,
         })
+    }
+}
+
+// Completed model input items are immutable. Cloning a checkpoint shares their
+// payloads; appending, clearing, or compacting one history does not change another.
+// The serialized form remains the same JSON array used by existing records.
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+struct ModelHistory(Vec<Arc<Value>>);
+impl ModelHistory {
+    fn push(&mut self, item: Value) {
+        self.0.push(Arc::new(item));
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+impl Extend<Value> for ModelHistory {
+    fn extend<T: IntoIterator<Item = Value>>(&mut self, items: T) {
+        self.0.extend(items.into_iter().map(Arc::new));
+    }
+}
+impl From<Vec<Value>> for ModelHistory {
+    fn from(items: Vec<Value>) -> Self {
+        Self(items.into_iter().map(Arc::new).collect())
+    }
+}
+impl std::ops::Deref for ModelHistory {
+    type Target = [Arc<Value>];
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -39,7 +71,7 @@ pub struct Session {
     #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
-    history: Vec<Value>,
+    history: ModelHistory,
     pending: VecDeque<Call>,
     running: Option<Call>,
     pub partial_text: String,
@@ -56,6 +88,31 @@ pub struct Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_histories_share_payloads_and_preserve_storage() {
+        let original = json!([
+            {"role":"user","content":[{"type":"input_text","text":"retained input"}]},
+            {"type":"reasoning","encrypted_content":"opaque retained bytes"},
+            {"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+            {"type":"function_call_output","call_id":"call-1","output":"retained result"}
+        ]);
+        let mut history: ModelHistory = serde_json::from_value(original.clone()).unwrap();
+        let checkpoint = history.clone();
+        assert!(Arc::ptr_eq(&history[0], &checkpoint[0]));
+        assert_eq!(
+            serde_json::to_vec(&checkpoint).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+        history.push(json!({"role":"user","content":"new input"}));
+        assert_eq!(checkpoint.len(), 4);
+        assert!(Arc::ptr_eq(&history[3], &checkpoint[3]));
+        history.clear();
+        assert_eq!(serde_json::to_value(&checkpoint).unwrap(), original);
+        let restored: ModelHistory =
+            serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), original);
+    }
+
     #[tokio::test]
     async fn interruption_accounts_for_running_and_unstarted_calls() {
         let hub = Hub::new(Client::test_client()).unwrap();
@@ -341,7 +398,7 @@ impl Session {
                     hub.record_usage(id, report);
                 }
                 // The whole returned window is canonical, including retained messages.
-                self.history = result["output"].as_array().unwrap().clone();
+                self.history = result["output"].as_array().unwrap().clone().into();
                 self.context_usage = None;
                 (
                     "notice",
