@@ -23,6 +23,80 @@ pub(super) struct PaneGroup {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn ending_group_member_preserves_hidden_binding_and_restart_prunes_stale_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let auth = Arc::new(
+            crate::chatgpt::Auth::open(dir.path().join("auth"), "api_key", "fixture").unwrap(),
+        );
+        auth.migrate_credentials("fixture-original-key").unwrap();
+        let assigned = auth
+            .create_credential("Shared pane", "fixture-shared-key")
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let client = || {
+            let mut client = Client::test_client();
+            client.auth = Some(auth.clone());
+            client
+        };
+        let input = || Create {
+            name: String::new(),
+            cwd: work.path().to_string_lossy().into_owned(),
+            message: String::new(),
+        };
+        let hub = Hub::open(client(), dir.path().join("state")).unwrap();
+        hub.add_screen().unwrap();
+        let foreground = hub.create_on_screen(input(), 2).unwrap();
+        let group = foreground.profile["pane_group_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let background = hub.create_in_group(input(), 2, Some(&group)).unwrap();
+        hub.assign_group_credential(
+            &group,
+            Some(&assigned),
+            hub.pane_groups()["revision"].as_u64().unwrap(),
+        )
+        .unwrap();
+        // Terminal membership must survive until TerminalHub restores its summaries.
+        hub.assign_terminal_screen("fixture-terminal", 2).unwrap();
+        let stale_screens = hub.0.data.lock().unwrap().screens.clone();
+        let ended_key = format!("agent:{}", foreground.id);
+        let retained_key = format!("agent:{}", background.id);
+        assert!(hub.close(&foreground.id).await.unwrap());
+        assert!(hub.view(&foreground.id).is_none());
+        assert!(hub.ended_record(&foreground.id).view.archived);
+        assert_eq!(
+            hub.pane_groups()["groups"][0]["tabs"],
+            json!([retained_key])
+        );
+        assert_eq!(hub.profile(&background.id).unwrap()["credential_id"], assigned);
+        {
+            let data = hub.0.data.lock().unwrap();
+            assert_eq!(data.screens.groups[&group].tabs, vec![retained_key.clone()]);
+            assert!(!data.screens.panes.contains_key(&ended_key));
+        }
+        hub.shutdown().await;
+        // Reproduce interruption after archival was durable but before group cleanup saved.
+        hub.0.store.save_screens(&stale_screens).unwrap();
+        drop(hub);
+        let restored = Hub::open(client(), dir.path().join("state")).unwrap();
+        assert!(restored.view(&foreground.id).is_none());
+        assert!(restored.profile(&foreground.id).is_err());
+        assert_eq!(restored.profile(&background.id).unwrap()["pane_group_id"], group);
+        assert_eq!(restored.profile(&background.id).unwrap()["credential_id"], assigned);
+        let saved: Screens = restored.0.store.load_screens().unwrap();
+        assert_eq!(saved.groups[&group].tabs, vec![retained_key]);
+        assert!(!saved.panes.contains_key(&ended_key));
+        assert!(saved.groups.contains_key("terminal:fixture-terminal"));
+        assert_eq!(saved.panes["terminal:fixture-terminal"], 2);
+        restored.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn shared_group_binding_covers_background_tabs_and_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
