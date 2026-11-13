@@ -911,15 +911,18 @@ async fn create(
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
     let size = size(request.cols.unwrap_or(80), request.rows.unwrap_or(24))?;
     let cwd = hub.0.cwd.join(request.cwd.unwrap_or_default());
-    let cwd = cwd
-        .canonicalize()
-        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-    if !cwd.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Terminal working directory must be a directory.".into(),
-        ));
-    }
+    let cwd = crate::blocking::run(|| {
+        let cwd = cwd
+            .canonicalize()
+            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+        if !cwd.is_dir() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Terminal working directory must be a directory.".into(),
+            ));
+        }
+        Ok(cwd)
+    })?;
     let id = format!("term-{}", uuid::Uuid::new_v4());
     hub.0
         .catalog
