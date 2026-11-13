@@ -4,7 +4,7 @@ use boid::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -94,6 +94,24 @@ impl Communication {
             "accepted_by_agent":false})
     }
 }
+// Index by ID, retaining all rows so even duplicate IDs preserve full equality
+// semantics. Historical communication text is compared only within its ID group.
+fn communication_index(messages: &[Communication]) -> HashMap<&str, Vec<&Communication>> {
+    let mut index: HashMap<&str, Vec<&Communication>> = HashMap::with_capacity(messages.len());
+    for message in messages {
+        index.entry(message.id.as_str()).or_default().push(message);
+    }
+    index
+}
+fn contains_communication(
+    index: &HashMap<&str, Vec<&Communication>>,
+    message: &Communication,
+) -> bool {
+    index
+        .get(message.id.as_str())
+        .is_some_and(|rows| rows.iter().any(|old| *old == message))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
@@ -839,6 +857,12 @@ impl Hub {
         if handle.record.engine.skills == saved.engine.skills {
             handle.record.engine.skill_snapshot = saved.engine.skill_snapshot.clone();
         }
+        let original = handle
+            .record
+            .messages
+            .iter()
+            .any(|m| !m.persisted)
+            .then(|| communication_index(&saved.messages));
         let mut confirmed = vec![];
         for message in &mut handle.record.messages {
             if message.persisted {
@@ -846,7 +870,7 @@ impl Hub {
             }
             let mut candidate = message.clone();
             candidate.persisted = true;
-            if saved.messages.contains(&candidate) {
+            if contains_communication(original.as_ref().unwrap(), &candidate) {
                 message.persisted = true;
                 confirmed.push(message.clone());
             }
@@ -922,9 +946,12 @@ impl Hub {
         } else {
             None
         };
-        for message in &mut next.messages {
-            if !handle.record.messages.contains(message) {
-                message.persisted = false;
+        {
+            let original = communication_index(&handle.record.messages);
+            for message in &mut next.messages {
+                if !contains_communication(&original, message) {
+                    message.persisted = false;
+                }
             }
         }
         // Admission and event publication describe the actual in-memory state.
@@ -1002,10 +1029,11 @@ impl Hub {
         {
             events.push(json!({"type":"closed","session_id":id}));
         }
+        let original = communication_index(&previous.messages);
         let changed: Vec<_> = current
             .messages
             .iter()
-            .filter(|m| !previous.messages.contains(m) || current.paused != previous.paused)
+            .filter(|m| current.paused != previous.paused || !contains_communication(&original, m))
             .cloned()
             .map(|mut m| {
                 m.blocked = m.state == "queued" && current.paused;
@@ -1158,6 +1186,23 @@ impl Hub {
         Ok(())
     }
     fn status(&self, id: &str, status: &str) {
+        let unchanged = crate::blocking::run(|| {
+            let data = self.0.data.lock().unwrap();
+            !data.closing
+                && data.sessions.get(id).is_some_and(|handle| {
+                    let r = &handle.record;
+                    handle.storage_error.is_none()
+                        && r.view.status == status
+                        && r.view.working_since_ms.is_some() == (status == "working")
+                        && r.engine.profile == r.view.profile
+                        && r.view.profile["model"]
+                            .as_str()
+                            .is_none_or(|model| model == r.engine.model)
+                })
+        });
+        if unchanged {
+            return;
+        }
         match self.update(id, |r| {
             r.view.status = status.into();
             Ok(())
@@ -1875,14 +1920,31 @@ impl Hub {
     }
     pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<bool> {
         crate::blocking::run(|| {
-            let mut permit = self.reserve_persistence(id, 1)?;
+            let capacity = {
+                let data = self.0.data.lock().unwrap();
+                let handle = data.sessions.get(id).context("Unknown session.")?;
+                if let Some(error) = &handle.storage_error {
+                    bail!("Session storage failed: {error}");
+                }
+                if data.closing || handle.record.paused || handle.record.view.archived {
+                    return Ok(false);
+                }
+                if handle.record.inbox.is_empty() {
+                    return Ok(true);
+                }
+                handle.persistence.capacity()
+            };
+            let mut permit = capacity.reserve(1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get(id).context("Unknown session.")?;
             if let Some(error) = &handle.storage_error {
                 bail!("Session storage failed: {error}");
             }
-            if handle.record.paused || handle.record.view.archived {
+            if data.closing || handle.record.paused || handle.record.view.archived {
                 return Ok(false);
+            }
+            if handle.record.inbox.is_empty() {
+                return Ok(true);
             }
             let mut staged = session.clone();
             let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
