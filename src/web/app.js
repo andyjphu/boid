@@ -639,8 +639,6 @@ function makeCredentialPanel(host, actions) {
       const displayName = row => nameCounts.get(row.name.toLocaleLowerCase()) > 1 ? `${row.name} · ${row.id.slice(-8)}` : row.name;
       name.textContent = selectable ? (selected ? displayName(selected) : selectedId ? 'Credential unavailable' : 'No credential selected') : 'Shared credentials'; name.title = name.textContent;
       type.textContent = selectable && selected ? (selected.type === 'chatgpt' && (!selected.connected || !selected.plan_enabled) ? 'Reconnect needed' : selected.paused ? 'Paused' : 'Next request') : '';
-      let hash = 0; for (const char of selectedId || '') hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-      panel.style.setProperty('--credential-color', selected ? `hsl(${hash % 360} 28% 60%)` : '#777');
       const next = JSON.stringify([credentials, selectedId, selectable, loading]); if (next === signature) return; signature = next;
       rows.replaceChildren(); empty.hidden = credentials.length > 0; empty.textContent = loading ? 'Loading…' : 'No credentials';
       for (const row of [...credentials].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id))) {

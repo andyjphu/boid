@@ -387,8 +387,8 @@ body.disconnected #screens { opacity: .45; }
 
 /* Credential view overlays foreground panes; their sessions keep running. */
 #open-credentials[aria-pressed="true"] { background: #414141; color: #fff; }
-.credential-overlay { position: absolute; inset: 26px 0 0; z-index: 8; overflow: auto; background: #88888812; padding: 8px; }
-.credential-panel { width: 100%; max-width: 480px; margin: 0 auto; padding: 8px; background: #252525; border: 1px solid #555; border-top: 2px solid var(--credential-color, #777); }
+.credential-overlay { position: absolute; inset: 26px 0 0; z-index: 8; overflow: auto; background: #88888840; padding: 8px; }
+.credential-panel { width: 100%; max-width: 480px; margin: 0 auto; padding: 8px; background: #252525; border: 1px solid #555; }
 .credential-label { display: flex; align-items: baseline; gap: 6px; min-width: 0; margin-bottom: 7px; color: #eee; }
 .credential-label strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 .credential-label span { color: #999; white-space: nowrap; }
@@ -397,8 +397,11 @@ body.disconnected #screens { opacity: .45; }
 .credential-list col:nth-last-child(-n+2) { width: 26px; }
 .credential-list td { padding: 3px 2px; border-top: 1px solid #363636; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .credential-list tr[aria-selected="true"] { background: #3b4650; }
+.credential-list tr:has(> td:nth-child(-n+2):hover) > td:nth-child(-n+2) { background: #373737; }
+.credential-list tr[aria-selected="true"]:has(> td:nth-child(-n+2):hover) > td:nth-child(-n+2) { background: #4b5965; }
 .credential-type { color: #aaa; }
 .credential-name { padding: 0; border: 0; border-radius: 0; width: 100%; text-align: left; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.credential-name:hover { background: transparent; }
 .credential-action { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: 0; }
 .credential-action svg { width: 12px; height: 12px; }
 .credential-add { display: flex; gap: 6px; margin-top: 7px; }
