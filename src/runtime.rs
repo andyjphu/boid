@@ -185,6 +185,8 @@ struct Delta {
 pub struct Hub(Arc<Inner>);
 struct Inner {
     data: Mutex<Data>,
+    // Cancellation must not queue behind a session save holding `data`.
+    interrupts: Mutex<BTreeMap<String, watch::Sender<()>>>,
     agent_names: Vec<String>,
     events: broadcast::Sender<Value>,
     client: Client,
@@ -203,7 +205,6 @@ struct Data {
 struct Handle {
     record: Record,
     cancel: watch::Sender<u64>,
-    interrupt: watch::Sender<()>,
     emergency: watch::Sender<u64>,
     halt: watch::Sender<()>,
     wake: Arc<Notify>,
@@ -278,6 +279,7 @@ impl Hub {
             let (events, _) = broadcast::channel(512);
             let hub = Self(Arc::new(Inner {
                 agent_names,
+                interrupts: Mutex::new(BTreeMap::new()),
                 data: Mutex::new(Data {
                     seq: 0,
                     closing: false,
@@ -384,7 +386,6 @@ impl Hub {
             Handle {
                 record,
                 cancel,
-                interrupt,
                 emergency,
                 halt,
                 wake: wake.clone(),
@@ -397,6 +398,11 @@ impl Hub {
             self.emit(data, json!({"type":"session","session":view}));
         }
         if !archived {
+            self.0
+                .interrupts
+                .lock()
+                .unwrap()
+                .insert(id.clone(), interrupt);
             let hub = self.clone();
             let worker_id = id.clone();
             let task = tokio::spawn(async move {
@@ -661,6 +667,7 @@ impl Hub {
             handle.record.view.status = "error".into();
             handle.record.view.working_since_ms = None;
             handle.halt.send_replace(());
+            self.0.interrupts.lock().unwrap().remove(id);
             let entry = Self::make_entry("error", message);
             handle.record.view.entries.push(entry.clone());
             self.emit(data, json!({"type":"entry","session_id":id,"entry":entry}));
@@ -672,6 +679,9 @@ impl Hub {
         }
         let previous = std::mem::replace(&mut handle.record, next);
         let current = &handle.record;
+        if current.view.archived {
+            self.0.interrupts.lock().unwrap().remove(id);
+        }
         let mut events = vec![];
         if current.view.profile != previous.view.profile {
             events.push(
@@ -1130,20 +1140,13 @@ impl Hub {
         })
     }
     pub fn interrupt(&self, id: &str) -> Result<()> {
-        crate::blocking::run(|| {
-            self.update(id, |r| {
-                if r.view.archived {
-                    bail!("Session has ended.");
-                }
-                r.paused = r.inputs.iter().all(|input| input.order <= r.stop_through);
-                r.listen_on_restart = Some(!r.paused);
-                Ok(())
-            })?;
-            self.0.data.lock().unwrap().sessions[id]
-                .interrupt
-                .send_replace(());
-            Ok(())
-        })
+        let controls = self.0.interrupts.lock().unwrap();
+        controls
+            .get(id)
+            .context("Unknown or ended session.")?
+            .send(())
+            .context("Session worker is unavailable.")?;
+        Ok(())
     }
     pub fn stop(&self, id: &str) -> Result<()> {
         crate::blocking::run(|| {
@@ -1236,6 +1239,7 @@ impl Hub {
                 bail!("Session has already ended.");
             }
             h.record.view.archived = true;
+            self.0.interrupts.lock().unwrap().remove(id);
             h.record.view.status = "ending".into();
             h.record.view.working_since_ms = None;
             h.record.paused = true;
@@ -1797,14 +1801,27 @@ impl Hub {
                 }
                 Next::Interrupt => {
                     urgent_turn = false;
-                    session.interrupt(self, &id);
                     active = false;
-                    if let Err(error) = self.checkpoint(&id, &session) {
+                    // The select has dropped the active request/tool future.
+                    // Recover and persist once, after cancellation, before new work.
+                    let recovery = session.recover();
+                    if let Err(error) = self.update(&id, |r| {
+                        r.engine = session.clone();
+                        r.paused = r.view.archived
+                            || r.inputs.iter().all(|input| input.order <= r.stop_through);
+                        r.listen_on_restart = Some(!r.paused);
+                        for (kind, text) in recovery {
+                            r.view.entries.push(Self::make_entry(&kind, text));
+                        }
+                        if !r.view.archived {
+                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Queued input will be applied next; completed results retained.".into()));
+                            r.view.status = "stopped".into();
+                        }
+                        Ok(())
+                    }) {
                         self.fault(&id, error);
                         break;
                     }
-                    self.entry(&id,"notice","Execution interrupted. Queued input will be applied next; completed results retained.");
-                    self.status(&id, "stopped");
                 }
                 Next::Stop => {
                     urgent_turn = false;
@@ -1869,6 +1886,7 @@ impl Hub {
         let ids = crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
             data.closing = true;
+            self.0.interrupts.lock().unwrap().clear();
             data.sessions.keys().cloned().collect::<Vec<_>>()
         });
         let mut tasks = vec![];
