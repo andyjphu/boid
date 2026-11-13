@@ -172,7 +172,7 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
             .iter_mut()
             .find(|e| e.id == entry)
             .unwrap()
-            .text = "before before ".into();
+            .text = "before before ".to_owned().into();
         handle
             .persistence
             .enqueue(Operation::Snapshot(Box::new(record)))
@@ -226,7 +226,7 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
     let restored = Hub::open(Client::test_client(), restored_state.path().into()).unwrap();
     let view = restored.view(&target.id).unwrap();
     assert_eq!(
-        view.entries.iter().find(|e| e.id == entry).unwrap().text,
+        view.entries.iter().find(|e| e.id == entry).unwrap().text.as_str(),
         "before before newer output"
     );
     restored.shutdown().await;
@@ -474,7 +474,8 @@ async fn saturated_storage_waits_without_faulting_or_blocking_the_roster() {
             .iter()
             .find(|e| e.id == entry)
             .unwrap()
-            .text,
+            .text
+            .as_str(),
         "retained after backpressure"
     );
     hub.shutdown().await;
@@ -833,4 +834,143 @@ async fn stream_persistence_fixture() {
             hub.shutdown().await;
         }
     }
+}
+
+// Bounded synthetic benchmark of actual Hub call boundaries. No provider calls.
+// Run explicitly on the assigned native host; never report these as live timings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Bounded synthetic runtime benchmark, opt in on the assigned host"]
+async fn bounded_runtime_call_benchmark() {
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::new(Client::test_client()).unwrap();
+    let target = idle_agent(&hub, work.path(), "bounded-runtime-benchmark").await;
+    let mut session = {
+        let mut data = hub.0.data.lock().unwrap();
+        let r = &mut data.sessions.get_mut(&target.id).unwrap().record;
+        let mut encoded = serde_json::to_value(&r.engine).unwrap();
+        encoded["history"] = Value::Array(
+            (0..128)
+                .map(|_| {
+                    json!({
+                        "role":"assistant", "content":"x".repeat(64 * 1024)
+                    })
+                })
+                .collect(),
+        );
+        let mut engine: Session = serde_json::from_value(encoded).unwrap();
+        engine.skills = r.engine.skills.clone();
+        r.engine = engine.clone();
+        r.messages = (0..1493)
+            .map(|i| Communication {
+                id: format!("message-{i}"),
+                sender_id: "synthetic-sender".into(),
+                recipient_id: target.id.clone(),
+                sender_name: "peer".into(),
+                recipient_name: "subject".into(),
+                call_id: format!("call-{i}"),
+                sender_entry: format!("entry-{i}"),
+                text: "p".repeat(700),
+                urgency: Urgency::Regular,
+                state: "applied".into(),
+                applied_batch: Some(i),
+                blocked: false,
+                persisted: true,
+            })
+            .collect();
+        engine
+    };
+    for trial in 0..3 {
+        let start = std::time::Instant::now();
+        assert!(hub.apply_inbox(&target.id, &mut session).unwrap());
+        let empty_inbox = start.elapsed().as_secs_f64() * 1000.0;
+        let start = std::time::Instant::now();
+        hub.status(&target.id, "idle");
+        let unchanged_status = start.elapsed().as_secs_f64() * 1000.0;
+        let start = std::time::Instant::now();
+        hub.status(&target.id, "working");
+        let changed_status = start.elapsed().as_secs_f64() * 1000.0;
+        hub.status(&target.id, "idle");
+        eprintln!(
+            "SYNTHETIC trial={trial} history_mib=8 peers=1493 empty_inbox_ms={empty_inbox:.3} unchanged_status_ms={unchanged_status:.3} changed_status_ms={changed_status:.3}"
+        );
+    }
+    hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_status_and_empty_inbox_do_not_wait_for_storage() {
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::new(Client::test_client()).unwrap();
+    let target = idle_agent(&hub, work.path(), "no-op-state").await;
+    let before = {
+        let data = hub.0.data.lock().unwrap();
+        serde_json::to_value(&data.sessions[&target.id].record).unwrap()
+    };
+    let mut session = hub.0.data.lock().unwrap().sessions[&target.id]
+        .record
+        .engine
+        .clone();
+    let gate = hold_writer(&hub, &target.id).await;
+    let checking = hub.clone();
+    let id = target.id.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        assert!(checking.apply_inbox(&id, &mut session).unwrap());
+        checking.status(&id, "idle");
+    });
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("a no-op waited for persistence")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&target.id].record).unwrap(),
+        before
+    );
+    gate.release();
+    {
+        let mut data = hub.0.data.lock().unwrap();
+        let record = &mut data.sessions.get_mut(&target.id).unwrap().record;
+        record.view.status = "working".into();
+        record.view.working_since_ms = None;
+    }
+    hub.status(&target.id, "working");
+    assert!(hub.view(&target.id).unwrap().working_since_ms.is_some());
+    {
+        let mut data = hub.0.data.lock().unwrap();
+        data.sessions.get_mut(&target.id).unwrap().storage_error =
+            Some("synthetic storage failure".into());
+    }
+    let mut session = hub.0.data.lock().unwrap().sessions[&target.id]
+        .record
+        .engine
+        .clone();
+    assert!(hub.apply_inbox(&target.id, &mut session).is_err());
+    hub.shutdown().await;
+}
+
+#[test]
+fn communication_index_preserves_equality_with_duplicate_ids() {
+    let first = Communication {
+        id: "same-id".into(),
+        sender_id: "a".into(),
+        recipient_id: "b".into(),
+        sender_name: "a".into(),
+        recipient_name: "b".into(),
+        call_id: "call".into(),
+        sender_entry: "entry".into(),
+        text: "first".into(),
+        urgency: Urgency::Regular,
+        state: "queued".into(),
+        applied_batch: None,
+        blocked: false,
+        persisted: true,
+    };
+    let mut second = first.clone();
+    second.text = "second".into();
+    let messages = vec![first.clone(), second.clone()];
+    let index = communication_index(&messages);
+    assert!(contains_communication(&index, &first));
+    assert!(contains_communication(&index, &second));
+    let mut absent = first;
+    absent.text = "not present".into();
+    assert!(!contains_communication(&index, &absent));
 }

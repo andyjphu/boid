@@ -462,7 +462,7 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
             .unwrap()
             .entries
             .iter()
-            .any(|e| e.text == "Prior transcript remains")
+            .any(|e| e.text.as_str() == "Prior transcript remains")
     );
     assert_eq!(
         hub.diagnostics()["sessions"]
@@ -502,7 +502,7 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
     *f.provider.failure.lock().unwrap() = "limit".into();
     let c = client();
     let error = c
-        .respond_with(&[], json!([]), "second", "", &captured, |_| {})
+        .respond_with(&[] as &[Value], json!([]), "second", "", &captured, |_| {})
         .await
         .unwrap_err()
         .to_string();
@@ -511,11 +511,15 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
     assert!(f.auth.check_inference(&id).is_err());
     let count = f.provider.requests.lock().unwrap().len();
     assert!(
-        c.respond_with(&[], json!([]), "second", "", &captured, |_| {})
+        c.respond_with(&[] as &[Value], json!([]), "second", "", &captured, |_| {})
             .await
             .is_err()
     );
-    assert!(c.compact(&[], "second", "", &captured).await.is_err());
+    assert!(
+        c.compact(&[] as &[Value], "second", "", &captured)
+            .await
+            .is_err()
+    );
     assert_eq!(f.provider.requests.lock().unwrap().len(), count);
     // Restored plan sessions retain their account even after new-agent default switches to API billing.
     assert_eq!(
@@ -597,9 +601,14 @@ async fn subscription_retry_persists_failure_without_changing_billing_or_replayi
     let c = client();
     let mut events = vec![];
     let error = c
-        .respond_with(&[], json!([]), "first", "", &view.profile, |e| {
-            events.push(e.clone())
-        })
+        .respond_with(
+            &[] as &[Value],
+            json!([]),
+            "first",
+            "",
+            &view.profile,
+            |e| events.push(e.clone()),
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("settings/usage"));

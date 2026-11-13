@@ -5,6 +5,8 @@ work across context changes, and help agents learn from mistakes.
 
 The goal is useful work, done quickly and with good judgment. Boid should
 improve with experience and make effective use of agents working together.
+[Performance profiling and the speed mandate](docs/performance.md) guide work
+on harness overhead.
 
 Boid's code and intended agent guidance belong in [src/](src/).
 [bootstrap/](bootstrap/) holds temporary context for agents developing Boid.
@@ -37,6 +39,16 @@ Explicitly stopped agents and interrupted or failed work remain paused until
 operator input. Already accepted peer messages can run after recovery; simply
 restoring an idle agent does not start a model request. `list_agents` reports
 whether each open agent is listening. Browser reloads do not change availability.
+
+Streaming text is saved through a bounded background journal queue. Writes
+already waiting together can share a disk sync. A crash can lose the unfinished
+stream tail that has not reached disk; completed responses, tool claims and
+results, peer receipts, and shutdown still wait for their durable checkpoints.
+
+Rapid composer submissions retain their order across pane and screen changes.
+A draft clears only when the server acknowledges that exact draft revision.
+Unconfirmed submissions remain available for manual review and retry after a
+failure or reload; recovery storage does not block sending.
 
 Agent panes retain the complete transcript and load recent history first.
 [Earlier history loads on demand](docs/history.md); rendering follows the viewport.
@@ -97,7 +109,10 @@ durations in milliseconds:
   construction. It excludes authentication, request-body extraction, final
   timing-header formatting, socket flush, and client receipt.
 
-These intervals overlap; do not add them together. Handler-level failures also
+Browser `submitToDispatchMs` includes any local wait behind an earlier explicit
+submission. Browser submit-to-headers and submit-to-acknowledgment timings
+include that wait; server metrics do not. These intervals overlap;
+do not add them together. Handler-level failures also
 include timing for stages reached. Authentication and extraction failures do
 not reach this handler and have no admission metrics. Browser rendering timings
 report DOM work, not when pixels became visible. No latency figure in the test

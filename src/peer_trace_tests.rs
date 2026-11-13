@@ -267,7 +267,7 @@ async fn agent_tool_reads_a_peer_while_its_response_is_still_streaming() {
             .unwrap()
             .entries
             .iter()
-            .any(|e| e.text == "Live partial")
+            .any(|e| e.text.as_str() == "Live partial")
         {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

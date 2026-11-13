@@ -4,7 +4,7 @@ use boid::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -35,7 +35,8 @@ pub(crate) struct MessageTimings {
 pub struct Entry {
     pub id: String,
     pub kind: String,
-    pub text: String,
+    // Snapshots share completed text. Streaming detaches only its active entry.
+    pub text: Arc<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +95,24 @@ impl Communication {
             "accepted_by_agent":false})
     }
 }
+// Index by ID, retaining all rows so even duplicate IDs preserve full equality
+// semantics. Historical communication text is compared only within its ID group.
+fn communication_index(messages: &[Communication]) -> HashMap<&str, Vec<&Communication>> {
+    let mut index: HashMap<&str, Vec<&Communication>> = HashMap::with_capacity(messages.len());
+    for message in messages {
+        index.entry(message.id.as_str()).or_default().push(message);
+    }
+    index
+}
+fn contains_communication(
+    index: &HashMap<&str, Vec<&Communication>>,
+    message: &Communication,
+) -> bool {
+    index
+        .get(message.id.as_str())
+        .is_some_and(|rows| rows.iter().any(|old| *old == message))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Create {
@@ -160,7 +179,8 @@ impl Record {
                 "user" | "assistant" => return true,
                 "error" => return false,
                 "context"
-                    if entry.text == "Stop the current task. Wait for new user direction." =>
+                    if entry.text.as_str()
+                        == "Stop the current task. Wait for new user direction." =>
                 {
                     return false;
                 }
@@ -376,7 +396,7 @@ impl Hub {
                     if let Some(entry) =
                         record.view.entries.iter_mut().find(|e| e.id == delta.entry)
                     {
-                        entry.text.push_str(&delta.text);
+                        Arc::make_mut(&mut entry.text).push_str(&delta.text);
                         if entry.kind == "assistant" {
                             record.engine.partial_text.push_str(&delta.text);
                         }
@@ -428,7 +448,7 @@ impl Hub {
         Entry {
             id: Uuid::new_v4().to_string(),
             kind: kind.into(),
-            text,
+            text: text.into(),
             replaces: None,
             input_batch: None,
         }
@@ -839,6 +859,12 @@ impl Hub {
         if handle.record.engine.skills == saved.engine.skills {
             handle.record.engine.skill_snapshot = saved.engine.skill_snapshot.clone();
         }
+        let original = handle
+            .record
+            .messages
+            .iter()
+            .any(|m| !m.persisted)
+            .then(|| communication_index(&saved.messages));
         let mut confirmed = vec![];
         for message in &mut handle.record.messages {
             if message.persisted {
@@ -846,7 +872,7 @@ impl Hub {
             }
             let mut candidate = message.clone();
             candidate.persisted = true;
-            if saved.messages.contains(&candidate) {
+            if contains_communication(original.as_ref().unwrap(), &candidate) {
                 message.persisted = true;
                 confirmed.push(message.clone());
             }
@@ -922,9 +948,12 @@ impl Hub {
         } else {
             None
         };
-        for message in &mut next.messages {
-            if !handle.record.messages.contains(message) {
-                message.persisted = false;
+        {
+            let original = communication_index(&handle.record.messages);
+            for message in &mut next.messages {
+                if !contains_communication(&original, message) {
+                    message.persisted = false;
+                }
             }
         }
         // Admission and event publication describe the actual in-memory state.
@@ -1002,10 +1031,11 @@ impl Hub {
         {
             events.push(json!({"type":"closed","session_id":id}));
         }
+        let original = communication_index(&previous.messages);
         let changed: Vec<_> = current
             .messages
             .iter()
-            .filter(|m| !previous.messages.contains(m) || current.paused != previous.paused)
+            .filter(|m| current.paused != previous.paused || !contains_communication(&original, m))
             .cloned()
             .map(|mut m| {
                 m.blocked = m.state == "queued" && current.paused;
@@ -1113,7 +1143,7 @@ impl Hub {
                     .rev()
                     .find(|e| e.id == entry)
                 {
-                    item.text.push_str(text);
+                    Arc::make_mut(&mut item.text).push_str(text);
                     if item.kind == "assistant" {
                         handle.record.engine.partial_text.push_str(text);
                     }
@@ -1174,6 +1204,23 @@ impl Hub {
         Ok(())
     }
     fn status(&self, id: &str, status: &str) {
+        let unchanged = crate::blocking::run(|| {
+            let data = self.0.data.lock().unwrap();
+            !data.closing
+                && data.sessions.get(id).is_some_and(|handle| {
+                    let r = &handle.record;
+                    handle.storage_error.is_none()
+                        && r.view.status == status
+                        && r.view.working_since_ms.is_some() == (status == "working")
+                        && r.engine.profile == r.view.profile
+                        && r.view.profile["model"]
+                            .as_str()
+                            .is_none_or(|model| model == r.engine.model)
+                })
+        });
+        if unchanged {
+            return;
+        }
         match self.update(id, |r| {
             r.view.status = status.into();
             Ok(())
@@ -1291,8 +1338,7 @@ impl Hub {
                     record.view.name = next_agent_name(&data, &self.0.agent_names);
                 }
                 let identity = session_identity(&record.view);
-                record.view.entries[0]
-                    .text
+                Arc::make_mut(&mut record.view.entries[0].text)
                     .push_str(&format!("\n\n{identity}"));
                 self.assign_screen_locked(&mut data, &format!("agent:{id}"), screen)?;
                 let snapshot = record.clone();
@@ -1429,7 +1475,7 @@ impl Hub {
                 let entry = Entry {
                     id: message_id.clone(),
                     kind: "user".into(),
-                    text: text.clone(),
+                    text: text.clone().into(),
                     replaces: None,
                     input_batch: None,
                 };
@@ -1891,14 +1937,31 @@ impl Hub {
     }
     pub fn apply_inbox(&self, id: &str, session: &mut Session) -> Result<bool> {
         crate::blocking::run(|| {
-            let mut permit = self.reserve_persistence(id, 1)?;
+            let capacity = {
+                let data = self.0.data.lock().unwrap();
+                let handle = data.sessions.get(id).context("Unknown session.")?;
+                if let Some(error) = &handle.storage_error {
+                    bail!("Session storage failed: {error}");
+                }
+                if data.closing || handle.record.paused || handle.record.view.archived {
+                    return Ok(false);
+                }
+                if handle.record.inbox.is_empty() {
+                    return Ok(true);
+                }
+                handle.persistence.capacity()
+            };
+            let mut permit = capacity.reserve(1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get(id).context("Unknown session.")?;
             if let Some(error) = &handle.storage_error {
                 bail!("Session storage failed: {error}");
             }
-            if handle.record.paused || handle.record.view.archived {
+            if data.closing || handle.record.paused || handle.record.view.archived {
                 return Ok(false);
+            }
+            if handle.record.inbox.is_empty() {
+                return Ok(true);
             }
             let mut staged = session.clone();
             let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
@@ -2308,6 +2371,21 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_snapshots_share_text_and_isolate_streaming_edits() {
+        let mut entry = Hub::make_entry("assistant", "saved text".into());
+        let snapshot = entry.clone();
+        assert!(Arc::ptr_eq(&entry.text, &snapshot.text));
+        let expected = json!({"id":entry.id,"kind":"assistant","text":"saved text"});
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), expected);
+        Arc::make_mut(&mut entry.text).push_str("; new delta");
+        assert!(!Arc::ptr_eq(&entry.text, &snapshot.text));
+        assert_eq!(snapshot.text.as_str(), "saved text");
+        assert_eq!(entry.text.as_str(), "saved text; new delta");
+        let restored: Entry = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), expected);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn default_names_are_unique_and_renames_survive_recovery() {
@@ -2867,7 +2945,7 @@ mod tests {
         assert_eq!(
             view.entries
                 .iter()
-                .find(|entry| entry.text == "Start")
+                .find(|entry| entry.text.as_str() == "Start")
                 .unwrap()
                 .input_batch,
             Some(1)
@@ -2903,9 +2981,8 @@ mod tests {
         assert!(
             view.entries
                 .iter()
-                .filter(
-                    |entry| entry.text == "First correction" || entry.text == "Second correction"
-                )
+                .filter(|entry| entry.text.as_str() == "First correction"
+                    || entry.text.as_str() == "Second correction")
                 .all(|entry| entry.input_batch == Some(2))
         );
         let mut batches = Vec::new();
@@ -2956,9 +3033,8 @@ mod tests {
                 .unwrap()
                 .entries
                 .iter()
-                .filter(
-                    |entry| entry.text == "Third correction" || entry.text == "Fourth correction"
-                )
+                .filter(|entry| entry.text.as_str() == "Third correction"
+                    || entry.text.as_str() == "Fourth correction")
                 .all(|entry| entry.input_batch == Some(3))
         );
         assert!(hub.view(&target.id).unwrap().pending.is_empty());
@@ -3031,7 +3107,7 @@ mod tests {
                 .unwrap()
                 .entries
                 .iter()
-                .find(|entry| entry.text == "Keep the completed tool result")
+                .find(|entry| entry.text.as_str() == "Keep the completed tool result")
                 .unwrap()
                 .input_batch,
             Some(4)
@@ -3503,7 +3579,13 @@ mod tests {
         let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
         let record = restored.view(&view.id).unwrap();
         assert_eq!(
-            record.entries.iter().find(|e| e.id == entry).unwrap().text,
+            record
+                .entries
+                .iter()
+                .find(|e| e.id == entry)
+                .unwrap()
+                .text
+                .as_str(),
             "hello"
         );
         restored.shutdown().await;

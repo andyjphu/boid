@@ -7,6 +7,144 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 // Requests outlive pane DOM when switching screens.
 const questionSubmissions = new Map();
+const messageSubmissions = new Map();
+const newDraftRevision = () => Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+const submissionStorageKey = `boid:submissions:v1:${location.origin}`;
+try {
+  for (const [id, saved] of JSON.parse(sessionStorage.getItem(submissionStorageKey) || "[]")) {
+    if (typeof id !== "string" || typeof saved?.draft !== "string" || typeof saved.revision !== "string"
+        || !Array.isArray(saved.queue) || !saved.queue.length || saved.queue.length > 8) continue;
+    if (!saved.queue.every(item => typeof item.text === "string" && typeof item.revision === "string")) continue;
+    messageSubmissions.set(id, { ...saved, promise: null, paused: true,
+      error: "Submission interrupted by reload. Review before resending.", uncertain: !!saved.queue[0].attempted });
+  }
+} catch { /* Existing composer drafts remain available if storage is unavailable. */ }
+let recoveryWrite = null;
+const acknowledgedDrafts = new Map();
+function scheduleMessageRecovery() {
+  if (recoveryWrite !== null) return;
+  recoveryWrite = setTimeout(flushMessageRecovery, 0);
+}
+function flushMessageRecovery() {
+  clearTimeout(recoveryWrite); recoveryWrite = null;
+  let failure = null;
+  try {
+    saveMessageSubmissions();
+    // Deferred cleanup covers panes moved between screens during a request.
+    if (acknowledgedDrafts.size) {
+      for (const key of Object.keys(sessionStorage).filter(key => key.startsWith(`boid:pane-order:v1:${location.origin}:`))) {
+        const saved = JSON.parse(sessionStorage.getItem(key));
+        let changed = false;
+        for (const [id, revisions] of acknowledgedDrafts) {
+          if (revisions.has(saved?.agents?.[id]?.inputRevision)) {
+            saved.agents[id].input = ""; saved.agents[id].inputRevision = newDraftRevision(); changed = true;
+          }
+        }
+        if (changed) sessionStorage.setItem(key, JSON.stringify(saved));
+      }
+      acknowledgedDrafts.clear();
+    }
+  } catch (error) { failure = `Recovery storage unavailable: ${error.message}. Sending continues; keep this page open to retain pending messages.`; }
+  for (const [id, state] of messageSubmissions) {
+    if (failure && !state.queue.length && !state.recoveryError) continue;
+    const changed = state.recoveryError !== failure;
+    state.recoveryError = failure;
+    if (changed) showMessageSubmission(id);
+  }
+}
+function saveMessageSubmissions() {
+  sessionStorage.setItem(submissionStorageKey, JSON.stringify([...messageSubmissions]
+    .filter(([, state]) => state.queue.length).map(([id, state]) => [id, {
+      draft: state.draft, revision: state.revision,
+      queue: state.queue.map(({ text, revision, attempted }) => ({ text, revision, attempted })),
+    }])));
+}
+function noteMessageDraft(ui, edited = false) {
+  const state = ui.messageState;
+  if (!state || ui.restoringDraft) return;
+  if (edited || state.draft !== ui.input.value) {
+    state.draft = ui.input.value; state.revision = newDraftRevision();
+  }
+}
+function showMessageSubmission(id) {
+  const ui = sessions.get(id), state = messageSubmissions.get(id);
+  if (!ui || !state) return;
+  ui.input.setAttribute("aria-busy", String(!!state.promise));
+  updateActivity(ui);
+  if (!state.error && !state.recoveryError) {
+    if (ui.error.dataset.submissionError) { ui.error.hidden = true; delete ui.error.dataset.submissionError; }
+    return;
+  }
+  showError(ui.error, [state.error, state.recoveryError].filter(Boolean).join(" "));
+  ui.error.dataset.submissionError = "true";
+  if (!state.error) return;
+  const first = state.queue[0];
+  if (!first) return;
+  const details = element("details"), preview = element("pre", "", first.text);
+  Object.assign(preview.style, { whiteSpace: "pre-wrap", maxHeight: "140px", overflow: "auto" });
+  details.append(element("summary", "", `Review message (${state.queue.length} not confirmed)`), preview);
+  const retry = element("button", "", state.uncertain ? "Resend (may duplicate)" : "Retry");
+  retry.type = "button";
+  retry.addEventListener("click", () => {
+    state.paused = false; state.error = null; state.uncertain = false;
+    first.timing = inputTiming.begin(id, inputTiming.startedAt());
+    ui.error.hidden = true; runMessageSubmissions(id);
+  });
+  const discard = element("button", "", "Discard this submission");
+  discard.type = "button";
+  discard.addEventListener("click", () => {
+    inputTiming.discarded(state.queue.shift().timing);
+    state.error = state.queue.length ? "Remaining messages are paused. Review before sending." : null;
+    state.uncertain = false; state.paused = state.queue.length > 0;
+    scheduleMessageRecovery();
+    ui.error.hidden = !state.error; showMessageSubmission(id);
+  });
+  ui.error.append(details, retry, discard);
+}
+function clearAcknowledgedDraft(id, item) {
+  const state = messageSubmissions.get(id);
+  if (state.revision === item.revision) {
+    state.draft = ""; state.revision = newDraftRevision();
+    const current = sessions.get(id);
+    if (current) {
+      current.input.value = ""; current.input.dispatchEvent(new Event("input"));
+      inputTiming.cleared(item.timing);
+    }
+  }
+  if (agentScreenState[id]?.inputRevision === item.revision) agentScreenState[id].input = "";
+  if (!acknowledgedDrafts.has(id)) acknowledgedDrafts.set(id, new Set());
+  acknowledgedDrafts.get(id).add(item.revision);
+  scheduleMessageRecovery();
+}
+function runMessageSubmissions(id) {
+  const state = messageSubmissions.get(id);
+  if (state.promise || state.paused || !state.queue.length) return state.promise;
+  state.promise = (async () => {
+    while (state.queue.length && !state.paused) {
+      const item = state.queue[0];
+      try {
+        item.attempted = true;
+        inputTiming.dispatched(item.timing);
+        const acknowledgment = await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text }, {},
+          item.timing ? (response, headersAt) => inputTiming.response(item.timing, response, headersAt) : null);
+        inputTiming.acknowledge(item.timing, acknowledgment);
+      } catch (error) {
+        inputTiming.failed(item.timing, error);
+        state.paused = true; state.error = error.message;
+        state.uncertain = !Number.isFinite(error.status);
+        if (state.uncertain) state.error += " Delivery is unconfirmed; resending may duplicate it.";
+        break;
+      }
+      clearAcknowledgedDraft(id, item);
+      state.queue.shift();
+      scheduleMessageRecovery();
+      showMessageSubmission(id);
+    }
+  })().finally(() => { state.promise = null; showMessageSubmission(id); });
+  scheduleMessageRecovery();
+  showMessageSubmission(id);
+  return state.promise;
+}
 // Opt-in, local-only input timing: boidInputTiming.enable(); then .samples().
 // Measures handler/transport/DOM milestones, not physical display scan-out.
 const inputTiming = (() => {
@@ -28,9 +166,10 @@ const inputTiming = (() => {
     const entryMs = elapsed(record, record.entryAt), domMs = elapsed(record, record.domAt);
     return {
       sample: record.serial, sessionId: record.sessionId, messageId: record.messageId,
-      outcome: record.failure || (record.ended ? "observation_disabled" : record.ackAt == null ? "awaiting_http"
+      outcome: record.failure || (record.ended ? "observation_disabled" : record.ackAt == null ? (record.dispatchAt == null ? "awaiting_dispatch" : "awaiting_http")
         : entryMs == null ? "accepted_waiting_server_entry" : domMs == null ? "accepted_waiting_dom" : "rendered"),
       httpStatus: record.httpStatus,
+      submitToDispatchMs: elapsed(record, record.dispatchAt),
       submitToHeadersMs: elapsed(record, record.headersAt),
       submitToAcknowledgmentMs: elapsed(record, record.ackAt),
       submitToServerEntryMs: entryMs, submitToDOMRenderMs: domMs,
@@ -51,13 +190,14 @@ const inputTiming = (() => {
     begin(sessionId, startedAt) {
       if (!enabled || startedAt == null) return null;
       const record = { serial: ++serial, sessionId, startedAt, messageId: null,
-        httpStatus: null, headersAt: null, ackAt: null, clearAt: null,
+        httpStatus: null, dispatchAt: null, headersAt: null, ackAt: null, clearAt: null,
         entryAt: null, entrySource: null, domAt: null, inViewport: null,
         documentVisible: null, serverTiming: {}, failure: null, ended: false };
       records.push(record);
       if (records.length > limit) { records.shift(); evictedRecords++; }
       return record;
     },
+    dispatched(record) { if (current(record)) record.dispatchAt = performance.now(); },
     response(record, response, headersAt) {
       if (!current(record)) return;
       record.httpStatus = response.status; record.headersAt = headersAt;
@@ -73,6 +213,7 @@ const inputTiming = (() => {
       record.messageId = result.message_id; correlate(record);
     },
     cleared(record) { if (current(record)) record.clearAt = performance.now(); },
+    discarded(record) { if (current(record)) record.failure = "submission_discarded"; },
     failed(record, error) {
       if (current(record)) record.failure = Number.isFinite(error?.status) ? "http_error" : "network_error";
     },
@@ -214,7 +355,7 @@ function captureAgentState(ui) {
     if (flags) expanded.push([id, flags]);
   }
   agentScreenState[ui.id] = {
-    input: ui.input.value, follow: ui.follow,
+    input: ui.input.value, inputRevision: ui.messageState.revision, follow: ui.follow,
     questions: { drafts: Object.fromEntries(ui.questionDrafts), selected: ui.questionId,
       open: !ui.questionPanel.hidden, known: ui.questions.map(q => q.id) },
     anchor: ui.anchor ? { id: ui.anchor.node.dataset.entryId, offset: ui.anchor.offset } : null,
@@ -236,8 +377,10 @@ async function restoreAgentState(ui) {
   if (ui.questions.length && (newUrgent || state.questions?.open)) ui.questionPanel.hidden = false;
   else if (state.questions && !newUrgent) ui.questionPanel.hidden = true;
   ui.questionsToggle.setAttribute("aria-expanded", String(!ui.questionPanel.hidden));
-  ui.input.value = state.input || "";
+  ui.input.value = ui.messageState.draft;
+  ui.restoringDraft = true;
   ui.input.dispatchEvent(new Event("input"));
+  ui.restoringDraft = false;
   ui.follow = state.follow !== false;
   if (!ui.follow && state.anchor && !ui.entries.has(state.anchor.id)) await loadHistory(ui, "around", state.anchor.id);
   if (sessions.get(ui.id) !== ui) return;
@@ -291,7 +434,10 @@ addScreenButton.addEventListener("click", async () => {
   } catch (error) { showError(workspaceError, error); }
   finally { addScreenButton.disabled = false; }
 });
-window.addEventListener("pagehide", rememberPaneOrder);
+window.addEventListener("pagehide", () => {
+  rememberPaneOrder();
+  flushMessageRecovery();
+});
 
 function loadPaneOrder(cwd) {
   const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}${activeScreen === 1 ? "" : `:screen:${activeScreen}`}`;
@@ -422,6 +568,7 @@ function element(tag, className, text) {
 }
 
 function showError(node, error) {
+  delete node.dataset.submissionError;
   node.textContent = error instanceof Error ? error.message : String(error);
   node.hidden = false;
 }
@@ -1377,7 +1524,15 @@ function addSession(view) {
   ui.input.rows = 1;
   ui.input.placeholder = "Message…";
   ui.input.setAttribute("aria-label", `Message ${view.name || id}`);
-  ui.sending = false;
+  ui.messageState = messageSubmissions.get(id) || {
+    draft: savedState?.input || "", revision: savedState?.inputRevision || newDraftRevision(),
+    queue: [], promise: null, paused: false, error: null,
+  };
+  messageSubmissions.set(id, ui.messageState);
+  Object.defineProperties(ui, {
+    sending: { get: () => !!ui.messageState.promise },
+    submission: { get: () => ui.messageState.promise },
+  });
   ui.trace.addEventListener("scroll", () => {
     const top = ui.trace.scrollTop;
     const movedDown = top > ui.lastScrollTop;
@@ -1458,6 +1613,7 @@ function addSession(view) {
     requestAnimationFrame(() => clearPromptSpaceWhenHidden(ui));
   });
   function resizeInput() {
+    noteMessageDraft(ui);
     ui.input.style.height = "auto";
     ui.input.style.height = `${Math.min(ui.input.scrollHeight, 140)}px`;
     const text = ui.input.value.trim();
@@ -1488,7 +1644,7 @@ function addSession(view) {
   }
   let historyIndex = null;
   let savedDraft = "";
-  ui.input.addEventListener("input", () => { historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
+  ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
     ui.traceHeight = ui.trace.clientHeight;
@@ -1541,7 +1697,8 @@ function addSession(view) {
   });
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
-    if (ui.sending || !ui.input.value.trim()) return;
+    if (!ui.input.value.trim()) return;
+    noteMessageDraft(ui);
     const submittedAt = inputTiming.startedAt();
     const text = ui.input.value;
     activatePromptSpace(ui);
@@ -1566,31 +1723,21 @@ function addSession(view) {
       await openModelPicker(ui);
       return;
     }
-    ui.sending = true;
-    ui.error.hidden = true;
-    const timing = inputTiming.begin(id, submittedAt);
-    try {
-      const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
-      ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted }, {},
-        timing ? (response, headersAt) => inputTiming.response(timing, response, headersAt) : null);
-      const acknowledgment = await ui.submission;
-      inputTiming.acknowledge(timing, acknowledgment);
-      if (agentScreenState[id]?.input === text) agentScreenState[id].input = "";
-      try {
-        const saved = JSON.parse(sessionStorage.getItem(ui.orderKey));
-        if (saved?.agents?.[id]?.input === text) {
-          saved.agents[id].input = ""; sessionStorage.setItem(ui.orderKey, JSON.stringify(saved));
-        }
-      } catch {}
-      if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); if (ui.pane.isConnected) inputTiming.cleared(timing); }
-      const current = sessions.get(id);
-      if (current && current !== ui && current.input.value === text) {
-        current.input.value = "";
-        current.input.dispatchEvent(new Event("input"));
-        inputTiming.cleared(timing);
-      }
-    } catch (error) { inputTiming.failed(timing, error); showError(ui.error, error); }
-    finally { ui.sending = false; ui.submission = null; }
+    const state = ui.messageState;
+    if (state.queue.some(item => item.revision === state.revision)) {
+      showMessageSubmission(id); return;
+    }
+    if (state.queue.length >= 8) {
+      showError(ui.error, "Eight messages are awaiting confirmation. This draft has not been submitted."); return;
+    }
+    const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
+    const item = { text: submitted, revision: state.revision, attempted: false,
+      timing: inputTiming.begin(id, submittedAt) };
+    state.queue.push(item);
+    scheduleMessageRecovery();
+    if (!state.paused) ui.error.hidden = true;
+    runMessageSubmissions(id);
+    showMessageSubmission(id);
   });
   sessions.set(id, ui);
   setQuestions(ui, view.questions || []);
@@ -1601,6 +1748,11 @@ function addSession(view) {
   followLatest(ui);
   layout();
   if (savedState) { agentScreenState[id] = savedState; restoreAgentState(ui); }
+  else if (ui.messageState.draft) {
+    ui.input.value = ui.messageState.draft;
+    ui.restoringDraft = true; resizeInput(); ui.restoringDraft = false;
+  }
+  showMessageSubmission(id);
   return ui;
 }
 
@@ -1613,6 +1765,13 @@ function updateActivity(ui) {
   else delete ui.pane.dataset.interruptRequested;
   const hint = ui.interruptRequested || pickerOpen(ui) ? "" : "Esc to interrupt";
   ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
+  const state = ui.messageState;
+  ui.activity.style.visibility = state?.queue.length ? "visible" : "";
+  if (state?.queue.length && !ui.interruptRequested) {
+    ui.activity.firstChild.textContent = state.paused ? "Sending paused" : "Sending";
+    ui.activity.lastChild.textContent = state.paused ? ` · ${state.queue.length} not confirmed`
+      : ` · awaiting server${state.queue.length > 1 ? ` · ${state.queue.length - 1} waiting locally` : ""}`;
+  }
 }
 
 function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
