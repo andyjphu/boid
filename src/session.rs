@@ -25,25 +25,39 @@ impl ContextUsage {
 // Completed model input items are immutable. Cloning a checkpoint shares their
 // payloads; appending, clearing, or compacting one history does not change another.
 // The serialized form remains the same JSON array used by existing records.
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize)]
 #[serde(transparent)]
-struct ModelHistory(Vec<Arc<Value>>);
+struct ModelHistory(Vec<Arc<Value>>, #[serde(skip)] bool);
+impl<'de> Deserialize<'de> for ModelHistory {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let items = Vec::<Arc<Value>>::deserialize(deserializer)?;
+        let images = items.iter().any(|item| crate::images::has_refs(item));
+        Ok(Self(items, images))
+    }
+}
 impl ModelHistory {
     fn push(&mut self, item: Value) {
+        self.1 |= crate::images::has_refs(&item);
         self.0.push(Arc::new(item));
     }
     fn clear(&mut self) {
         self.0.clear();
+        self.1 = false;
     }
 }
 impl Extend<Value> for ModelHistory {
     fn extend<T: IntoIterator<Item = Value>>(&mut self, items: T) {
-        self.0.extend(items.into_iter().map(Arc::new));
+        for item in items {
+            self.push(item);
+        }
     }
 }
 impl From<Vec<Value>> for ModelHistory {
     fn from(items: Vec<Value>) -> Self {
-        Self(items.into_iter().map(Arc::new).collect())
+        let images = items.iter().any(crate::images::has_refs);
+        Self(items.into_iter().map(Arc::new).collect(), images)
     }
 }
 impl std::ops::Deref for ModelHistory {
@@ -291,7 +305,34 @@ impl Session {
             }
         }
     }
+    pub fn has_image_refs(&self) -> bool {
+        self.history.1
+    }
+    async fn provider_input(&self, hub: &Hub, id: &str) -> Result<Option<Vec<Arc<Value>>>> {
+        if !self.has_image_refs() {
+            return Ok(None);
+        }
+        let history = self.history.0.clone();
+        let store = hub.image_store();
+        let id = id.to_owned();
+        let permit = store.work_permit().await;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            store.materialize(&id, &history)
+        })
+        .await
+        .context("Image request preparation failed.")?
+        .map(Some)
+    }
     pub fn operator(&mut self, text: String) -> Vec<Value> {
+        self.operator_with_images(text, "", &[])
+    }
+    pub fn operator_with_images(
+        &mut self,
+        text: String,
+        session: &str,
+        images: &[crate::images::Image],
+    ) -> Vec<Value> {
         if self.compact_requested {
             self.compact_resume = true;
         }
@@ -301,7 +342,19 @@ impl Session {
         } else {
             vec![]
         };
-        self.user(text);
+        if images.is_empty() {
+            self.user(text);
+        } else {
+            let mut content = vec![];
+            if !text.is_empty() {
+                content.push(json!({"type":"input_text", "text":text}));
+            }
+            for image in images {
+                content.push(json!({"type":"input_text", "text":format!("[{}]", image.label)}));
+                content.push(json!({"type":"input_image", "image_url":crate::images::ImageStore::reference(session, image), "detail":"auto"}));
+            }
+            self.history.push(json!({"role":"user", "content":content}));
+        }
         let mut entries = vec![];
         for selection in selected {
             let (content, event) = match selection {
@@ -391,9 +444,35 @@ impl Session {
             hub.identity(id)?,
             tool_calls::PEER_TRACE_GUIDANCE
         );
-        let result = client
-            .compact(&self.history, &self.model, &instructions, &self.profile)
-            .await;
+        let result = async {
+            let materialized = self.provider_input(hub, id).await?;
+            let input = materialized.as_deref().unwrap_or(&self.history);
+            let mut result = client
+                .compact(input, &self.model, &instructions, &self.profile)
+                .await?;
+            let encoded_images = result["output"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(crate::images::has_data_images));
+            if encoded_images {
+                let store = hub.image_store();
+                let id = id.to_owned();
+                let permit = store.work_permit().await;
+                result = tokio::task::spawn_blocking(move || -> Result<Value> {
+                    let _permit = permit;
+                    store.retain_compaction_images(
+                        &id,
+                        result["output"]
+                            .as_array_mut()
+                            .context("Missing compaction window.")?,
+                    )?;
+                    Ok(result)
+                })
+                .await
+                .context("Cannot retain compacted images.")??;
+            }
+            Ok::<_, anyhow::Error>(result)
+        }
+        .await;
         self.compact_in_flight = false;
         let (kind, notice) = match result {
             Ok(result) => {
@@ -467,6 +546,8 @@ impl Session {
                 hub.identity(id)?,
                 tool_calls::PEER_TRACE_GUIDANCE
             );
+            let materialized = self.provider_input(hub, id).await?;
+            let input = materialized.as_deref().unwrap_or(&self.history);
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let attempt = self.model_requests;
@@ -474,7 +555,7 @@ impl Session {
             let context_usage = &mut self.context_usage;
             let output = client
                 .respond_with(
-                    &self.history,
+                    input,
                     self.tools.clone(),
                     &self.model,
                     &instructions,

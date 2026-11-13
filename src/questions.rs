@@ -221,9 +221,9 @@ impl Hub {
                 q.answer = Some(Answer { text, message_id: message_id.clone() });
                 q.wait_outcome = Some("answered".into());
                 r.order += 1;
-                r.inputs.push_back(Input { id: message_id.clone(), text: content.clone(),
+                r.inputs.push_back(Input { id: message_id.clone(), text: content.clone(), images: vec![],
                     order: r.order, compact: false, clear: false });
-                r.view.entries.push(Entry { id: message_id.clone(), kind: "user".into(), text: content.into(),
+                r.view.entries.push(Entry { id: message_id.clone(), kind: "user".into(), text: content.into(), images: vec![],
                     replaces: None, input_batch: None });
                 r.view.pending.push(message_id.clone());
                 r.paused = false;

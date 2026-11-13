@@ -161,7 +161,7 @@ impl Hub {
             if probe.view.id != id {
                 bail!("Session identity differs from filename; original retained");
             }
-            if !matches!(probe.version, 1 | 2 | 3 | 4) {
+            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     probe.version

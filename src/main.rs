@@ -2,6 +2,7 @@ mod api;
 mod blocking;
 mod browser_auth;
 mod chatgpt;
+mod images;
 mod runtime;
 mod server;
 mod session;

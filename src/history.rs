@@ -280,6 +280,7 @@ mod tests {
                     id: format!("e{i}"),
                     kind: "assistant".into(),
                     text: format!("Message {i}").into(),
+                    images: vec![],
                     replaces: None,
                     input_batch: None,
                 })
