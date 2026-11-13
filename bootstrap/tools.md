@@ -90,8 +90,7 @@ when the message box is hidden. The elapsed time uses the server timestamp and
 survives browser refresh.
 
 Agent names come from [`src/agent-names.json`](../src/agent-names.json), bundled
-at build time: canary, swift, falcon, kestrel, lark, and duck. Automatic
-assignment randomly selects an unused name, skipping names already used by
+at build time. Automatic assignment randomly selects an unused name, skipping names already used by
 active or archived agents. When those names are exhausted, it selects from the
 next numeric suffix tier. Allocation and installation share the session lock,
 so simultaneous creations cannot receive the same automatic name. Explicit API
