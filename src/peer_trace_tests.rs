@@ -195,6 +195,7 @@ async fn restored_sessions_receive_the_tool_without_operator_refresh() {
     let state = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
     let old = create(&hub, "old", "");
+    hub.entry(&old.id, "assistant", "retained fixture work");
     hub.shutdown().await;
     drop(hub);
     // Emulate a pre-tool saved session only after all workers have stopped.

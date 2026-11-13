@@ -272,6 +272,7 @@ mod tests {
                 message: String::new(),
             })
             .unwrap();
+        hub.entry(&view.id, "assistant", "retained fixture work");
         // Populate one durable record, without thousands of artificial fsyncs.
         hub.update(&view.id, |r| {
             r.view.entries = (0..250)

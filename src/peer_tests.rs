@@ -597,6 +597,7 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
     let (hub, _rx, server) = fixture(Some(state.path().into())).await;
     let sender = agent(&hub, work.path(), "ursa", "");
     let target = agent(&hub, work.path(), "aero", "");
+    hub.entry(&target.id, "assistant", "retained fixture work");
     hub.stop(&target.id).unwrap();
     hub.update(&target.id, |r| {
         r.version = 2;
@@ -820,6 +821,9 @@ async fn restart_restores_listening_without_greetings_and_preserves_stop() {
     let sender = agent(&hub, work.path(), "sender", "");
     let ready = agent(&hub, work.path(), "ready", "");
     let stopped = agent(&hub, work.path(), "stopped", "");
+    for view in [&sender, &ready, &stopped] {
+        hub.entry(&view.id, "assistant", "retained fixture work");
+    }
     hub.stop(&stopped.id).unwrap();
     wait_status(&hub, &stopped.id, "stopped").await;
     hub.shutdown().await;
@@ -978,6 +982,9 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
     let interrupted = agent(&hub, work.path(), "legacy interrupted", "");
     let recovered = agent(&hub, work.path(), "legacy recovered", "");
     let failed = agent(&hub, work.path(), "legacy failed", "");
+    for view in [&ready, &stopped, &interrupted, &recovered, &failed] {
+        hub.entry(&view.id, "assistant", "retained fixture work");
+    }
     hub.stop(&stopped.id).unwrap();
     wait_status(&hub, &stopped.id, "stopped").await;
     hub.interrupt(&interrupted.id).unwrap();

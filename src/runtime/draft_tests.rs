@@ -22,8 +22,8 @@ fn abort_worker(hub: &Hub, id: &str) {
         .lock()
         .unwrap()
         .sessions
-        .get_mut(id)
-        .and_then(|h| h.task.take())
+        .get(id)
+        .and_then(|h| h.task.as_ref())
     {
         task.abort();
     }

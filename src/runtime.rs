@@ -3741,6 +3741,7 @@ mod tests {
                 message: String::new(),
             })
             .unwrap();
+        hub.entry(&view.id, "assistant", "retained fixture work");
         assert_eq!(view.working_since_ms, None);
         let (_, mut events) = hub.subscribe();
         hub.status(&view.id, "working");
@@ -3808,6 +3809,11 @@ mod tests {
                 message: String::new(),
             })
             .unwrap();
+        hub.entry(
+            &first_failure_on_end.id,
+            "assistant",
+            "retained fixture work",
+        );
         let queued = hub
             .message(&target.id, "Retain this received input".into())
             .unwrap();
@@ -3884,6 +3890,7 @@ mod tests {
                 message: String::new(),
             })
             .unwrap();
+        hub.entry(&during_join.id, "assistant", "retained fixture work");
         let (ended, ()) = tokio::join!(hub.close(&during_join.id), async {
             std::fs::rename(&stored, &backup).unwrap();
             std::fs::write(&stored, b"not a directory").unwrap();

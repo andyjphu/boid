@@ -249,12 +249,13 @@ impl Hub {
 mod tests {
     use super::*;
     async fn agent(hub: &Hub, cwd: &Path, name: &str) -> View {
-        hub.create(Create {
+        let view = hub.create(Create {
             name: name.into(),
             cwd: cwd.to_string_lossy().into(),
             message: String::new(),
-        })
-        .unwrap()
+        }).unwrap();
+        hub.entry(&view.id, "assistant", "retained fixture work");
+        view
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ended_records_leave_harness_but_files_and_send_dedup_survive_restart() {
@@ -540,6 +541,7 @@ mod cancellation_test {
                 message: String::new(),
             })
             .unwrap();
+        hub.entry(&target.id, "assistant", "retained fixture work");
         let (started, release) = hub
             .0
             .data
