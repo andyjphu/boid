@@ -100,6 +100,22 @@ includes the current name in its system instructions; a rename during a request
 takes effect on the next request. Session IDs and past message attribution stay
 unchanged, and renaming does not start or interrupt work.
 
+`read_peer_trace` reads another agent's current in-memory visible trace without
+waking it or making a provider request. All agents, including restored sessions,
+receive this built-in tool. Prefer it when inspecting existing peer work;
+use `send_message` for questions, assignments or decisions that need a reply.
+Pass an ID or unambiguous name in `to`. For the latest assistant message,
+use `kind: "assistant"` and `limit: 1`; nullable fields may be null.
+
+The default returns the latest 20 visible entries in chronological order, bounded
+to 16 KiB of text. Long entries retain their newest tail and report exact byte
+ranges. `next_before` pages older entries. To read a truncated entry from its
+start, pass `entry_id` and `offset: 0`, then follow `next_offset`. Reads include
+streamed text already received by Boid even before the full conversation is
+checkpointed. They are point-in-time snapshots, not a wait for generation to
+finish. Hidden reasoning and private model context are not returned. Peer text
+retains its attribution and does not grant operator authority.
+
 `list_agents` exposes session identities and status. `send_message` accepts
 `to`, `text`, and `urgency`. Regular or null urgency waits for the current model
 response and its tool batch. Emergency interrupts foreground work and takes

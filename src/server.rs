@@ -138,6 +138,10 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
             get(session).patch(rename_session).delete(close_session),
         )
         .route("/api/sessions/{id}/messages", post(message))
+        .route(
+            "/api/sessions/{id}/questions/{question}/answer",
+            post(answer_question),
+        )
         .route("/api/sessions/{id}/history", get(history))
         .route("/api/sessions/{id}/skills", get(skill_catalog))
         .route("/api/sessions/{id}/models", get(session_models))
@@ -440,6 +444,20 @@ async fn stop(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl 
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status":"stop_requested"})),
+    ))
+}
+async fn answer_question(
+    State(app): State<App>,
+    Path((id, question)): Path<(String, String)>,
+    Json(input): Json<Input>,
+) -> ApiResult<impl IntoResponse> {
+    let message_id = app
+        .hub
+        .answer_question(&id, &question, input.text)
+        .map_err(invalid)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"message_id":message_id,"status":"queued"})),
     ))
 }
 async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {

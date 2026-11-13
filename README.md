@@ -56,6 +56,20 @@ using the same operation as the `oai_compact` tool. Both wait for the current
 response and tool batch. Clearing makes no model request; queued messages then
 use the fresh context. Previous context is saved privately in `sessions/clears/`.
 
+Agents can call `prompt_user` for important questions. Blocking questions open
+a reply panel and mark the agent pane in red. Other questions collect behind
+the pane's Questions button, with a picker when several are open. Replies appear
+in the conversation and reach the agent as user messages.
+
+The agent sets `blocking` and `wait_seconds` (1–86400 seconds; null means five
+minutes for a blocking question). Nonblocking questions use null and return
+immediately. When a wait expires, the agent receives a timeout result and can
+decide what authorized work to continue. The question remains answerable; silence
+does not grant approval. Repeating the same open question reuses its ID and
+original deadline. Stop and Escape end the wait, while retaining the question.
+Questions survive reconnects and server restarts. Restarts preserve the usual
+paused recovery behavior; they do not restart a question's timer or agent work.
+
 `/login` changes the connection for its agent pane. `/model` selects a model
 from the connected account's catalog.
 `/clear` remains available; `/oai-compact` currently requires the API-key route.
