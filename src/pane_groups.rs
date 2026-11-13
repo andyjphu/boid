@@ -61,6 +61,8 @@ mod tests {
             hub.pane_groups()["revision"].as_u64().unwrap(),
         )
         .unwrap();
+        hub.entry(&foreground.id, "assistant", "retained foreground work");
+        hub.entry(&background.id, "assistant", "retained background work");
         // Terminal membership must survive until TerminalHub restores its summaries.
         hub.assign_terminal_screen("fixture-terminal", 2).unwrap();
         let stale_screens = hub.0.data.lock().unwrap().screens.clone();
@@ -148,6 +150,9 @@ mod tests {
                 hub.profile(&view.id).unwrap()["model"],
                 view.profile["model"]
             );
+        }
+        for view in [&one, &two, &three] {
+            hub.entry(&view.id, "assistant", "retained fixture work");
         }
         // Individual screen movement detaches only the chosen tab and carries its binding.
         hub.add_screen().unwrap();

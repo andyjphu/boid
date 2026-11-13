@@ -220,7 +220,9 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     .unwrap();
     let view = create(&hub, work.path(), "");
     let before = engine(&hub, &view.id);
+    assert!(view.entries.is_empty());
     hub.message(&view.id, "/oai-compact".into()).unwrap();
+    let initial_context = hub.view(&view.id).unwrap().entries[0].text.clone();
     let (path, request, release) = mock.request().await;
     assert_eq!(path, "/compact");
     assert_eq!(request["input"], before["history"]);
@@ -236,7 +238,7 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     assert!(mock.requests.try_recv().is_err()); // Direct compaction does not start inference.
     assert_eq!(
         hub.view(&view.id).unwrap().entries[0].text,
-        view.entries[0].text
+        initial_context
     );
     let archive: Value = serde_json::from_slice(
         &std::fs::read(

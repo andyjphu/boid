@@ -35,8 +35,12 @@ also print the URL only. Closing the shell or browser leaves agents running.
 
 `boid stop` shuts down the server and active work while preserving saved
 conversations. `boid serve` runs in the foreground for debugging. New agents
-start in the server home directory with a random unused bird name; existing
-agents keep their directories. Terminals retain the workspace directory selected
+start in the server home directory with a provisional bird name. Empty agents,
+including renamed or configured ones, remain in memory until their first message
+or actual work. They survive browser refresh but disappear on server restart;
+closing them leaves no saved trace. Automatic names are reserved when work starts
+and may change then if another agent has taken that name. Existing saved agents
+keep their names and directories. Terminals retain the workspace directory selected
 by the launcher or `BOID_CWD`. `boid "task"` also starts its agent at home.
 State and background server logs live under `~/.local/share/boid` by default.
 For browser access without copying a server token, use

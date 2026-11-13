@@ -41,6 +41,8 @@ async fn idle_agent(hub: &Hub, work: &std::path::Path, name: &str) -> View {
             message: String::new(),
         })
         .unwrap();
+    // This fixture represents an already-used session, not an empty draft.
+    hub.entry(&view.id, "assistant", "retained fixture work");
     // Leave input consumption under test control. No model endpoint is called.
     let task = {
         let mut data = hub.0.data.lock().unwrap();
