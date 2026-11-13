@@ -53,6 +53,9 @@ to each browser window.
 
 ## Limits and recovery
 
+Usage diagnostics are [sunset and unmaintained](diagnostics.md). The Diagnostics
+button is hidden; references below describe retained implementation only.
+
 Limits and credits are available in [ChatGPT usage settings](https://chatgpt.com/settings/usage). Diagnostics retain
 token counts but do not assign API dollar estimates to plan requests.
 

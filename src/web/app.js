@@ -355,6 +355,13 @@ function createPaneGroup(record) {
   plus.addEventListener('click', () => createAgent(group, plus));
   plus.addEventListener('contextmenu', event => { event.preventDefault(); openSessionHistory(group); });
   strip.append(plus); header.append(strip); pane.append(header, body); workspace.append(pane);
+  strip.addEventListener('wheel', event => {
+    if (event.ctrlKey || !event.deltaY || strip.scrollWidth <= strip.clientWidth) return;
+    const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? strip.clientWidth : 1;
+    event.preventDefault(); event.stopPropagation();
+    strip.scrollLeft += event.deltaY * unit;
+  }, { passive: false });
   header.draggable = true;
   header.addEventListener('dragstart', event => {
     if (event.target.closest('.pane-tab, button')) return;
@@ -583,7 +590,6 @@ document.addEventListener('keydown', event => {
 function makeCredentialPanel(host, actions) {
   const overlay = element('section', 'credential-overlay'); overlay.setAttribute('aria-label', 'Pane credentials');
   const panel = element('div', 'credential-panel');
-  const label = element('div', 'credential-label'), name = element('strong'), type = element('span'); label.append(name, type);
   const table = element('table', 'credential-list'); table.setAttribute('aria-label', 'Shared credentials');
   const columns = element('colgroup'); for (let i = 0; i < 4; i++) columns.append(element('col'));
   const rows = element('tbody'); table.append(columns, rows);
@@ -592,7 +598,7 @@ function makeCredentialPanel(host, actions) {
   const addKey = element('button', '', '+ API key'), addSubscription = element('button', '', '+ Subscription');
   addKey.type = addSubscription.type = 'button'; add.append(addKey, addSubscription);
   const error = element('p', 'error-banner'); error.hidden = true; error.setAttribute('role', 'alert');
-  panel.append(label, table, empty, add, error); overlay.append(panel); host.append(overlay);
+  panel.append(table, empty, add, error); overlay.append(panel); host.append(overlay);
   let editor = null, signature = '';
   async function act(button, operation) {
     button.disabled = true; error.hidden = true;
@@ -633,14 +639,9 @@ function makeCredentialPanel(host, actions) {
     dispose() { if (editor) editor.querySelector('input[type=password]').value = ''; overlay.remove(); },
     error(failure) { showError(error, failure); },
     render(credentials, selectedId, selectable = true, loading = false) {
-      const selected = credentials.find(row => row.id === selectedId);
       const nameCounts = new Map();
       for (const row of credentials) { const key = row.name.toLocaleLowerCase(); nameCounts.set(key, (nameCounts.get(key) || 0) + 1); }
       const displayName = row => nameCounts.get(row.name.toLocaleLowerCase()) > 1 ? `${row.name} · ${row.id.slice(-8)}` : row.name;
-      name.textContent = selectable ? (selected ? displayName(selected) : selectedId ? 'Credential unavailable' : 'No credential selected') : 'Shared credentials'; name.title = name.textContent;
-      type.textContent = selectable && selected ? (selected.type === 'chatgpt' && (!selected.connected || !selected.plan_enabled) ? 'Reconnect needed' : selected.paused ? 'Paused' : 'Next request') : '';
-      let hash = 0; for (const char of selectedId || '') hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-      panel.style.setProperty('--credential-color', selected ? `hsl(${hash % 360} 28% 60%)` : '#777');
       const next = JSON.stringify([credentials, selectedId, selectable, loading]); if (next === signature) return; signature = next;
       rows.replaceChildren(); empty.hidden = credentials.length > 0; empty.textContent = loading ? 'Loading…' : 'No credentials';
       for (const row of [...credentials].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id))) {
@@ -3295,6 +3296,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
 });
 
 
+// Sunset: usage diagnostics are hidden and unmaintained. See docs/diagnostics.md.
 const diagnosticsButton = document.querySelector("#open-diagnostics");
 const diagnosticsDialog = document.querySelector("#diagnostics-dialog");
 const diagnosticsScope = document.querySelector("#diagnostics-scope");
