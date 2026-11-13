@@ -16,6 +16,7 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
   try {
     const page = await browser.newPage({viewport: {width: 1200, height: 760}});
     const errors = [], answers = [];
+    const screens = {revision: 1, count: 2, panes: {}};
     let rejectAnswer = false, seq = 100;
     page.on('pageerror', e => errors.push(e.message));
     await page.addInitScript(() => {window.EventSource = class {constructor() {window.testEvents = this;} close() {}};});
@@ -29,6 +30,7 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
         return route.fulfill({status: 202, json: {message_id: `answer-${answers.length}`, status: 'queued'}});
       }
       if (u.pathname === '/api/config') return route.fulfill({json: {cwd: '/work/boid', next_agent_name: 'canary', agent_names: ['canary', 'swift']}});
+      if (u.pathname === '/api/screens') return route.fulfill({json: screens});
       if (u.pathname.startsWith('/api/')) return route.fulfill({json: []});
       const file = path.join(root, u.pathname === '/' ? 'index.html' : u.pathname);
       return route.fulfill({body: fs.readFileSync(file), contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html'});
@@ -59,6 +61,20 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
     await page.evaluate(views => snapshot(views, []), [view('a', [blocking]), view('b', [optional, second])]);
     assert.equal(await b.locator('.question-reply').inputValue(), 'Shorter, with the compatibility notes retained.');
     assert.equal(await b.locator('.question-reply').evaluate(e => e === document.activeElement), true);
+    // Switching screens discards panes, but preserves questions and their separate drafts.
+    await page.locator('#screens [data-screen="2"]').click();
+    await page.evaluate(() => snapshot([], [], ['a', 'b']));
+    assert.equal(await page.locator('.agent-pane').count(), 0);
+    await page.locator('#screens [data-screen="1"]').click();
+    await page.evaluate(views => snapshot(views, []), [view('a', [blocking]), view('b', [optional, second])]);
+    await page.waitForFunction(() => !sessions.get('b').restoringScreen);
+    assert.equal(await b.locator('.question-panel').isVisible(), true);
+    assert.equal(await b.locator('.question-reply').inputValue(), 'Shorter, with the compatibility notes retained.');
+    await b.locator('.question-select').selectOption('target');
+    assert.equal(await b.locator('.question-reply').inputValue(), 'Use the demo project');
+    await b.locator('.question-select').selectOption('notes');
+    assert.equal(await b.locator('.composer textarea').inputValue(), 'Keep this ordinary message draft');
+    assert.equal(await a.evaluate(e => e.classList.contains('needs-answer')), true);
     if (process.env.BOID_SCREENSHOT_DIR) await page.screenshot({path: path.join(process.env.BOID_SCREENSHOT_DIR, 'prompt-user.png')});
     // The answer remains editable after a server rejection.
     rejectAnswer = true;
@@ -101,6 +117,6 @@ const view = (id, questions) => ({id, name: id === 'a' ? 'canary' : 'swift', cwd
     assert.ok(panel.height <= pane.height * .56);
     assert.ok(await a.locator('.trace').evaluate(e => e.clientHeight) > 60);
     assert.deepEqual(errors, []);
-    console.log('PASS: urgent pane, question picker, per-question drafts, ordinary draft, reconnect, failed submission, reply stream, timeout, late answer, narrow pane');
+    console.log('PASS: urgent pane, question picker, per-question drafts, ordinary draft, reconnect, screen switches, failed submission, reply stream, timeout, late answer, narrow pane');
   } finally {await browser.close();}
 })().catch(error => {console.error(error); process.exitCode = 1;});

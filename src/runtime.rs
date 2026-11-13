@@ -201,7 +201,35 @@ struct Inner {
     #[cfg(test)]
     skill_scan_gate: Mutex<Option<Arc<SkillScanGate>>>,
 }
+#[derive(Clone, Serialize, Deserialize)]
+struct Screens {
+    #[serde(default)]
+    revision: u64,
+    count: u32,
+    panes: BTreeMap<String, u32>,
+}
+impl Default for Screens {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            count: 1,
+            panes: BTreeMap::new(),
+        }
+    }
+}
+impl Screens {
+    fn screen(&self, key: &str) -> u32 {
+        self.panes.get(key).copied().unwrap_or(1)
+    }
+    fn validate(&self, screen: u32) -> Result<()> {
+        if screen == 0 || screen > self.count {
+            bail!("Unknown screen.");
+        }
+        Ok(())
+    }
+}
 struct Data {
+    screens: Screens,
     seq: u64,
     closing: bool,
     sessions: BTreeMap<String, Handle>,
@@ -276,6 +304,15 @@ impl Hub {
             for name in &agent_names {
                 validate_agent_name(name)?;
             }
+            let screens: Screens = store.load_screens()?;
+            if screens.count == 0
+                || screens
+                    .panes
+                    .values()
+                    .any(|id| *id == 0 || *id > screens.count)
+            {
+                bail!("Invalid screen assignments; original retained");
+            }
             let records: Vec<Record> = store.load()?;
             let messages: BTreeMap<_, _> = records
                 .iter()
@@ -287,6 +324,7 @@ impl Hub {
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
                 data: Mutex::new(Data {
+                    screens,
                     seq: 0,
                     closing: false,
                     sessions: BTreeMap::new(),
@@ -579,17 +617,133 @@ impl Hub {
     pub fn subscribe(&self) -> (Value, broadcast::Receiver<Value>) {
         self.subscribe_history(false)
     }
+    #[cfg(test)]
     pub fn subscribe_history(&self, recent: bool) -> (Value, broadcast::Receiver<Value>) {
+        self.subscribe_screen(recent, None)
+    }
+    pub fn screens(&self) -> Value {
+        crate::blocking::run(|| json!(self.0.data.lock().unwrap().screens))
+    }
+    pub fn add_screen(&self) -> Result<Value> {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            let mut next = data.screens.clone();
+            next.revision += 1;
+            next.count = next.count.checked_add(1).context("Screen limit reached")?;
+            self.0.store.save_screens(&next)?;
+            data.screens = next;
+            let result = json!(data.screens);
+            self.emit(&mut data, json!({"type":"screens", "screens":result}));
+            Ok(result)
+        })
+    }
+    pub fn validate_screen(&self, screen: u32) -> Result<()> {
+        self.0.data.lock().unwrap().screens.validate(screen)
+    }
+    fn assign_screen_locked(&self, data: &mut Data, key: &str, screen: u32) -> Result<()> {
+        data.screens.validate(screen)?;
+        if data.screens.screen(key) == screen {
+            return Ok(());
+        }
+        let mut next = data.screens.clone();
+        next.revision += 1;
+        next.panes.insert(key.to_owned(), screen);
+        self.0.store.save_screens(&next)?;
+        data.screens = next;
+        Ok(())
+    }
+    // Used before a newly created terminal can emit its first catalog event.
+    pub fn assign_terminal_screen(&self, id: &str, screen: u32) -> Result<()> {
+        crate::blocking::run(|| {
+            self.assign_screen_locked(
+                &mut self.0.data.lock().unwrap(),
+                &format!("terminal:{id}"),
+                screen,
+            )
+        })
+    }
+    pub fn move_pane(&self, key: &str, screen: u32) -> Result<Value> {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            let exists = if let Some(id) = key.strip_prefix("agent:") {
+                data.sessions
+                    .get(id)
+                    .is_some_and(|h| !h.record.view.archived)
+            } else if let Some(id) = key.strip_prefix("terminal:") {
+                data.terminal_summaries
+                    .get(id)
+                    .is_some_and(|v| v["running"] == true && v["archived"] != true)
+            } else {
+                false
+            };
+            if !exists {
+                bail!("Pane is no longer open.");
+            }
+            self.assign_screen_locked(&mut data, key, screen)?;
+            let result = json!(data.screens);
+            self.emit(&mut data, json!({"type":"screens", "screens":result}));
+            Ok(result)
+        })
+    }
+    pub fn screen_event(&self, value: &Value, screen: Option<u32>) -> bool {
+        let Some(screen) = screen else {
+            return true;
+        };
+        // Catalog and peer state remain global. Stream transcript updates only
+        // for this screen; switching subscribes with a fresh recent snapshot.
+        if matches!(value["type"].as_str(), Some("closed" | "communication")) {
+            return true;
+        }
+        if value["session_id"].as_str().is_none() {
+            return true;
+        }
+        value["screen"].as_u64().unwrap_or(1) == u64::from(screen)
+    }
+    pub fn subscribe_screen(
+        &self,
+        recent: bool,
+        screen: Option<u32>,
+    ) -> (Value, broadcast::Receiver<Value>) {
         crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
             let receiver = self.0.events.subscribe();
+            let views: Vec<_> = data
+                .sessions
+                .values()
+                .filter(|h| !h.record.view.archived)
+                .filter(|h| {
+                    screen.is_none_or(|screen| {
+                        data.screens.screen(&format!("agent:{}", h.record.view.id)) == screen
+                    })
+                })
+                .map(|h| {
+                    if recent {
+                        Self::history_view(&data, &h.record.view, None, None, None)
+                            .expect("latest history")
+                    } else {
+                        json!(Self::project_view(&data, &h.record.view))
+                    }
+                })
+                .collect();
             (
-                json!({"seq":data.seq,"type":"snapshot","sessions":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| if recent { Self::history_view(&data, &h.record.view, None, None, None).expect("latest history") } else { json!(Self::project_view(&data, &h.record.view)) }).collect::<Vec<_>>(),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
+                json!({"seq":data.seq,"type":"snapshot","sessions":views,
+                "catalog":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| &h.record.view.id).collect::<Vec<_>>(),
+                "screens":data.screens,"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
                 receiver,
             )
         })
     }
     fn emit(&self, data: &mut Data, mut event: Value) {
+        for (kind, field) in [("agent", "session"), ("terminal", "terminal")] {
+            if let Some(id) = event[field]["id"].as_str() {
+                let screen = data.screens.screen(&format!("{kind}:{id}"));
+                event[field]["screen"] = json!(screen);
+                event["screens_revision"] = json!(data.screens.revision);
+            }
+        }
+        if let Some(id) = event["session_id"].as_str() {
+            event["screen"] = json!(data.screens.screen(&format!("agent:{id}")));
+        }
         data.seq += 1;
         event["seq"] = json!(data.seq);
         if event["type"] == "entry" {
@@ -917,7 +1071,12 @@ impl Hub {
             Err(error) => self.fault(id, error),
         }
     }
-    pub fn create(&self, mut input: Create) -> Result<View> {
+    #[cfg(test)]
+    pub fn create(&self, input: Create) -> Result<View> {
+        self.create_on_screen(input, 1)
+    }
+    pub fn create_on_screen(&self, mut input: Create, screen: u32) -> Result<View> {
+        self.validate_screen(screen)?;
         crate::blocking::run(|| {
             input.name = input.name.trim().to_owned();
             if !input.name.is_empty() {
@@ -1024,6 +1183,7 @@ impl Hub {
                 record.view.entries[0]
                     .text
                     .push_str(&format!("\n\n{identity}"));
+                self.assign_screen_locked(&mut data, &format!("agent:{id}"), screen)?;
                 self.save_record(&id, &mut record)?;
                 self.install_locked(&mut data, record, true)?;
             }
@@ -3157,3 +3317,7 @@ mod terminal_speed_tests;
 #[cfg(test)]
 #[path = "prompt_user_tests.rs"]
 mod prompt_user_tests;
+
+#[cfg(test)]
+#[path = "screen_tests.rs"]
+mod screen_tests;

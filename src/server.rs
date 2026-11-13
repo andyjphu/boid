@@ -120,6 +120,8 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/server", get(server_info))
         .route("/api/shutdown", post(shutdown_server))
         .route("/api/config", get(config))
+        .route("/api/screens", get(screens).post(add_screen))
+        .route("/api/screens/move", post(move_pane))
         .route("/api/accounts", get(accounts))
         .route("/api/accounts/sign-in", post(account_sign_in))
         .route("/api/accounts/select", post(account_select))
@@ -283,6 +285,29 @@ async fn login(State(app): State<App>, request_headers: HeaderMap) -> Response {
 async fn diagnostics(State(app): State<App>) -> Json<Value> {
     Json(app.hub.diagnostics())
 }
+async fn screens(State(app): State<App>) -> Json<Value> {
+    Json(app.hub.screens())
+}
+async fn add_screen(State(app): State<App>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.add_screen())
+        .await
+        .map_err(invalid)?
+        .map(Json)
+        .map_err(invalid)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MovePane {
+    pane: String,
+    screen: u32,
+}
+async fn move_pane(State(app): State<App>, Json(input): Json<MovePane>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.move_pane(&input.pane, input.screen))
+        .await
+        .map_err(invalid)?
+        .map(Json)
+        .map_err(invalid)
+}
 async fn config(State(app): State<App>) -> Json<Value> {
     Json(app.hub.config())
 }
@@ -358,6 +383,7 @@ async fn history(
 #[derive(Default, Deserialize)]
 struct EventsQuery {
     history: Option<String>,
+    screen: Option<u32>,
 }
 async fn skill_catalog(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(move || app.hub.skill_catalog(&id))
@@ -366,8 +392,12 @@ async fn skill_catalog(State(app): State<App>, Path(id): Path<String>) -> ApiRes
         .map(Json)
         .map_err(invalid)
 }
-async fn create(State(app): State<App>, Json(input): Json<Create>) -> ApiResult<Json<Value>> {
-    tokio::task::spawn_blocking(move || app.hub.create(input))
+async fn create(
+    State(app): State<App>,
+    Query(query): Query<EventsQuery>,
+    Json(input): Json<Create>,
+) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.create_on_screen(input, query.screen.unwrap_or(1)))
         .await
         .map_err(invalid)?
         .map(|view| Json(json!(view)))
@@ -443,32 +473,38 @@ async fn events(
     Query(query): Query<EventsQuery>,
 ) -> Sse<impl futures_util::Stream<Item = std::result::Result<Event, Infallible>>> {
     let recent = query.history.as_deref() == Some("recent");
-    let (snapshot, receiver) = app.hub.subscribe_history(recent);
+    let screen = query.screen;
+    let (snapshot, receiver) = app.hub.subscribe_screen(recent, screen);
     let stream = stream::unfold(
-        (Some(snapshot), receiver, app.hub, recent),
-        |(initial, mut receiver, hub, recent)| async move {
-            let value = match initial {
-                Some(value) => value,
-                None => match receiver.recv().await {
-                    Ok(value) => {
-                        if recent {
-                            Hub::recent_event(value)
-                        } else {
-                            value
+        (Some(snapshot), receiver, app.hub, recent, screen),
+        |(mut initial, mut receiver, hub, recent, screen)| async move {
+            let value = loop {
+                let value = match initial.take() {
+                    Some(value) => value,
+                    None => match receiver.recv().await {
+                        Ok(value) => {
+                            if recent {
+                                Hub::recent_event(value)
+                            } else {
+                                value
+                            }
                         }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let (snapshot, new_receiver) = hub.subscribe_history(recent);
-                        receiver = new_receiver;
-                        snapshot
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                },
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let (snapshot, new_receiver) = hub.subscribe_screen(recent, screen);
+                            receiver = new_receiver;
+                            snapshot
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    },
+                };
+                if hub.screen_event(&value, screen) {
+                    break value;
+                }
             };
             let event = Event::default()
                 .id(value["seq"].to_string())
                 .data(value.to_string());
-            Some((Ok(event), (None, receiver, hub, recent)))
+            Some((Ok(event), (None, receiver, hub, recent, screen)))
         },
     );
     Sse::new(stream.take_until(crate::browser_auth::revoked(lease)))

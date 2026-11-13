@@ -33,7 +33,7 @@ function view(start=1120,end=1200) {return {id:'a',name:'canary',cwd:'/tmp',stat
  await page.goto('http://boid.test');await page.waitForFunction(()=>window.testEvents);
  const frames=()=>page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
  await page.evaluate(v=>snapshot([v],[]),view());await frames();
- assert.equal(await page.evaluate(()=>eventUrl),'/api/events?history=recent');
+ assert.equal(await page.evaluate(()=>eventUrl),'/api/events?history=recent&screen=1');
  assert.equal(await page.evaluate(()=>sessions.get('a').entries.size),80);
  assert.ok(await page.evaluate(()=>sessions.get('a').mounted.size<=100));
  // Load earlier history and preserve the exact visible anchor.

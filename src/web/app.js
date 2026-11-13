@@ -36,13 +36,161 @@ workspace.append(paneResizeLayer);
 let paneResizeHandles = new Map();
 let paneResizeHandleId = 0;
 
+// The server owns pane membership; the URL/sessionStorage owns this window's selection.
+let screenCatalog = { count: 1, panes: {} };
+let activeScreen = 1;
+let screenLoaded;
+let agentScreenState = {};
+const screensNav = document.querySelector("#screens");
+const addScreenButton = document.querySelector("#add-screen");
+const activeScreenKey = `boid:screen:${location.origin}`;
+function paneScreen(key) { return screenCatalog.panes[key] || 1; }
+function renderScreens() {
+  const wanted = new Set();
+  for (let number = 1; number <= screenCatalog.count; number++) {
+    const id = String(number); wanted.add(id);
+    let link = screensNav.querySelector(`[data-screen="${number}"]`);
+    if (!link) {
+      link = element("a", "", id); link.dataset.screen = id;
+      link.setAttribute("aria-label", `Screen ${number}`);
+      link.title = `Screen ${number} · drag a pane tab here to move it`;
+      const url = new URL(location.href); url.searchParams.set("screen", id); url.hash = "";
+      link.href = url.pathname + url.search;
+      link.addEventListener("click", event => {
+        if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault(); switchScreen(number);
+      });
+      link.addEventListener("dragover", event => {
+        if (!event.dataTransfer.types.includes("application/x-boid-pane")) return;
+        event.preventDefault(); event.dataTransfer.dropEffect = "move"; link.classList.add("drop-target");
+      });
+      link.addEventListener("dragleave", () => link.classList.remove("drop-target"));
+      link.addEventListener("drop", async event => {
+        event.preventDefault(); link.classList.remove("drop-target");
+        const pane = event.dataTransfer.getData("application/x-boid-pane");
+        if (!pane) return;
+        try { receiveScreens(await request("/api/screens/move", "POST", { pane, screen: number })); }
+        catch (error) { showError(workspaceError, error); }
+      });
+      screensNav.insertBefore(link, addScreenButton);
+    }
+    if (number === activeScreen) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  for (const link of screensNav.querySelectorAll("a")) if (!wanted.has(link.dataset.screen)) link.remove();
+}
+function receiveScreens(value, reconcile = true) {
+  if (!Number.isInteger(value?.count) || value.count < 1 || !value.panes || Array.isArray(value.panes)) return;
+  if ((value.revision || 0) < (screenCatalog.revision || 0)) return;
+  const previous = screenCatalog;
+  screenCatalog = value;
+  renderScreens();
+  if (reconcile && catalogReady) {
+    const changed = new Set([...Object.keys(previous.panes), ...Object.keys(value.panes)]);
+    if ([...changed].some(key => (previous.panes[key] || 1) !== paneScreen(key)
+      && [(previous.panes[key] || 1), paneScreen(key)].includes(activeScreen))) {
+      rememberPaneOrder(); startEvents();
+    }
+  }
+}
+function storeScreenSelection() {
+  try { sessionStorage.setItem(activeScreenKey, String(activeScreen)); } catch {}
+  const url = new URL(location.href); url.searchParams.set("screen", String(activeScreen));
+  history.replaceState(null, "", url.pathname + url.search);
+  renderScreens();
+}
+function captureAgentState(ui) {
+  if (ui.restoringScreen) return;
+  rememberPosition(ui);
+  agentScreenState[ui.id] = {
+    input: ui.input.value, follow: ui.follow,
+    questions: { drafts: Object.fromEntries(ui.questionDrafts), selected: ui.questionId,
+      open: !ui.questionPanel.hidden, known: ui.questions.map(q => q.id) },
+    anchor: ui.anchor ? { id: ui.anchor.node.dataset.entryId, offset: ui.anchor.offset } : null,
+    expanded: Object.fromEntries([...ui.entries].map(([id, item]) => [id,
+      Object.fromEntries(Object.entries(item).filter(([key, value]) => key.startsWith("expanded") && value === true))
+    ]).filter(([, value]) => Object.keys(value).length)),
+  };
+}
+async function restoreAgentState(ui) {
+  const state = agentScreenState[ui.id];
+  if (!state) return;
+  ui.restoringScreen = true;
+  const pendingQuestions = new Set(ui.questions.map(q => q.id));
+  ui.questionDrafts = new Map(Object.entries(state.questions?.drafts || {})
+    .filter(([id, text]) => pendingQuestions.has(id) && typeof text === "string"));
+  const newUrgent = ui.questions.find(q => questionWaiting(q) && !state.questions?.known?.includes(q.id));
+  const selectedQuestion = newUrgent?.id || (pendingQuestions.has(state.questions?.selected) ? state.questions.selected : ui.questionId);
+  // The pane was recreated, so restore the draft even when its initial selection matches.
+  ui.questionId = null;
+  selectQuestion(ui, selectedQuestion);
+  if (ui.questions.length && (newUrgent || state.questions?.open)) ui.questionPanel.hidden = false;
+  else if (state.questions && !newUrgent) ui.questionPanel.hidden = true;
+  ui.questionsToggle.setAttribute("aria-expanded", String(!ui.questionPanel.hidden));
+  ui.input.value = state.input || "";
+  ui.input.dispatchEvent(new Event("input"));
+  ui.follow = state.follow !== false;
+  if (!ui.follow && state.anchor && !ui.entries.has(state.anchor.id)) await loadHistory(ui, "around", state.anchor.id);
+  if (sessions.get(ui.id) !== ui) return;
+  for (const [id, flags] of Object.entries(state.expanded || {})) {
+    const item = ui.entries.get(id);
+    if (item) { Object.assign(item, flags); ui.dirty.add(item); }
+  }
+  if (!ui.follow && state.anchor) ui.jumpEntry = state.anchor.id;
+  scheduleTranscript(ui);
+  requestAnimationFrame(() => {
+    if (sessions.get(ui.id) !== ui) return;
+    const item = state.anchor && ui.entries.get(state.anchor.id);
+    if (!ui.follow && item) {
+      ui.jumpEntry = null;
+      ui.anchor = { node: item.node, offset: state.anchor.offset };
+      restorePosition(ui);
+    }
+    ui.restoringScreen = false;
+    rememberPaneOrder();
+  });
+}
+function clearScreenPanes() {
+  reconcilingCatalog = true;
+  for (const ui of [...sessions.values()]) removeSession(ui);
+  for (const ui of [...terminals.values()]) ui.dispose();
+  for (const ui of drafts.values()) { if (loginOwner === ui) closeLogin(); ui.pane.remove(); }
+  drafts.clear(); selected = null;
+  for (const handle of paneResizeHandles.values()) handle.remove();
+  paneResizeHandles.clear();
+  reconcilingCatalog = false;
+}
+function switchScreen(number) {
+  if (number === activeScreen || number < 1 || number > screenCatalog.count) return Promise.resolve();
+  finishPaneResize(true);
+  rememberPaneOrder();
+  catalogReady = false;
+  clearScreenPanes();
+  activeScreen = number;
+  paneOrder = []; paneLayout = null; orderKey = "";
+  storeScreenSelection();
+  loadPaneOrder(agentDefaults.cwd);
+  layout();
+  return startEvents();
+}
+addScreenButton.addEventListener("click", async () => {
+  addScreenButton.disabled = true;
+  try {
+    const result = await request("/api/screens", "POST");
+    receiveScreens(result); switchScreen(result.count);
+  } catch (error) { showError(workspaceError, error); }
+  finally { addScreenButton.disabled = false; }
+});
+window.addEventListener("pagehide", rememberPaneOrder);
+
 function loadPaneOrder(cwd) {
-  const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
+  const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}${activeScreen === 1 ? "" : `:screen:${activeScreen}`}`;
   if (key === orderKey) return;
   orderKey = key;
   try {
     const saved = JSON.parse(sessionStorage.getItem(key) || "null");
     paneLayout = saved?.layout || null;
+    agentScreenState = { ...(saved?.agents || {}), ...agentScreenState };
     const valid = key => typeof key === "string" && /^(agent|terminal|draft):.+/.test(key);
     paneOrder = [...new Set((Array.isArray(saved) ? saved : saved?.order || []).filter(valid))];
     for (const draft of saved?.drafts || []) {
@@ -67,9 +215,10 @@ function rememberPaneOrder() {
     const current = workspace.querySelectorAll(".pane")[i];
     if (pane !== current) workspace.insertBefore(pane, current || null);
   }
+  for (const ui of sessions.values()) captureAgentState(ui);
   try {
     sessionStorage.setItem(orderKey, JSON.stringify({
-      version: 2, order: paneOrder,
+      version: 2, order: paneOrder, agents: agentScreenState,
       layout: paneLayout?.custom ? paneLayout : null,
       drafts: [...drafts.values()].map(ui => ({ id: ui.id, ...Object.fromEntries(new FormData(ui.form)) })),
     }));
@@ -378,6 +527,13 @@ function makePane(name, cwd, kind, id) {
   close.setAttribute("aria-label", `Close ${name}`);
   close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
   tab.append(paneIcon(kind), title, directory, close);
+  if (kind !== "draft") {
+    tab.draggable = true;
+    tab.addEventListener("dragstart", event => {
+      event.dataTransfer.setData("application/x-boid-pane", `${kind}:${id}`);
+      event.dataTransfer.effectAllowed = "move";
+    });
+  }
   header.append(tab, status);
   pane.append(header);
   workspace.append(pane);
@@ -878,8 +1034,10 @@ function updateQuestionAttention(ui) {
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
+  const savedState = agentScreenState[id];
   const ui = makePane(view.name || id, view.cwd, "agent", id);
   ui.view = view;
+  ui.orderKey = orderKey;
   ui.history = view.history ? { ...view.history } : null;
   ui.historyGeneration = 0;
   for (const message of view.communications || []) rememberCommunication(message);
@@ -1149,7 +1307,19 @@ function addSession(view) {
       const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
       ui.submission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: submitted });
       await ui.submission;
+      if (agentScreenState[id]?.input === text) agentScreenState[id].input = "";
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(ui.orderKey));
+        if (saved?.agents?.[id]?.input === text) {
+          saved.agents[id].input = ""; sessionStorage.setItem(ui.orderKey, JSON.stringify(saved));
+        }
+      } catch {}
       if (ui.input.value === text) { ui.input.value = ""; historyIndex = null; resizeInput(); }
+      const current = sessions.get(id);
+      if (current && current !== ui && current.input.value === text) {
+        current.input.value = "";
+        current.input.dispatchEvent(new Event("input"));
+      }
     } catch (error) { showError(ui.error, error); }
     finally { ui.sending = false; ui.submission = null; }
   });
@@ -1161,6 +1331,7 @@ function addSession(view) {
   setPending(ui, view.pending || []);
   followLatest(ui);
   layout();
+  if (savedState) { agentScreenState[id] = savedState; restoreAgentState(ui); }
   return ui;
 }
 
@@ -1407,6 +1578,8 @@ function communicationFor(ui, item) {
 
 async function locateCommunication(ui, message, otherId) {
   try {
+    const screen = paneScreen(`agent:${otherId}`);
+    if (screen !== activeScreen) await switchScreen(screen);
     const target = sessions.get(String(otherId));
     if (!target) throw new Error("This agent is no longer open.");
     const entryId = String(otherId === message.recipient_id ? message.id : message.sender_entry);
@@ -1818,18 +1991,20 @@ function acceptSessionResponse(view, startedAt) {
   return ui;
 }
 
-function snapshot(views, terminalViews = []) {
+function snapshot(views, terminalViews = [], catalog = views.map(view => String(view.id))) {
   communications.clear();
   communicationEntries.clear();
   for (const view of views) for (const message of view.communications || []) rememberCommunication(message);
   const revision = ++catalogRevision;
-  const active = new Set(views.map(view => String(view.id)));
+  const active = new Set(catalog);
   for (const [id, lifecycle] of sessionLifecycle) {
     if (lifecycle.open && !active.has(id)) sessionLifecycle.set(id, { open: false, revision });
   }
   for (const id of active) sessionLifecycle.set(id, { open: true, revision });
+  views = views.filter(view => paneScreen(`agent:${view.id}`) === activeScreen);
   views = [...views].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   terminalViews = [...terminalViews].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  for (const ui of sessions.values()) captureAgentState(ui);
   reconcilingCatalog = true;
   reconcileTerminals(terminalViews);
   const ids = new Set(views.map(view => String(view.id)));
@@ -1928,7 +2103,9 @@ function applyTranscriptEvent(ui, message) {
 
 function startEvents() {
   events?.close();
-  events = new EventSource("/api/events?history=recent");
+  screenLoaded?.();
+  const ready = new Promise(resolve => { screenLoaded = resolve; });
+  const source = events = new EventSource(`/api/events?history=recent&screen=${activeScreen}`);
   events.onopen = () => { document.body.classList.remove("disconnected"); };
   events.onerror = () => {
     document.body.classList.add("disconnected");
@@ -1937,11 +2114,14 @@ function startEvents() {
     });
   };
   events.onmessage = event => {
+    if (events !== source) return;
     try {
       const message = JSON.parse(event.data);
       if (message.type === "snapshot") {
         lastSequence = message.seq;
-        snapshot(message.sessions, message.terminals || []);
+        receiveScreens(message.screens, false);
+        snapshot(message.sessions, message.terminals || [], message.catalog);
+        screenLoaded?.(); screenLoaded = null;
         return;
       }
       if (message.seq <= lastSequence) return;
@@ -1950,12 +2130,19 @@ function startEvents() {
       if (message.type === "session") sessionLifecycle.set(String(message.session.id), { open: true, revision });
       if (message.type === "closed") sessionLifecycle.set(String(message.session_id), { open: false, revision });
       if (["session", "closed", "status", "name"].includes(message.type)) refreshChoices();
+      if (message.type === "screens") { receiveScreens(message.screens); return; }
       if (message.type === "session") {
+        const key = `agent:${message.session.id}`;
+        if (message.session.screen) screenCatalog.panes[key] = message.session.screen;
+        screenCatalog.revision = Math.max(screenCatalog.revision || 0, message.screens_revision || 0);
+        if (paneScreen(key) !== activeScreen) return;
         addSession(message.session);
         refreshPeerEntries(String(message.session.id));
         return;
       }
       if (message.type === "terminal") {
+        screenCatalog.revision = Math.max(screenCatalog.revision || 0, message.screens_revision || 0);
+        if (message.terminal.screen) screenCatalog.panes[`terminal:${message.terminal.id}`] = message.terminal.screen;
         terminalCatalog.set(String(message.terminal.id), message.terminal);
         reconcileTerminals([...terminalCatalog.values()]);
         return;
@@ -1991,6 +2178,7 @@ function startEvents() {
       if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null);
     } catch (error) { showError(workspaceError, error); }
   };
+  return ready;
 }
 
 function reconcileTerminals(infos) {
@@ -1998,11 +2186,11 @@ function reconcileTerminals(infos) {
   for (const info of infos) terminalCatalog.set(String(info.id), info);
   for (const [id, ui] of terminals) {
     const info = terminalCatalog.get(id);
-    if (!info || info.archived || !info.running) ui.dispose();
+    if (!info || info.archived || !info.running || paneScreen(`terminal:${id}`) !== activeScreen) ui.dispose();
     else ui.update(info);
   }
   for (const info of infos) {
-    if (info.running && !info.archived && !terminals.has(String(info.id))) attachTerminal(info);
+    if (info.running && !info.archived && paneScreen(`terminal:${info.id}`) === activeScreen && !terminals.has(String(info.id))) attachTerminal(info);
   }
 }
 
@@ -2203,6 +2391,7 @@ function addSetup(saved) {
   const ui = makePane("New agent", "", "draft", values.id);
   ui.pane.classList.add("setup-pane");
   ui.id = values.id;
+  ui.screen = activeScreen;
   ui.directory.hidden = true;
   ui.status.textContent = "";
   ui.close.title = "Discard draft";
@@ -2259,7 +2448,17 @@ function addSetup(saved) {
       fields.cwd ||= agentDefaults.cwd;
       // Empty names are allocated atomically by the server, including concurrent creation.
       fields.name = fields.name.trim();
-      const view = await request("/api/sessions", "POST", fields);
+      const view = await request(`/api/sessions?screen=${ui.screen}`, "POST", fields);
+      const paneKey = `agent:${view.id}`;
+      screenCatalog.panes[paneKey] ??= ui.screen;
+      if (ui.screen !== activeScreen || drafts.get(ui.id) !== ui) {
+        const key = `boid:pane-order:v1:${location.origin}:${agentDefaults.cwd}${ui.screen === 1 ? "" : `:screen:${ui.screen}`}`;
+        try { const saved = JSON.parse(sessionStorage.getItem(key));
+          if (saved) { saved.drafts = saved.drafts.filter(draft => draft.id !== ui.id); sessionStorage.setItem(key, JSON.stringify(saved)); }
+        } catch {}
+        return;
+      }
+      if (paneScreen(paneKey) !== activeScreen) { discardSetup(ui); return; }
       discardSetup(ui, acceptSessionResponse(view, startedAt));
     } catch (error) { showError(ui.error, error); }
     finally { ui.busy = false; submit.disabled = false; ui.close.disabled = false; }
@@ -2317,6 +2516,13 @@ function renderAgentChoices(ui, active, inactive) {
         try {
           const startedAt = catalogRevision;
           const view = await request(`/api/sessions/${encodeURIComponent(record.id)}${archived ? "/reopen?history=recent" : "/history"}`, archived ? "POST" : "GET");
+          if (ui.screen !== activeScreen || drafts.get(ui.id) !== ui) return;
+          const destination = paneScreen(`agent:${view.id}`);
+          if (destination !== activeScreen) {
+            discardSetup(ui); await switchScreen(destination);
+            const target = sessions.get(String(view.id)); if (target) focusSession(target);
+            return;
+          }
           const attached = sessions.has(String(view.id));
           const agent = acceptSessionResponse(view, startedAt);
           if (archived || !attached) discardSetup(ui, agent);
@@ -2360,9 +2566,13 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   const button = event.currentTarget;
   button.disabled = true;
   workspaceError.hidden = true;
+  const screen = activeScreen;
   try {
-    const info = await request("/api/terminals", "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
-    attachTerminal(info);
+    const info = await request(`/api/terminals?screen=${screen}`, "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
+    const paneKey = `terminal:${info.id}`;
+    screenCatalog.panes[paneKey] ??= screen;
+    if (!terminalCatalog.has(String(info.id))) terminalCatalog.set(String(info.id), info);
+    if (paneScreen(paneKey) === activeScreen) attachTerminal(terminalCatalog.get(String(info.id)));
   } catch (error) { showError(workspaceError, error); }
   finally { button.disabled = false; }
 });
@@ -2607,6 +2817,7 @@ function requireLogin() {
   login.hidden = false;
   refreshPasskeyActions();
   document.body.classList.add("disconnected");
+  addScreenButton.disabled = true;
   document.querySelector("#add-agent").disabled = true;
   document.querySelector("#add-terminal").disabled = true;
   diagnosticsButton.disabled = true;
@@ -2623,7 +2834,15 @@ async function connect(token) {
   agentDefaults.name = config.next_agent_name;
   agentNames = config.agent_names;
   for (const ui of drafts.values()) ui.form.elements.cwd.placeholder = agentDefaults.cwd;
+  receiveScreens(await request("/api/screens"), false);
+  if (!orderKey) {
+    let saved; try { saved = sessionStorage.getItem(activeScreenKey); } catch {}
+    const number = Number(new URLSearchParams(location.search).get("screen") || saved || 1);
+    activeScreen = Number.isInteger(number) && number > 0 && number <= screenCatalog.count ? number : 1;
+  }
+  storeScreenSelection();
   loadPaneOrder(agentDefaults.cwd);
+  addScreenButton.disabled = false;
   document.querySelector("#add-agent").disabled = false;
   document.querySelector("#add-terminal").disabled = false;
   diagnosticsButton.disabled = false;

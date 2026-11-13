@@ -2,7 +2,7 @@ use crate::runtime::Hub as Catalog;
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::StatusCode,
@@ -895,10 +895,20 @@ async fn list(State(hub): State<TerminalHub>) -> Json<Vec<Summary>> {
     )
 }
 
+#[derive(Deserialize, Default)]
+struct ScreenQuery {
+    screen: Option<u32>,
+}
 async fn create(
     State(hub): State<TerminalHub>,
+    Query(query): Query<ScreenQuery>,
     Json(request): Json<Create>,
 ) -> Result<Json<Summary>, Error> {
+    let screen = query.screen.unwrap_or(1);
+    hub.0
+        .catalog
+        .validate_screen(screen)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
     let size = size(request.cols.unwrap_or(80), request.rows.unwrap_or(24))?;
     let cwd = hub.0.cwd.join(request.cwd.unwrap_or_default());
     let cwd = cwd
@@ -911,6 +921,10 @@ async fn create(
         ));
     }
     let id = format!("term-{}", uuid::Uuid::new_v4());
+    hub.0
+        .catalog
+        .assign_terminal_screen(&id, screen)
+        .map_err(internal)?;
     let name = format!("#{}", hub.0.next_number.fetch_add(1, Ordering::SeqCst));
     let path = hub.0.state_dir.join(format!("{id}.jsonl"));
     let catalog = hub.0.catalog.clone();
@@ -1210,6 +1224,7 @@ mod persistence_tests {
         let (_, mut events) = catalog.subscribe();
         let Json(created) = create(
             State(hub.clone()),
+            Query(ScreenQuery::default()),
             Json(Create {
                 cwd: None,
                 cols: None,
@@ -1305,6 +1320,7 @@ mod persistence_tests {
             let hub = TerminalHub::open(root.clone(), state.path().into(), catalog).unwrap();
             let Json(created) = create(
                 State(hub.clone()),
+                Query(ScreenQuery::default()),
                 Json(Create {
                     cwd: None,
                     cols: None,
