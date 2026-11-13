@@ -110,6 +110,18 @@ impl Session {
         session.user(identity);
         session
     }
+    pub fn ensure_peer_trace_tool(&mut self) {
+        if let Some(tools) = self.tools.as_array_mut() {
+            if let Some(tool) = tools
+                .iter_mut()
+                .find(|tool| tool["name"] == "read_peer_trace")
+            {
+                *tool = tool_calls::peer_trace_definition();
+            } else {
+                tools.push(tool_calls::peer_trace_definition());
+            }
+        }
+    }
     pub fn recover_sends(
         &mut self,
         sender: &str,
@@ -136,6 +148,34 @@ impl Session {
     }
     pub fn current_input_batch(&self) -> u64 {
         self.model_requests
+    }
+    pub fn recover_questions(
+        &mut self,
+        questions: &mut [crate::runtime::Question],
+    ) -> Vec<(String, String)> {
+        for q in questions.iter_mut() {
+            if q.blocking && q.answer.is_none() && q.wait_outcome.is_none() {
+                q.wait_outcome = Some("interrupted".into());
+            }
+        }
+        let Some(call) = &self.running else {
+            return vec![];
+        };
+        if call.name != "prompt_user" {
+            return vec![];
+        }
+        let Some(question) = questions.iter().find(|q| q.call_ids.contains(&call.id)) else {
+            return vec![];
+        };
+        let result = question.receipt();
+        let call = self.running.take().unwrap();
+        self.history.push(
+            json!({"type":"function_call_output","call_id":call.id,"output":result.to_string()}),
+        );
+        vec![(
+            "tool_result".into(),
+            format!("{} ({})\n{}", call.name, call.id, result),
+        )]
     }
     pub fn recover(&mut self) -> Vec<(String, String)> {
         let mut entries = vec![];
@@ -178,15 +218,21 @@ impl Session {
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
-    pub fn operator(&mut self, text: String) -> Vec<Value> {
-        if self.compact_requested {
-            self.compact_resume = true;
-        }
+    pub fn refresh_tools(&mut self) {
         if let Some(tools) = self.tools.as_array_mut() {
             if !tools.iter().any(|tool| tool["name"] == "oai_compact") {
                 tools.push(tool_calls::compaction_definition());
             }
+            if !tools.iter().any(|tool| tool["name"] == "prompt_user") {
+                tools.push(tool_calls::prompt_user_definition());
+            }
         }
+    }
+    pub fn operator(&mut self, text: String) -> Vec<Value> {
+        if self.compact_requested {
+            self.compact_resume = true;
+        }
+        self.refresh_tools();
         let selected = if self.skill_base.is_some() {
             skills::selection::mentions(&text, &self.skills)
         } else {
@@ -275,7 +321,12 @@ impl Session {
             vec![("notice".into(), "Compacting context…".into())],
         )?;
         hub.archive_context(id, self.model_requests)?;
-        let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
+        let instructions = format!(
+            "{}\n\n{}\n\n{}",
+            self.instructions,
+            hub.identity(id)?,
+            tool_calls::PEER_TRACE_GUIDANCE
+        );
         let result = client
             .compact(&self.history, &self.model, &instructions, &self.profile)
             .await;
@@ -317,6 +368,7 @@ impl Session {
         hub: &Hub,
         id: &str,
     ) -> Result<bool> {
+        self.ensure_peer_trace_tool();
         // /login and /model may update an idle agent while its worker waits.
         self.profile = hub.profile(id)?;
         if let Some(model) = self.profile["model"].as_str() {
@@ -334,7 +386,12 @@ impl Session {
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
             // Read current metadata at each request; worker checkpoints never overwrite names.
-            let instructions = format!("{}\n\n{}", self.instructions, hub.identity(id)?);
+            let instructions = format!(
+                "{}\n\n{}\n\n{}",
+                self.instructions,
+                hub.identity(id)?,
+                tool_calls::PEER_TRACE_GUIDANCE
+            );
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let attempt = self.model_requests;
@@ -439,6 +496,16 @@ impl Session {
             }
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
+            "prompt_user" => {
+                match serde_json::from_str::<crate::runtime::PromptArgs>(&call.arguments) {
+                    Ok(args) => hub
+                        .prompt_user(id, &call.id, args)
+                        .await
+                        .unwrap_or_else(|error| json!({"error":error.to_string()})),
+                    Err(error) => json!({"error":error.to_string()}),
+                }
+            }
+            "read_peer_trace" => hub.read_peer_trace(id, &call.arguments),
             "send_message" => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -469,6 +536,17 @@ impl Session {
         Ok(true)
     }
     pub fn interrupt(&mut self, hub: &Hub, id: &str) {
+        // Retain a receipt for a question already posted before cancellation.
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|call| call.name == "prompt_user")
+        {
+            if let Err(error) = hub.recover_questions(id, self) {
+                hub.persistence_fault(id, error);
+            }
+            return;
+        }
         let entries = self.recover();
         if let Err(error) = hub.checkpoint_entries(id, self, entries) {
             hub.persistence_fault(id, error);

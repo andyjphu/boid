@@ -75,7 +75,7 @@ const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:
     await page.evaluate(v=>{removeSession(sessions.get("a"));snapshot([v],[]);},{...view(history),history:{start:0,end:95,total:95,seq:1}});await frames();
     assert.equal(await page.locator('[data-entry-id="call"] summary').isVisible(),true);
     assert.equal(await page.locator('[data-entry-id="result"]').isVisible(),false);
-    await page.evaluate(()=>{const ui=sessions.get('a');for(let i=95;i<105;i++)applyTranscriptEvent(ui,{type:'entry',seq:i,entry_index:i,entry:{id:`history-${i}`,kind:'assistant',text:`Message ${i}`}});});await frames();
+    await page.evaluate(()=>{const ui=sessions.get('a');for(let i=95;i<125;i++)applyTranscriptEvent(ui,{type:'entry',seq:i,entry_index:i,entry:{id:`history-${i}`,kind:'assistant',text:`Message ${i}`}});});await frames();
     assert.equal(await page.locator('[data-entry-id="call"]').count(),0);
     assert.equal(await page.locator('[data-entry-id="result"] summary').isVisible(),true);
     assert.equal(await page.locator('[data-entry-id="result"] .tool-output').isVisible(),false);
