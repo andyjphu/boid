@@ -221,9 +221,10 @@ function runMessageSubmissions(id) {
         if (item.images?.length) await Promise.all(item.images.map(image => uploadComposerImage(id, image)));
         item.attempted = true;
         inputTiming.dispatched(item.timing);
-        const acknowledgment = await request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text, ...(item.images?.length ? { images: item.images.map(image => image.id) } : {}) }, {},
+        const admission = state.admission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text, ...(item.images?.length ? { images: item.images.map(image => image.id) } : {}) }, {},
           item.timing ? (response, headersAt) => inputTiming.response(item.timing, response, headersAt) : null);
-        inputTiming.acknowledge(item.timing, acknowledgment);
+        try { inputTiming.acknowledge(item.timing, await admission); }
+        finally { if (state.admission === admission) state.admission = null; }
       } catch (error) {
         inputTiming.failed(item.timing, error);
         state.paused = true; state.error = error.message;
@@ -3774,7 +3775,10 @@ document.addEventListener("keydown", async event => {
   updateActivity(ui);
   ui.error.hidden = true;
   try {
-    await ui.submission?.catch(() => {});
+    // Text FIFO continues directly into its next POST. An upload wait has no
+    // admission promise, so Escape never waits for image bytes or cancels them.
+    let admission;
+    while ((admission = ui.messageState.admission)) await admission.catch(() => {});
     await questionSubmissions.get(ui.id)?.catch(() => {});
     await request(`/api/sessions/${encodeURIComponent(ui.id)}/interrupt`, "POST");
   }

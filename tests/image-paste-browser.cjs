@@ -6,7 +6,7 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4n
 (async()=>{
  const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
  try{
-  const page=await browser.newPage({viewport:{width:1100,height:800}}),errors=[],uploads=[],posts=[];let seq=0;
+  const page=await browser.newPage({viewport:{width:1100,height:800}}),errors=[],uploads=[],posts=[],interrupts=[];let seq=0;
   const views=['a','b'].map(id=>({id,name:id,cwd:'/mock',status:'idle',pending:[],entries:[]}));
   const screens={revision:1,count:2,panes:{}};
   page.on('pageerror',e=>errors.push(e.message));
@@ -19,6 +19,7 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4n
    if(url.pathname==='/api/screens')return route.fulfill({json:screens});
    if(url.pathname.endsWith('/images')){assert.equal(route.request().headers()['content-type'],'image/png');assert.deepEqual(route.request().postDataBuffer(),png);uploads.push({route,path:url.pathname});return;}
    if(url.pathname.includes('/images/'))return route.fulfill({body:png,contentType:'image/png'});
+   if(url.pathname.endsWith('/interrupt')){interrupts.push(url.pathname);return route.fulfill({status:202,json:{status:'interrupt_requested'}});}
    if(url.pathname.endsWith('/messages')){posts.push({route,path:url.pathname,body:route.request().postDataJSON()});return;}
    if(url.pathname.startsWith('/api/'))return route.fulfill({json:[]});
    const file=path.join(root,url.pathname==='/'?'index.html':url.pathname);return route.fulfill({body:fs.readFileSync(file),contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});
@@ -46,6 +47,12 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4n
   assert.notEqual(await input('a').evaluate(el=>getComputedStyle(el).color),'rgb(120, 183, 255)','only image markers are blue');
   if(process.env.SCREENSHOT)await page.screenshot({path:process.env.SCREENSHOT.replace('.png','-mixed.png')});
   await input('a').press('Enter');await frames();assert.equal(posts.length,0,'message waits for real upload');
+  // A working agent can be interrupted while image bytes are still uploading.
+  views[0].status='working';await emit({type:'status',session_id:'a',status:'working',working_since_ms:Date.now()});
+  await input('a').press('Escape');await until(()=>interrupts.length===1);
+  assert.equal(posts.length,0,'Escape reaches server before held upload is released');
+  assert.equal(await page.evaluate(()=>sessions.get('a').messageState.queue[0].images.length),1,'interrupt retains queued image intent');
+  await emit({type:'status',session_id:'a',status:'idle'});views[0].status='idle';
   await input('a').fill('Newer draft while uploading');await page.locator('.pane-tab[data-subpane-key="agent:b"]').click();await finishUpload(0);await until(()=>posts.length===1);
   assert.deepEqual(posts[0].body,{text:'Describe this\nwith detail',images:['image-0']});assert.equal(posts[0].path,'/api/sessions/a/messages');
   await remount();await page.locator('.pane-tab[data-subpane-key="agent:a"]').click();assert.equal(await input('a').inputValue(),'Newer draft while uploading');assert.equal(await chips('a').count(),1);
@@ -75,6 +82,13 @@ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4n
   await paste();await until(()=>uploads.length===7);await input('a').fill('Unfinished image');await page.waitForTimeout(20);await page.reload();await page.waitForFunction(()=>sessions.size===2);await frames();assert.equal(await chips('a').count(),1);assert.match(await paneError().innerText(),/interrupted by reload/);await input('a').press('Enter');await frames();assert.equal(posts.length,5);assert.match(await paneError().innerText(),/Paste the image again or remove it/);
   // Remove/drop retained submission explicitly; unsupported format adds no request or chip.
   await paneError().getByRole('button',{name:'Discard this submission',exact:true}).click();await chips('a').getByRole('button',{name:'Remove image #1',exact:true}).click();await paste('a',1,'image/gif');assert.equal(await chips('a').count(),0);assert.equal(uploads.length,7);
-  assert.deepEqual(errors,[]);console.log('PASS: synthetic ClipboardEvent/File through real handler; blue chips, native text/undo, removal, ordered image-only and mixed send, delayed upload/ACK, FIFO dedup, pane/screen continuity, failure retry, metadata-only refresh, complete prompt-history restoration, upload byte release and explicit missing-upload recovery; no OS clipboard or provider activity');
+  // Escape preserves text admission order, including an image intent added while it waits.
+  await input('a').fill('Text before delayed image');await input('a').press('Enter');await until(()=>posts.length===6);
+  views[0].status='working';await emit({type:'status',session_id:'a',status:'working',working_since_ms:Date.now()});
+  await input('a').press('Escape');await frames();assert.equal(interrupts.length,1,'in-flight text admission keeps its order');
+  await paste();await until(()=>uploads.length===8);await input('a').fill('Image queued after Escape');await input('a').press('Enter');
+  await ack(5);await until(()=>interrupts.length===2);assert.equal(posts.length,6,'interrupt bypasses image upload even when queued later');
+  await finishUpload(7);await until(()=>posts.length===7);assert.deepEqual(posts[6].body,{text:'Image queued after Escape',images:['image-7']});await ack(6);
+  assert.deepEqual(errors,[]);console.log('PASS: synthetic ClipboardEvent/File through real handler; blue chips, native text/undo, removal, ordered image-only and mixed send, delayed upload/ACK, immediate interrupt during upload, FIFO dedup, pane/screen continuity, failure retry, metadata-only refresh, complete prompt-history restoration, upload byte release and explicit missing-upload recovery; no OS clipboard or provider activity');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1});
