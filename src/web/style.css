@@ -339,3 +339,14 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 .history-more { display: block; width: 100%; padding: 8px; color: #aaa; background: transparent; border: 0; cursor: pointer; }
 .history-more[hidden], .history-latest[hidden] { display: none; }
 .history-latest { position: absolute; right: 12px; top: 8px; z-index: 4; padding: 4px 8px; color: #ddd; background: #292929; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
+
+/* Screen selection belongs to this browser window, alongside the shared server. */
+#screens { position: fixed; top: 0; left: 0; z-index: 10; display: flex; height: 24px;
+  max-width: calc(50% - 28px); overflow-x: auto; scrollbar-width: none; }
+#screens a, #screens button { flex: 0 0 auto; min-width: 24px; height: 24px; padding: 2px 6px;
+  color: #999; text-decoration: none; text-align: center; border: 0; border-right: 1px solid #353535;
+  border-radius: 0; background: #181818; }
+#screens a[aria-current="page"] { color: #ddd; background: #292929; }
+#screens a:hover, #screens button:hover, #screens a.drop-target { color: #fff; background: #373737; }
+#screens a:focus-visible { outline: 1px solid #777; outline-offset: -2px; }
+body.disconnected #screens { opacity: .45; }
