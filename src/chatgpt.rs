@@ -299,10 +299,10 @@ impl Auth {
         Ok(welcome)
     }
     pub fn begin(&self, origin: &str, selected: Option<&str>, consent: bool) -> Result<String> {
-        let origin =
-            reqwest::Url::parse(origin).context("Open Boid through a 127.0.0.1 URL to sign in.")?;
+        let mut origin = reqwest::Url::parse(origin)
+            .context("Open Boid through an HTTP localhost or 127.0.0.1 URL to sign in.")?;
         if origin.scheme() != "http"
-            || origin.host_str() != Some("127.0.0.1")
+            || !matches!(origin.host_str(), Some("localhost" | "127.0.0.1"))
             || !origin.username().is_empty()
             || origin.password().is_some()
             || origin.query().is_some()
@@ -310,9 +310,12 @@ impl Auth {
             || origin.path() != "/"
         {
             bail!(
-                "ChatGPT sign-in needs an HTTP 127.0.0.1 URL; use an SSH loopback tunnel for a remote server."
+                "Open Boid through HTTP localhost or 127.0.0.1 to sign in to ChatGPT; use an SSH loopback tunnel for a remote server."
             );
         }
+        // Browser passkeys use localhost. OpenAI requires a numeric loopback
+        // callback, reached through the same listener or SSH-forwarded port.
+        origin.set_host(Some("127.0.0.1"))?;
         let store = self.load()?;
         let account = selected
             .map(|id| {

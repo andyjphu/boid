@@ -181,6 +181,31 @@ async fn exchange(
     (StatusCode::OK, Json(tokens))
 }
 
+#[test]
+fn localhost_sign_in_uses_exact_numeric_loopback_callback() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = Auth::open(dir.path().join("auth"), "api_key", "fixture").unwrap();
+    for origin in ["http://localhost:7734", "http://127.0.0.1:7734"] {
+        let start = auth.begin(origin, None, false).unwrap();
+        let ticket = start.split_once("ticket=").unwrap().1;
+        let url = reqwest::Url::parse(&auth.authorization(ticket).unwrap()).unwrap();
+        let args: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(args["redirect_uri"], "http://127.0.0.1:7734/auth/callback");
+        let attempts = auth.attempts.lock().unwrap();
+        assert_eq!(attempts[ticket].redirect, args["redirect_uri"]);
+    }
+    for origin in [
+        "https://localhost:7734",
+        "http://localhost.example:7734",
+        "http://100.64.0.1:7734",
+        "http://localhost:7734/another-path",
+        "http://user@localhost:7734",
+        "http://localhost:7734?query=1",
+    ] {
+        assert!(auth.begin(origin, None, false).is_err(), "{origin}");
+    }
+}
+
 #[tokio::test]
 async fn registration_validates_state_identity_pkce_and_account_selection() {
     let f = Fixture::new().await;

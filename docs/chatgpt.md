@@ -39,13 +39,16 @@ restarts. Existing agents retain their original credential on migration.
 to the whole pane. New-agent default selection never changes existing panes.
 See [credential API and persistence](credentials.md) for authenticated agent CRUD.
 
-Open Boid through `http://127.0.0.1:<port>` for ChatGPT's loopback callback.
+Open Boid through `http://localhost:<port>` or `http://127.0.0.1:<port>`.
+Sign-in always uses `http://127.0.0.1:<port>/auth/callback`, as OpenAI requires,
+while the Boid page can stay on `localhost` for browser passkeys.
 
 For a remote server, forward its loopback port before signing in. For example,
 `ssh -N -L 7734:127.0.0.1:7734 mm-west-2` lets the browser use
-`http://127.0.0.1:7734`. The same tunnel carries `/auth/callback`; keep it open
-through sign-in. Use the workspace's existing private token to authenticate to
-Boid. Neither the Boid token nor OAuth credentials belong in shared URLs or logs.
+`http://localhost:7734`. The same tunnel carries `/auth/callback` through
+`127.0.0.1`; keep it open through sign-in. Use the existing browser passkey on its
+registered origin, or the workspace's private token, to authenticate to Boid.
+Neither the Boid token nor OAuth credentials belong in shared URLs or logs.
 
 Pane membership, credential assignment, model selection, and active session
 history survive restarts. Active-tab selection and outer geometry remain local
