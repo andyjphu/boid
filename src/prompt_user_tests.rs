@@ -120,7 +120,19 @@ async fn cancelled_queued_answer_can_be_submitted_again_after_stop_or_end() {
         let first = hub.answer_question(&a.id, &q.id, "Staging".into()).unwrap();
         if end {
             hub.close(&a.id).await.unwrap();
-            hub.reopen(&a.id).unwrap();
+            assert!(hub.reopen(&a.id).is_err() && hub.view(&a.id).is_none());
+            assert!(
+                hub.ended_record(&a.id)
+                    .view
+                    .questions
+                    .iter()
+                    .any(|q| q.wait_outcome.as_deref() == Some("answer_cancelled"))
+            );
+            assert!(hub.answer_question(&a.id, &q.id, "Staging".into()).is_err());
+            drop(hold_response);
+            hub.shutdown().await;
+            server.abort();
+            continue;
         } else {
             hub.stop(&a.id).unwrap();
             idle(&hub, &a.id, "stopped").await;

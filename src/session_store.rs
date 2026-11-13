@@ -15,6 +15,11 @@ use std::{
 pub struct SessionStore {
     directory: Option<PathBuf>,
     _lock: Option<File>,
+    archive_receipt_writer: std::sync::Mutex<()>,
+    #[cfg(test)]
+    memory_archives: std::sync::Mutex<std::collections::BTreeMap<String, (Vec<u8>, Vec<u8>)>>,
+    #[cfg(test)]
+    memory_receipts: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
 }
 
 impl SessionStore {
@@ -23,6 +28,11 @@ impl SessionStore {
         Self {
             directory: None,
             _lock: None,
+            archive_receipt_writer: Default::default(),
+            #[cfg(test)]
+            memory_archives: Default::default(),
+            #[cfg(test)]
+            memory_receipts: Default::default(),
         }
     }
 
@@ -44,6 +54,11 @@ impl SessionStore {
         Ok(Self {
             directory: Some(directory),
             _lock: Some(lock),
+            archive_receipt_writer: Default::default(),
+            #[cfg(test)]
+            memory_archives: Default::default(),
+            #[cfg(test)]
+            memory_receipts: Default::default(),
         })
     }
 
@@ -354,3 +369,6 @@ mod tests {
         assert_eq!(fs::read(&backup).unwrap(), original);
     }
 }
+
+#[path = "session_archive.rs"]
+mod archive;

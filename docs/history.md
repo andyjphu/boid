@@ -3,8 +3,9 @@
 The workspace opens with recent messages for each agent. Scrolling toward the
 start fetches earlier messages; the earlier/newer buttons also request a page.
 Latest messages returns to the current tail. Peer links load the target message
-and surrounding history. Full saved transcripts remain available through the
-existing full-record link and API.
+and surrounding history. Full saved transcripts of open agents remain available through the
+existing full-record link and API. Ended sessions leave the harness; their
+files are described in [Ended sessions](archives.md).
 
 The browser mounts the viewport with overscan and retains measured spacer
 heights for loaded history outside it. Selected text stays mounted during
@@ -29,7 +30,8 @@ clearing retains transcript entries. Consumers must not use a page's sequence to
 advance the global event cursor: it is an entry watermark for reconciling HTTP
 reads with live events. A new snapshot invalidates old in-flight history reads.
 
-`/api/sessions?history=recent` and `/api/sessions/archived?history=recent` provide
-bounded views for the agent picker. The existing endpoints without this option
-and `/api/sessions/{id}` still return full records. No history is removed from
-persistent storage, and model context is unchanged by view navigation.
+`/api/sessions?history=recent` provides bounded views for open agents. Without
+this option, `/api/sessions` and `/api/sessions/{id}` return full open-session
+views. The old archive list returns an empty list; ended session history and
+reopen requests are unavailable. Archived files remain on disk, and model
+context is unchanged by view navigation.

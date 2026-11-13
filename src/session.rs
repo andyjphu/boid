@@ -179,6 +179,12 @@ impl Session {
             }
         }
     }
+    pub fn recovering_send_call(&self) -> Option<&str> {
+        self.running
+            .as_ref()
+            .filter(|call| call.name == "send_message")
+            .map(|call| call.id.as_str())
+    }
     pub fn recover_sends(
         &mut self,
         sender: &str,

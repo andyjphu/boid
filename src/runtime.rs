@@ -12,6 +12,9 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
+#[path = "archive.rs"]
+mod archive;
+use archive::ArchivedReceipt;
 mod persistence;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -235,6 +238,9 @@ struct Inner {
     pub cwd: PathBuf,
     #[cfg(test)]
     skill_scan_gate: Mutex<Option<Arc<SkillScanGate>>>,
+    #[cfg(test)]
+    archive_receipt_gate:
+        Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Screens {
@@ -268,6 +274,8 @@ struct Data {
     seq: u64,
     closing: bool,
     sessions: BTreeMap<String, Handle>,
+    ending: BTreeSet<String>,
+    archive_generation: u64,
     terminal_summaries: BTreeMap<String, Value>,
     messages: BTreeMap<(String, String), Communication>,
     message_receipts: BTreeMap<(String, String), Receipt>,
@@ -281,6 +289,7 @@ struct Handle {
     wake: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
     storage_error: Option<String>,
+    archiving: bool,
 }
 
 #[cfg(test)]
@@ -375,12 +384,13 @@ impl Hub {
             {
                 bail!("Invalid screen assignments; original retained");
             }
-            let records: Vec<Record> = store.load()?;
+            let records = Self::load_catalog(&store)?;
             let messages: BTreeMap<_, _> = records
                 .iter()
                 .flat_map(|r| r.messages.iter())
                 .map(|m| ((m.sender_id.clone(), m.call_id.clone()), m.clone()))
                 .collect();
+            let mut recovery_messages = messages.clone();
             let (events, _) = broadcast::channel(512);
             let hub = Self(Arc::new(Inner {
                 agent_names,
@@ -390,6 +400,8 @@ impl Hub {
                     seq: 0,
                     closing: false,
                     sessions: BTreeMap::new(),
+                    ending: BTreeSet::new(),
+                    archive_generation: 0,
                     terminal_summaries: BTreeMap::new(),
                     messages: messages.clone(),
                     message_receipts: BTreeMap::new(),
@@ -400,6 +412,8 @@ impl Hub {
                 cwd: std::env::current_dir()?,
                 #[cfg(test)]
                 skill_scan_gate: Mutex::new(None),
+                #[cfg(test)]
+                archive_receipt_gate: Mutex::new(None),
             }));
             let mut restored_records = Vec::new();
             for mut record in records {
@@ -428,7 +442,22 @@ impl Hub {
                     }
                     record.stream_seq = delta.seq;
                 }
-                for (kind, text) in record.engine.recover_sends(&record.view.id, &messages) {
+                if let Some(call) = record.engine.recovering_send_call() {
+                    let key = (record.view.id.clone(), call.to_owned());
+                    if !recovery_messages.contains_key(&key) {
+                        if let Some(receipt) = hub
+                            .0
+                            .store
+                            .archived_receipt::<ArchivedReceipt>(&record.view.id, call)?
+                        {
+                            recovery_messages.insert(key, receipt.message);
+                        }
+                    }
+                }
+                for (kind, text) in record
+                    .engine
+                    .recover_sends(&record.view.id, &recovery_messages)
+                {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
                 for (kind, text) in record.engine.recover_questions(&mut record.view.questions) {
@@ -466,6 +495,19 @@ impl Hub {
                     hub.install_locked(&mut data, record, false)?;
                 }
             }
+            let ended: Vec<_> = hub
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .values()
+                .filter(|h| h.record.view.archived)
+                .map(|h| h.record.view.id.clone())
+                .collect();
+            for id in ended {
+                hub.archive_finished(&id)?;
+            }
             Ok(hub)
         })
     }
@@ -499,6 +541,7 @@ impl Hub {
                 wake: wake.clone(),
                 task: None,
                 storage_error: None,
+                archiving: false,
             },
         );
         if emit {
@@ -555,7 +598,7 @@ impl Hub {
         self.list(false)
     }
     pub fn archived_views(&self) -> Vec<View> {
-        self.list(true)
+        vec![]
     }
     fn list(&self, archived: bool) -> Vec<View> {
         crate::blocking::run(|| {
@@ -591,9 +634,10 @@ impl Hub {
             pending: source.pending.clone(),
             archived: source.archived,
         };
-        let engine = &data.sessions[&source.id].record.engine;
-        view.context_usage = engine.context_usage.clone();
-        view.context_window = crate::api::context_window(&engine.model);
+        if let Some(handle) = data.sessions.get(&source.id) {
+            view.context_usage = handle.record.engine.context_usage.clone();
+            view.context_window = crate::api::context_window(&handle.record.engine.model);
+        }
         view.communications = data
             .messages
             .values()
@@ -622,6 +666,7 @@ impl Hub {
             let data = self.0.data.lock().unwrap();
             data.sessions
                 .get(id)
+                .filter(|h| !h.record.view.archived)
                 .map(|h| Self::project_view(&data, &h.record.view))
         })
     }
@@ -652,6 +697,7 @@ impl Hub {
                 let data = self.0.data.lock().unwrap();
                 data.sessions
                     .values()
+                    .filter(|handle| !handle.record.view.archived)
                     .map(|handle| {
                         let r = &handle.record;
                         (
@@ -944,6 +990,9 @@ impl Hub {
         change: impl FnOnce(&mut Record) -> Result<T>,
     ) -> Result<(T, Receipt)> {
         let handle = data.sessions.get_mut(id).context("Unknown session.")?;
+        if handle.archiving {
+            bail!("Session is finishing archival; try again.");
+        }
         if let Some(error) = &handle.storage_error {
             bail!("Session storage failed: {error}");
         }
@@ -1378,7 +1427,7 @@ impl Hub {
             if !input.message.trim().is_empty() {
                 self.message(&id, input.message)?;
             }
-            Ok(self.view(&id).unwrap())
+            self.view(&id).context("Session ended during creation.")
         })
     }
     pub fn rename(&self, id: &str, name: String) -> Result<View> {
@@ -1386,7 +1435,7 @@ impl Hub {
         validate_agent_name(name)?;
         self.update(id, |record| {
             if record.view.archived || record.view.status == "ending" {
-                bail!("Session has ended. Reopen its history first.");
+                bail!("Session has ended. Create a new agent instead.");
             }
             if record.view.name != name {
                 record.view.entries.push(Self::make_entry(
@@ -1412,6 +1461,7 @@ impl Hub {
             Ok(data
                 .sessions
                 .get(id)
+                .filter(|h| !h.record.view.archived)
                 .context("Unknown session.")?
                 .record
                 .view
@@ -1422,7 +1472,7 @@ impl Hub {
     pub fn select_profile(&self, id: &str, expected: &Value, profile: Value) -> Result<()> {
         self.update(id, |record| {
             if record.view.archived || record.view.status == "ending" {
-                bail!("Session has ended. Reopen its history first.");
+                bail!("Session has ended. Create a new agent instead.");
             }
             if &record.view.profile != expected {
                 bail!("This agent's connection changed. Reopen the chooser and try again.");
@@ -1443,6 +1493,7 @@ impl Hub {
                 &data
                     .sessions
                     .get(id)
+                    .filter(|h| !h.record.view.archived)
                     .context("Unknown session.")?
                     .record
                     .view,
@@ -1453,7 +1504,12 @@ impl Hub {
         crate::blocking::run(|| {
             let (cwd, saved, warnings, refresh) = {
                 let data = self.0.data.lock().unwrap();
-                let record = &data.sessions.get(id).context("Unknown session")?.record;
+                let record = &data
+                    .sessions
+                    .get(id)
+                    .filter(|h| !h.record.view.archived)
+                    .context("Unknown or archived session")?
+                    .record;
                 (
                     record.view.cwd.clone(),
                     record.engine.skills.clone(),
@@ -1509,7 +1565,7 @@ impl Hub {
                     .check_input_capacity()?;
                 let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
                     if r.view.archived {
-                        bail!("Session has ended. Reopen its history first.");
+                        bail!("Session has ended. Create a new agent instead.");
                     }
                     if r.inputs.len() >= 32 {
                         bail!("Session input queue is full.");
@@ -1561,14 +1617,49 @@ impl Hub {
                 r.listen_on_restart = Some(false);
                 Ok(r.order)
             })?;
-            self.0.data.lock().unwrap().sessions[id]
-                .cancel
-                .send_replace(order);
+            if let Some(handle) = self.0.data.lock().unwrap().sessions.get(id) {
+                handle.cancel.send_replace(order);
+            }
             Ok(())
         })
     }
     // The result indicates whether the final archived state was saved.
     pub async fn close(&self, id: &str) -> Result<bool> {
+        crate::blocking::run(|| -> Result<()> {
+            let mut data = self.0.data.lock().unwrap();
+            if data.closing {
+                bail!("Server is shutting down.");
+            }
+            let handle = data.sessions.get(id).context("Unknown session.")?;
+            if handle.record.view.archived || data.ending.contains(id) {
+                bail!("Session has already ended or is ending.");
+            }
+            data.ending.insert(id.into());
+            Ok(())
+        })?;
+        let hub = self.clone();
+        let id = id.to_owned();
+        // The admitted End owns finalization even if its HTTP caller disconnects.
+        tokio::spawn(async move {
+            struct RegisteredEnd(Hub, String);
+            impl Drop for RegisteredEnd {
+                fn drop(&mut self) {
+                    self.0
+                        .0
+                        .data
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .ending
+                        .remove(&self.1);
+                }
+            }
+            let _registration = RegisteredEnd(hub.clone(), id.clone());
+            hub.finish_close(&id).await
+        })
+        .await
+        .context("Session finalization task failed")?
+    }
+    async fn finish_close(&self, id: &str) -> Result<bool> {
         let mut closing_transition = false;
         let started = self.update(id, |r| {
             if r.view.archived {
@@ -1637,6 +1728,7 @@ impl Hub {
             self.fault(id, error);
             return self.close_without_storage(id, true).await;
         }
+        self.archive_finished(id)?;
         Ok(true)
     }
     async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<bool> {
@@ -1720,33 +1812,10 @@ impl Hub {
         })
     }
 
-    pub fn reopen(&self, id: &str) -> Result<View> {
-        self.update(id, |record| {
-            if !record.view.archived {
-                bail!("Session is already open.");
-            }
-            if record.view.status != "archived" {
-                bail!("Session is still ending; try again after execution stops.");
-            }
-            record.view.archived = false;
-            record.view.status = "stopped".into();
-            record.view.working_since_ms = None;
-            record.paused = true;
-            record.listen_on_restart = Some(false);
-            Ok(())
-        })?;
-        crate::blocking::run(|| {
-            let mut data = self.0.data.lock().unwrap();
-            if let Some(error) = &data.sessions[id].storage_error {
-                bail!("Session storage failed: {error}");
-            }
-            if !data.sessions[id].record.view.archived && !data.closing {
-                self.start_worker_locked(&mut data, id);
-            }
-            let view = Self::project_view(&data, &data.sessions[id].record.view);
-            self.emit(&mut data, json!({"type":"session","session":view}));
-            Ok(view)
-        })
+    pub fn reopen(&self, _id: &str) -> Result<View> {
+        bail!(
+            "Ended sessions are archived outside Boid and cannot be reopened. Create a new agent instead."
+        )
     }
     pub fn stop_account(&self, account: &str) -> Result<()> {
         let ids: Vec<_> = self
@@ -1805,6 +1874,7 @@ impl Hub {
             if text.trim().is_empty() || text.len() > 65536 {
                 bail!("Peer messages must contain 1 to 65536 bytes.");
             }
+            let mut checked_generation = None;
             let mut permit = None;
             let mut data = loop {
                 let data = self.0.data.lock().unwrap();
@@ -1828,11 +1898,46 @@ impl Hub {
                     }
                     return Ok(message.receipt());
                 }
+                if checked_generation != Some(data.archive_generation) {
+                    let generation = data.archive_generation;
+                    drop(data);
+                    let archived = self
+                        .0
+                        .store
+                        .archived_receipt::<ArchivedReceipt>(from, call_id)?;
+                    #[cfg(test)]
+                    {
+                        let gate = self.0.archive_receipt_gate.lock().unwrap().take();
+                        if let Some((started, release)) = gate {
+                            let _ = started.send(());
+                            let _ = release.recv();
+                        }
+                    }
+                    if let Some(receipt) = archived {
+                        if !receipt.matches(to, text, urgency) {
+                            bail!("A send operation cannot change its recipient, text or urgency.");
+                        }
+                        return Ok(receipt.message.receipt());
+                    }
+                    checked_generation = Some(generation);
+                    continue;
+                }
                 if permit.is_some() {
                     break data;
                 }
                 drop(data);
-                permit = Some(self.reserve_persistence(to, 1)?);
+                match self.reserve_persistence(to, 1) {
+                    Ok(reserved) => permit = Some(reserved),
+                    Err(error) => {
+                        if checked_generation
+                            == Some(self.0.data.lock().unwrap().archive_generation)
+                        {
+                            return Err(error);
+                        }
+                        // Recipient may have been evicted after the last lookup.
+                        // Recheck its durable receipt before reporting absence.
+                    }
+                }
             };
             if data.closing {
                 bail!("Server is shutting down.");
@@ -1900,13 +2005,14 @@ impl Hub {
             drop(data);
             receipt.wait()?;
             let data = self.0.data.lock().unwrap();
-            let recipient = &data.sessions[to];
-            if urgency == Urgency::Emergency && !recipient.record.paused {
-                recipient
-                    .emergency
-                    .send_modify(|generation| *generation += 1);
+            if let Some(recipient) = data.sessions.get(to).filter(|h| !h.record.view.archived) {
+                if urgency == Urgency::Emergency && !recipient.record.paused {
+                    recipient
+                        .emergency
+                        .send_modify(|generation| *generation += 1);
+                }
+                recipient.wake.notify_one();
             }
-            recipient.wake.notify_one();
             Ok(message.receipt())
         })
     }
@@ -2372,21 +2478,61 @@ impl Hub {
         });
         let mut tasks = vec![];
         for id in ids {
+            let open = crate::blocking::run(|| {
+                let data = self.0.data.lock().unwrap();
+                !data.ending.contains(&id)
+                    && data
+                        .sessions
+                        .get(&id)
+                        .is_some_and(|h| !h.record.view.archived)
+            });
+            if !open {
+                continue;
+            }
             if let Err(error) = self.update(&id, |r| {
                 r.paused = true;
                 Ok(())
             }) {
-                self.fault(&id, error);
+                let open = crate::blocking::run(|| {
+                    self.0
+                        .data
+                        .lock()
+                        .unwrap()
+                        .sessions
+                        .get(&id)
+                        .is_some_and(|h| !h.record.view.archived && !h.archiving)
+                });
+                if open {
+                    self.fault(&id, error);
+                }
             }
             tasks.push(crate::blocking::run(|| {
                 let mut data = self.0.data.lock().unwrap();
-                let h = data.sessions.get_mut(&id).unwrap();
+                if data.ending.contains(&id) {
+                    return None;
+                }
+                let h = data.sessions.get_mut(&id)?;
+                if h.record.view.archived {
+                    return None;
+                }
                 h.halt.send_replace(());
                 h.task.take()
             }));
         }
         for task in tasks {
             Self::wait_task(task).await;
+        }
+        // An End owns its worker join and archive operation. Do not race it by
+        // rewriting its source or taking its worker task out from under it.
+        loop {
+            let pending = crate::blocking::run(|| {
+                let data = self.0.data.lock().unwrap();
+                !data.ending.is_empty() || data.sessions.values().any(|h| h.archiving)
+            });
+            if !pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }
@@ -2495,9 +2641,9 @@ mod tests {
         hub.shutdown().await;
         drop(hub);
         let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
-        assert_eq!(restored.view(&view.id).unwrap().name, "Swift 🐦");
-        restored.reopen(&view.id).unwrap();
-        assert!(restored.identity(&view.id).unwrap().contains("Swift 🐦"));
+        assert!(restored.view(&view.id).is_none());
+        assert_eq!(restored.ended_record(&view.id).view.name, "Swift 🐦");
+        assert!(restored.reopen(&view.id).is_err() && restored.identity(&view.id).is_err());
         restored.shutdown().await;
     }
 
@@ -2622,15 +2768,13 @@ mod tests {
                     .unwrap()
                     .unwrap();
             }
-            let ended = serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&view.id].record)
-                .unwrap();
+            let ended = serde_json::to_value(hub.ended_record(&view.id)).unwrap();
             release.send(()).unwrap();
             // The worker has ended while the filesystem task was still blocked.
             // A late result has no session owner to which it can commit.
-            assert!(hub.0.data.lock().unwrap().sessions[&view.id].task.is_none());
+            assert!(!hub.0.data.lock().unwrap().sessions.contains_key(&view.id));
             assert_eq!(
-                serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&view.id].record)
-                    .unwrap(),
+                serde_json::to_value(hub.ended_record(&view.id)).unwrap(),
                 ended
             );
         }
@@ -3198,7 +3342,7 @@ mod tests {
         );
         // Closing during work cancels the worker and prevents later input.
         hub.close(&target.id).await.unwrap();
-        assert!(hub.view(&target.id).unwrap().archived);
+        assert!(hub.view(&target.id).is_none());
         assert!(hub.message(&target.id, "Must not restart".into()).is_err());
         let _ = release_fifth.send(json!([]));
         hub.shutdown().await;
@@ -3393,7 +3537,8 @@ mod tests {
             .send_peer(&sender.id, &view.id, "Cancel this queued peer work on End")
             .unwrap();
         restored.close(&view.id).await.unwrap();
-        let ended = restored.view(&view.id).unwrap();
+        assert!(restored.view(&view.id).is_none());
+        let ended = restored.ended_record(&view.id).view;
         assert!(ended.archived);
         assert!(ended.pending.is_empty());
         assert!(ended.entries.iter().any(|entry| entry.id == cancelled_user));
@@ -3410,25 +3555,19 @@ mod tests {
         }));
         {
             let data = restored.0.data.lock().unwrap();
-            let record = &data.sessions[&view.id].record;
-            assert!(record.inputs.is_empty() && record.inbox.is_empty());
+            assert!(!data.sessions.contains_key(&view.id));
         }
         restored.close(&sender.id).await.unwrap();
         assert!(restored.views().is_empty());
-        assert_eq!(restored.archived_views().len(), 2);
+        assert!(restored.archived_views().is_empty());
         restored.shutdown().await;
         drop(restored);
         let reopened = Hub::open(Client::test_client(), state.path().into()).unwrap();
-        assert!(reopened.view(&view.id).unwrap().archived);
-        let view = reopened.reopen(&view.id).unwrap();
-        assert!(!view.archived);
-        assert_eq!(view.status, "stopped");
-        assert!(view.pending.is_empty());
-        {
-            let data = reopened.0.data.lock().unwrap();
-            let record = &data.sessions[&view.id].record;
-            assert!(record.inputs.is_empty() && record.inbox.is_empty());
-        }
+        assert!(reopened.view(&view.id).is_none());
+        assert!(reopened.reopen(&view.id).is_err());
+        assert!(reopened.history(&view.id, None, None, None).is_err());
+        let record = reopened.ended_record(&view.id);
+        assert!(record.inputs.is_empty() && record.inbox.is_empty());
         assert!(
             tokio::time::timeout(Duration::from_millis(50), received.recv())
                 .await
@@ -3486,7 +3625,8 @@ mod tests {
         hub.status(&view.id, "working");
         assert!(hub.view(&view.id).unwrap().working_since_ms.unwrap() > started);
         hub.close(&view.id).await.unwrap();
-        assert_eq!(hub.view(&view.id).unwrap().working_since_ms, None);
+        assert!(hub.view(&view.id).is_none());
+        assert_eq!(hub.ended_record(&view.id).view.working_since_ms, None);
         hub.shutdown().await;
     }
 
@@ -3565,8 +3705,8 @@ mod tests {
         }
         assert!(unsaved_close);
         hub.close(&first_failure_on_end.id).await.unwrap();
-        assert!(hub.view(&first_failure_on_end.id).unwrap().archived);
-        let view = hub.view(&target.id).unwrap();
+        assert!(hub.view(&first_failure_on_end.id).is_none());
+        let view = hub.ended_record(&target.id).view;
         assert!(view.archived);
         assert!(view.pending.is_empty());
         assert!(view.entries.iter().any(|e| e.id == queued));
@@ -3597,10 +3737,10 @@ mod tests {
             std::fs::write(&stored, b"not a directory").unwrap();
         });
         ended.unwrap();
-        assert!(hub.view(&during_join.id).unwrap().archived);
+        assert!(hub.view(&during_join.id).is_none());
         assert!(
-            hub.view(&during_join.id)
-                .unwrap()
+            hub.ended_record(&during_join.id)
+                .view
                 .entries
                 .iter()
                 .any(|e| e.text.contains("not saved"))

@@ -55,17 +55,24 @@ impl Hub {
                 // Snapshot the live view under the same lock used by incoming deltas.
                 // Never reopen a saved conversation or wake the peer to inspect it.
                 let data = self.0.data.lock().unwrap();
-                if !data.sessions.contains_key(reader) {
+                if !data
+                    .sessions
+                    .get(reader)
+                    .is_some_and(|h| !h.record.view.archived)
+                {
                     bail!("Reader session is unavailable.");
                 }
                 let target = args.to.trim();
-                let handle = if let Some(handle) = data.sessions.get(target) {
+                let handle = if let Some(handle) = data
+                    .sessions
+                    .get(target)
+                    .filter(|h| !h.record.view.archived)
+                {
                     handle
                 } else {
-                    let mut matches = data
-                        .sessions
-                        .values()
-                        .filter(|h| h.record.view.name.eq_ignore_ascii_case(target));
+                    let mut matches = data.sessions.values().filter(|h| {
+                        !h.record.view.archived && h.record.view.name.eq_ignore_ascii_case(target)
+                    });
                     let first = matches
                         .next()
                         .context("Unknown peer. Use list_agents for open session IDs and names.")?;
