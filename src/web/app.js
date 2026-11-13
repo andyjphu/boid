@@ -755,6 +755,126 @@ function updateContextVisibility(ui) {
   ui.contextLabel.style.visibility = ui.input.scrollTop > 0 || width >= available ? "hidden" : "visible";
 }
 
+function questionWaiting(question) {
+  return question.blocking && !question.answer && !question.wait_outcome && question.wait_until_ms > Date.now();
+}
+
+function createQuestions(ui) {
+  ui.questions = [];
+  ui.questionDrafts = new Map();
+  ui.questionsBox = element("div", "questions-box");
+  ui.questionsBox.hidden = true;
+  ui.questionsToggle = element("button", "questions-toggle");
+  ui.questionsToggle.type = "button";
+  ui.questionsToggle.setAttribute("aria-expanded", "false");
+  ui.questionPanel = element("div", "question-panel");
+  ui.questionPanel.id = `questions-${ui.id}`;
+  ui.questionsToggle.setAttribute("aria-controls", ui.questionPanel.id);
+  ui.questionPanel.hidden = true;
+  ui.questionSelect = element("select", "question-select");
+  ui.questionSelect.setAttribute("aria-label", "Choose a question");
+  ui.questionText = element("p", "question-text");
+  ui.questionText.id = `question-text-${ui.id}`;
+  ui.questionMeta = element("p", "question-meta");
+  ui.questionMeta.setAttribute("role", "status");
+  ui.questionForm = element("form", "question-form");
+  ui.questionInput = element("textarea", "question-reply");
+  ui.questionInput.rows = 2;
+  ui.questionInput.maxLength = 32000;
+  ui.questionInput.placeholder = "Reply…";
+  ui.questionInput.setAttribute("aria-label", "Answer this question");
+  ui.questionInput.setAttribute("aria-describedby", ui.questionText.id);
+  ui.questionSubmit = element("button", "question-submit", "Send reply");
+  ui.questionSubmit.type = "submit";
+  ui.questionError = element("p", "question-error");
+  ui.questionError.hidden = true;
+  ui.questionError.setAttribute("role", "alert");
+  ui.questionForm.append(ui.questionInput, ui.questionSubmit);
+  ui.questionPanel.append(ui.questionSelect, ui.questionText, ui.questionMeta, ui.questionForm, ui.questionError);
+  ui.questionsBox.append(ui.questionsToggle, ui.questionPanel);
+  ui.pane.append(ui.questionsBox);
+  ui.questionsToggle.onclick = () => {
+    ui.questionPanel.hidden = !ui.questionPanel.hidden;
+    ui.questionsToggle.setAttribute("aria-expanded", String(!ui.questionPanel.hidden));
+  };
+  ui.questionSelect.onchange = () => selectQuestion(ui, ui.questionSelect.value);
+  ui.questionInput.oninput = () => ui.questionDrafts.set(ui.questionId, ui.questionInput.value);
+  ui.questionInput.addEventListener("keydown", event => {
+    if (event.isComposing) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      ui.questionForm.requestSubmit();
+    }
+  });
+  ui.questionForm.onsubmit = async event => {
+    event.preventDefault();
+    const id = ui.questionId;
+    const text = ui.questionInput.value;
+    if (ui.questionSending || !id || !text.trim()) return;
+    ui.questionSending = true;
+    ui.questionSubmit.disabled = true;
+    ui.questionError.hidden = true;
+    try {
+      await request(`/api/sessions/${encodeURIComponent(ui.id)}/questions/${encodeURIComponent(id)}/answer`, "POST", { text });
+      ui.questionDrafts.delete(id);
+      // The SSE update can arrive before the HTTP response. Never remove a different question.
+      setQuestions(ui, ui.questions.filter(q => q.id !== id));
+    } catch (error) { showError(ui.questionError, error); }
+    finally { ui.questionSending = false; ui.questionSubmit.disabled = false; }
+  };
+}
+
+function selectQuestion(ui, id) {
+  if (ui.questionId && ui.questionId !== id) ui.questionDrafts.set(ui.questionId, ui.questionInput.value);
+  if (ui.questionId !== id) ui.questionInput.value = ui.questionDrafts.get(id) || "";
+  ui.questionId = id;
+  ui.questionSelect.value = id || "";
+  const question = ui.questions.find(q => q.id === id);
+  ui.questionText.textContent = question?.question || "";
+  ui.questionError.hidden = true;
+  updateQuestionAttention(ui);
+}
+
+function setQuestions(ui, questions) {
+  const previous = new Set(ui.questions.map(q => q.id));
+  ui.questions = (questions || []).filter(q => !q.answer);
+  ui.view.questions = ui.questions;
+  ui.questionsBox.hidden = !ui.questions.length;
+  const urgent = ui.questions.find(questionWaiting);
+  const freshUrgent = urgent && !previous.has(urgent.id);
+  const selected = ui.questions.find(q => q.id === ui.questionId);
+  const next = freshUrgent && !ui.questionInput.value ? urgent : selected || urgent || ui.questions[0];
+  ui.questionSelect.replaceChildren(...ui.questions.map(q => {
+    const option = element("option", "", `${q.blocking ? "! " : ""}${q.question.replace(/\s+/g, " ").slice(0, 100)}`);
+    option.value = q.id;
+    return option;
+  }));
+  ui.questionSelect.hidden = ui.questions.length < 2;
+  if (freshUrgent) ui.questionPanel.hidden = false;
+  selectQuestion(ui, next?.id);
+  if (!ui.questions.length) ui.questionPanel.hidden = true;
+  ui.questionsToggle.setAttribute("aria-expanded", String(!ui.questionPanel.hidden));
+  if (ui.activity) updateActivity(ui);
+}
+
+function updateQuestionAttention(ui) {
+  if (!ui.questionsBox) return;
+  const urgent = ui.questions.some(questionWaiting);
+  ui.pane.classList.toggle("needs-answer", urgent);
+  ui.questionsBox.classList.toggle("blocking", urgent);
+  const count = ui.questions.length;
+  ui.questionsToggle.textContent = `${urgent ? "⚠ Reply needed" : "Questions"} · ${count}`;
+  const question = ui.questions.find(q => q.id === ui.questionId);
+  if (!question) return;
+  if (questionWaiting(question)) {
+    const seconds = Math.ceil((question.wait_until_ms - Date.now()) / 1000);
+    const time = seconds >= 60 ? `${Math.ceil(seconds / 60)}m` : `${seconds}s`;
+    ui.questionMeta.textContent = `Waiting for reply · can continue in ${time}`;
+  } else {
+    ui.questionMeta.textContent = question.blocking ? "Wait ended · a reply is still welcome" : "Reply when convenient · work can continue";
+  }
+}
+
 function addSession(view) {
   const id = String(view.id);
   if (sessions.has(id)) return sessions.get(id);
@@ -764,6 +884,7 @@ function addSession(view) {
   ui.historyGeneration = 0;
   for (const message of view.communications || []) rememberCommunication(message);
   ui.id = id;
+  createQuestions(ui);
   enablePaneRename(ui, "agent");
   ui.entries = new Map();
   ui.toolPairs = new Map();
@@ -1033,6 +1154,7 @@ function addSession(view) {
     finally { ui.sending = false; ui.submission = null; }
   });
   sessions.set(id, ui);
+  setQuestions(ui, view.questions || []);
   updateContextUsage(ui);
   setStatus(ui, view.status);
   for (const [index, entry] of (view.entries || []).entries()) putEntry(ui, { ...entry, history_index: (view.history?.start || 0) + index });
@@ -1046,7 +1168,7 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : "Working";
+  ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : (ui.questions || []).some(questionWaiting) ? "Waiting for reply" : "Working";
   if (ui.interruptRequested) ui.pane.dataset.interruptRequested = "true";
   else delete ui.pane.dataset.interruptRequested;
   const hint = ui.interruptRequested || pickerOpen(ui) ? "" : "Esc to interrupt";
@@ -1722,6 +1844,7 @@ function snapshot(views, terminalViews = []) {
     // Reconcile after a reconnect even if the interrupt's status event was lost.
     if (!ui.interrupting) ui.interruptRequested = false;
     ui.view = view;
+    setQuestions(ui, view.questions || []);
     if (view.history) {
       if (selectedWithin(ui.trace)) ui.follow = false;
       const anchor = !ui.follow && ui.anchor?.node?.dataset.entryId;
@@ -1846,6 +1969,7 @@ function startEvents() {
         return;
       }
       if (!ui) return;
+      if (message.type === "questions") { setQuestions(ui, message.questions); return; }
       if (message.type === "name") { ui.setName(message.name); return; }
       if (message.type === "profile") { updateProfile(ui, message.profile, message.context_window); return; }
       if (message.type === "context_usage") {
@@ -2752,7 +2876,10 @@ document.querySelector("#subscription-selection").addEventListener("submit", asy
 });
 
 setInterval(() => {
-  for (const ui of sessions.values()) if (ui.view?.status === "working") updateActivity(ui);
+  for (const ui of sessions.values()) {
+    updateQuestionAttention(ui);
+    if (ui.view?.status === "working") updateActivity(ui);
+  }
 }, 1000);
 window.addEventListener("hashchange", initialize);
 initialize();

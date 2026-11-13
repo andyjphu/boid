@@ -137,6 +137,12 @@ impl SessionStore {
     }
 
     pub fn backup(&self, id: &str) -> Result<()> {
+        self.backup_named(id, "before-v9")
+    }
+    pub fn backup_before_questions(&self, id: &str) -> Result<()> {
+        self.backup_named(id, "before-prompt-user")
+    }
+    fn backup_named(&self, id: &str, suffix: &str) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
         };
@@ -147,7 +153,7 @@ impl SessionStore {
         if !source.exists() {
             return Ok(());
         }
-        let backup = directory.join(format!("{id}.before-v9"));
+        let backup = directory.join(format!("{id}.{suffix}"));
         if backup.exists() {
             return Ok(());
         }
