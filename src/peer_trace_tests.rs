@@ -62,9 +62,25 @@ async fn trace_reads_live_text_without_disk_access_peer_changes_or_events() {
     );
     std::fs::rename(path.with_extension("held"), &path).unwrap();
     hub.close(&peer.id).await.unwrap();
-    let ended = read(&hub, &reader, json!({"to":peer.id,"kind":"assistant"}));
-    assert_eq!(ended["peer"]["archived"], true);
-    assert_eq!(ended["entries"][0]["text"], "The newest received text 🐦");
+    assert!(
+        hub.read_peer_trace(
+            &reader.id,
+            &json!({"to":peer.id,"kind":"assistant"}).to_string()
+        )["error"]
+            .is_string()
+    );
+    assert!(hub.history_entry(&peer.id, &entry).is_err());
+    assert_eq!(
+        hub.ended_record(&peer.id)
+            .view
+            .entries
+            .iter()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .text
+            .as_str(),
+        "The newest received text 🐦"
+    );
     hub.shutdown().await;
 }
 

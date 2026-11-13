@@ -239,15 +239,19 @@ async fn first_login_without_key_and_corrupt_state_recovery() {
     let client = reqwest::Client::new();
     let token = std::fs::read_to_string(fixture.state().join("token")).unwrap();
     let endpoint = format!("http://{}", fixture.address);
-    let denied = client
+    let created = client
         .post(format!("{endpoint}/api/sessions"))
         .bearer_auth(&token)
         .json(&json!({"name":"canary","cwd":fixture.directory.path()}))
         .send()
         .await
         .unwrap();
-    assert!(!denied.status().is_success());
-    assert!(denied.text().await.unwrap().contains("/login"));
+    let created: Value = created.error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(created["profile"]["credential_id"], Value::Null);
+    assert_eq!(
+        fixture.get("/api/diagnostics").await["aggregate"]["recorded_requests"],
+        0
+    );
     let synthetic = "synthetic-login-key-no-provider-call";
     client
         .post(format!("{endpoint}/api/accounts/api-key"))

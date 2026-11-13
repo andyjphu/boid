@@ -226,7 +226,12 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
     let restored = Hub::open(Client::test_client(), restored_state.path().into()).unwrap();
     let view = restored.view(&target.id).unwrap();
     assert_eq!(
-        view.entries.iter().find(|e| e.id == entry).unwrap().text.as_str(),
+        view.entries
+            .iter()
+            .find(|e| e.id == entry)
+            .unwrap()
+            .text
+            .as_str(),
         "before before newer output"
     );
     restored.shutdown().await;
@@ -484,9 +489,14 @@ async fn saturated_storage_waits_without_faulting_or_blocking_the_roster() {
 async fn wait_for_writer_exit(hub: &Hub, id: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if !hub.0.data.lock().unwrap().sessions[id]
-                .persistence
-                .is_running()
+            if hub
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .get(id)
+                .is_none_or(|h| !h.persistence.is_running())
             {
                 return;
             }
@@ -516,9 +526,9 @@ async fn idle_and_archived_lanes_release_workers_and_restart_on_demand() {
     wait_for_writer_exit(&hub, &target.id).await;
     assert!(hub.close(&target.id).await.unwrap());
     wait_for_writer_exit(&hub, &target.id).await;
-    hub.reopen(&target.id).unwrap();
-    wait_for_writer_exit(&hub, &target.id).await;
-    assert_eq!(hub.view(&target.id).unwrap().name, "new-drain");
+    assert!(hub.reopen(&target.id).is_err());
+    assert!(hub.view(&target.id).is_none());
+    assert_eq!(hub.ended_record(&target.id).view.name, "new-drain");
     hub.shutdown().await;
 }
 

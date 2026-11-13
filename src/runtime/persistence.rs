@@ -157,6 +157,12 @@ impl Lane {
             inputs: VecDeque::new(),
         })
     }
+    pub(super) fn barrier(&self) -> Receipt {
+        Receipt {
+            revision: self.revision,
+            progress: self.progress.clone(),
+        }
+    }
     pub(super) fn capacity(&self) -> Capacity {
         Capacity(self.progress.clone())
     }

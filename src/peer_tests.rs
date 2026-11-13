@@ -219,8 +219,8 @@ async fn escape_storage_failure_stays_stopped_and_controls_follow_lifecycle() {
     assert_eq!(restored.view(&target.id).unwrap().status, "stopped");
     restored.close(&target.id).await.unwrap();
     assert!(restored.interrupt(&target.id).is_err());
-    restored.reopen(&target.id).unwrap();
-    restored.interrupt(&target.id).unwrap();
+    assert!(restored.reopen(&target.id).is_err());
+    assert!(restored.interrupt(&target.id).is_err());
     restored.shutdown().await;
     assert!(restored.interrupt(&target.id).is_err());
 }
@@ -277,20 +277,27 @@ async fn diagnostics_preserve_reports_failed_usage_and_unknown_attempts_across_r
     let (_, held) = next(&mut rx).await;
     hub.close(&target.id).await.unwrap();
     let diagnostics = hub.diagnostics();
-    assert_eq!(diagnostics["aggregate"]["request_attempts"], 3);
-    assert_eq!(diagnostics["aggregate"]["unrecorded_requests"], 1);
-    assert!(diagnostics["aggregate"]["estimated_cost_usd"].is_null());
-    assert_eq!(diagnostics["sessions"][0]["archived"], true);
+    assert!(diagnostics["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(diagnostics["aggregate"]["request_attempts"], 0);
+    let archived = hub.ended_record(&target.id);
+    assert_eq!(archived.engine.request_count(), 3);
+    assert_eq!(archived.usage.records.len(), 2);
     hub.shutdown().await;
     drop(hub);
     drop(held);
     server.abort();
     let (restored, _, server) = fixture(Some(state.path().into())).await;
     let diagnostics = restored.diagnostics();
-    assert_eq!(diagnostics["aggregate"]["recorded_requests"], 2);
-    assert_eq!(diagnostics["aggregate"]["unrecorded_requests"], 1);
-    assert_eq!(diagnostics["latest_response"]["usage"], usage);
-    assert_eq!(diagnostics["sessions"][0]["archived"], true);
+    assert!(diagnostics["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(diagnostics["aggregate"]["recorded_requests"], 0);
+    let archived = restored.ended_record(&target.id);
+    let summary = crate::usage::summarize([(
+        &archived.usage,
+        archived.engine.request_count(),
+        archived.engine.request_in_flight(),
+    )]);
+    assert_eq!(summary["recorded_requests"], 2);
+    assert_eq!(summary["unrecorded_requests"], 1);
     restored.shutdown().await;
     server.abort();
 }
@@ -376,21 +383,18 @@ async fn paused_or_closed_inbox_ends_step_without_error_or_state_change() {
         if archived {
             hub.close(&target.id).await.unwrap();
         }
-        let mut session = hub.0.data.lock().unwrap().sessions[&target.id]
-            .record
-            .engine
-            .clone();
+        let mut session = hub.ended_record(&target.id).engine;
         let before = serde_json::to_value(&session).unwrap();
-        let view_before = serde_json::to_value(hub.view(&target.id).unwrap()).unwrap();
-        assert!(
-            !session
-                .step(&hub.0.client, &tools, &hub, &target.id)
-                .await
-                .unwrap()
-        );
+        let view_before = serde_json::to_value(hub.ended_record(&target.id).view).unwrap();
+        let step = session.step(&hub.0.client, &tools, &hub, &target.id).await;
+        if archived {
+            assert!(step.is_err(), "ended agents have no live execution context");
+        } else {
+            assert!(!step.unwrap());
+        }
         assert_eq!(serde_json::to_value(&session).unwrap(), before);
         assert_eq!(
-            serde_json::to_value(hub.view(&target.id).unwrap()).unwrap(),
+            serde_json::to_value(hub.ended_record(&target.id).view).unwrap(),
             view_before
         );
         assert!(rx.try_recv().is_err());
@@ -671,16 +675,13 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
         && entry.text.contains(receipt["message_id"].as_str().unwrap())));
     assert!(restored.close(&target.id).await.unwrap());
     assert_eq!(
-        restored.view(&sender.id).unwrap().communications[0].state,
+        restored.ended_record(&target.id).messages[0].state,
         "cancelled"
     );
-    restored.reopen(&target.id).unwrap();
-    assert!(
-        restored.0.data.lock().unwrap().sessions[&target.id]
-            .record
-            .inbox
-            .is_empty()
-    );
+    assert!(restored.reopen(&target.id).is_err());
+    assert!(restored.ended_record(&target.id).inbox.is_empty());
+    let target = agent(&restored, work.path(), "new-receiver", "");
+    restored.stop(&target.id).unwrap();
     for i in 0..64 {
         restored
             .send_communication(

@@ -179,6 +179,12 @@ impl Session {
             }
         }
     }
+    pub fn recovering_send_call(&self) -> Option<&str> {
+        self.running
+            .as_ref()
+            .filter(|call| call.name == "send_message")
+            .map(|call| call.id.as_str())
+    }
     pub fn recover_sends(
         &mut self,
         sender: &str,
@@ -395,7 +401,7 @@ impl Session {
                     self.model_requests,
                     &json!({"type":"response.completed","response":result}),
                 ) {
-                    hub.record_usage(id, report);
+                    hub.record_usage(id, report, &self.profile);
                 }
                 // The whole returned window is canonical, including retained messages.
                 self.history = result["output"].as_array().unwrap().clone().into();
@@ -417,6 +423,13 @@ impl Session {
         hub.checkpoint_entries(id, self, vec![(kind.into(), notice)])?;
         Ok(resume)
     }
+    fn refresh_request_profile(&mut self, hub: &Hub, id: &str) -> Result<()> {
+        self.profile = hub.profile(id)?;
+        if let Some(model) = self.profile["model"].as_str() {
+            self.model = model.to_owned();
+        }
+        Ok(())
+    }
     // Returns whether another step is needed. Queued input is applied before
     // the next model request, after this response's tool calls have finished.
     pub async fn step(
@@ -427,20 +440,24 @@ impl Session {
         id: &str,
     ) -> Result<bool> {
         self.ensure_peer_trace_tool();
-        // /login and /model may update an idle agent while its worker waits.
-        self.profile = hub.profile(id)?;
-        if let Some(model) = self.profile["model"].as_str() {
-            self.model = model.to_owned();
-        }
         if self.compact_requested && self.pending.is_empty() {
+            self.refresh_request_profile(hub, id)?;
             return self.compact(client, hub, id).await;
         }
         let Some(call) = self.pending.pop_front() else {
             self.model_requests += 1;
-            if !hub.apply_inbox(id, self)? {
-                self.model_requests -= 1;
-                return Ok(false);
+            match hub.apply_inbox(id, self) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.model_requests -= 1;
+                    return Ok(false);
+                }
+                Err(error) => {
+                    self.model_requests -= 1;
+                    return Err(error);
+                }
             }
+            self.refresh_request_profile(hub, id)?;
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
             // Read current metadata at each request; worker checkpoints never overwrite names.
@@ -469,7 +486,7 @@ impl Session {
                             hub.record_request_failure(id, failure);
                         }
                         if let Some(report) = crate::usage::Report::from_event(attempt, event) {
-                            hub.record_usage(id, report);
+                            hub.record_usage(id, report, &self.profile);
                         }
                         let event_type = event["type"].as_str().unwrap_or("");
                         if matches!(event_type, "response.completed" | "response.incomplete") {

@@ -82,6 +82,7 @@ impl Fixture {
             })).with_state(provider.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let mut auth = Auth::open(dir.path().join("auth"), "api_key", "api-model").unwrap();
+        auth.migrate_credentials("fixture-api-key").unwrap();
         auth.issuer = origin.clone();
         auth.api = origin;
         Self {
@@ -319,6 +320,85 @@ async fn permission_loss_pause_and_logout_fail_closed_without_switching_billing(
     assert_eq!(store.selected.as_deref(), Some(id.as_str()));
 }
 
+#[tokio::test]
+async fn deleted_subscription_finishes_bound_retries_without_restoring_credential() {
+    let f = Fixture::new().await;
+    let id = f.login().await;
+    f.auth.select("chatgpt", Some(&id), "first").await.unwrap();
+    *f.provider.failure.lock().unwrap() = "transient-once".into();
+    let mut client = crate::api::Client::test_client_at(format!("{}/responses", f.provider.origin));
+    client.auth = Some(f.auth.clone());
+    let profile = client.config();
+    let auth = f.auth.clone();
+    let seen = f.provider.requests.clone();
+    let remove = tokio::spawn(async move {
+        while seen.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        auth.delete_credential(&id).await.unwrap();
+    });
+    client
+        .respond_with(
+            &[] as &[Value],
+            json!([]),
+            "first",
+            "fixture",
+            &profile,
+            |_| {},
+        )
+        .await
+        .unwrap();
+    remove.await.unwrap();
+    assert_eq!(f.provider.requests.lock().unwrap().len(), 3);
+    assert!(
+        !f.auth
+            .account_exists(profile["credential_id"].as_str().unwrap())
+            .unwrap()
+    );
+    assert!(
+        client
+            .respond_with(
+                &[] as &[Value],
+                json!([]),
+                "first",
+                "fixture",
+                &profile,
+                |_| {}
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(f.provider.requests.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn oauth_retry_waiting_for_credential_lock_observes_atomic_deletion() {
+    let f = Fixture::new().await;
+    let id = f.login().await;
+    let locked = f.auth.lock().await.unwrap();
+    let auth = f.auth.clone();
+    let retry_id = id.clone();
+    let retry = tokio::spawn(async move { auth.inference_token(&retry_id, true).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !retry.is_finished(),
+        "Retry waits for the credential transaction"
+    );
+    let mut store = f.auth.load().unwrap();
+    store.accounts.remove(&id);
+    f.auth.save(&store).unwrap();
+    drop(locked);
+    assert!(
+        retry.await.unwrap().unwrap().is_none(),
+        "Deleted account retains the caller's captured bearer for this retry"
+    );
+    assert!(
+        f.auth.inference_token(&id, false).await.is_err(),
+        "A new request cannot use the removed account"
+    );
+    assert_eq!(f.provider.refreshes.load(Ordering::SeqCst), 0);
+}
+
 async fn inference(
     State(p): State<Provider>,
     headers: HeaderMap,
@@ -402,13 +482,17 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
         })
         .unwrap();
     hub.entry(&view.id, "notice", "Prior transcript remains");
-    let mut selected = view.profile.clone();
-    selected["billing_route"] = json!("chatgpt");
-    selected["chatgpt_account"] = json!(id);
-    selected["model"] = json!("second");
-    selected["cyber_access_program"] = Value::Null;
-    hub.select_profile(&view.id, &view.profile, selected.clone())
+    let mut model_selection = view.profile.clone();
+    model_selection["model"] = json!("second");
+    hub.select_profile(&view.id, &view.profile, model_selection)
         .unwrap();
+    hub.assign_group_credential(
+        view.profile["pane_group_id"].as_str().unwrap(),
+        Some(&id),
+        hub.pane_groups()["revision"].as_u64().unwrap(),
+    )
+    .unwrap();
+    let selected = hub.profile(&view.id).unwrap();
     assert!(
         hub.select_profile(&view.id, &view.profile, selected.clone())
             .is_err(),

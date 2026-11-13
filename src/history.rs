@@ -158,13 +158,17 @@ impl Hub {
             let source = &data
                 .sessions
                 .get(id)
-                .context("Unknown session.")?
+                .filter(|h| !h.record.view.archived)
+                .context("Unknown or archived session.")?
                 .record
                 .view;
             Self::history_view(&data, source, before, after, around)
         })
     }
     pub fn history_list(&self, archived: bool) -> Vec<Value> {
+        if archived {
+            return vec![];
+        }
         crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
             data.sessions
@@ -183,7 +187,8 @@ impl Hub {
             let source = &data
                 .sessions
                 .get(id)
-                .context("Unknown session.")?
+                .filter(|h| !h.record.view.archived)
+                .context("Unknown or archived session.")?
                 .record
                 .view;
             let index = source

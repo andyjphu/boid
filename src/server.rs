@@ -30,6 +30,9 @@ use std::{
 use tokio::sync::{Notify, broadcast};
 use uuid::Uuid;
 
+#[path = "credential_routes.rs"]
+mod credential_routes;
+
 #[derive(Clone)]
 struct App {
     hub: Hub,
@@ -117,6 +120,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         browser_auth: browser_auth.clone(),
     };
     let protected = Router::new()
+        .merge(credential_routes::routes())
         .route("/api/login", post(login))
         .route("/api/server", get(server_info))
         .route("/api/shutdown", post(shutdown_server))
@@ -383,6 +387,7 @@ async fn history(
 }
 #[derive(Default, Deserialize)]
 struct EventsQuery {
+    group_id: Option<String>,
     history: Option<String>,
     screen: Option<u32>,
 }
@@ -398,11 +403,14 @@ async fn create(
     Query(query): Query<EventsQuery>,
     Json(input): Json<Create>,
 ) -> ApiResult<Json<Value>> {
-    tokio::task::spawn_blocking(move || app.hub.create_on_screen(input, query.screen.unwrap_or(1)))
-        .await
-        .map_err(invalid)?
-        .map(|view| Json(json!(view)))
-        .map_err(invalid)
+    tokio::task::spawn_blocking(move || {
+        app.hub
+            .create_in_group(input, query.screen.unwrap_or(1), query.group_id.as_deref())
+    })
+    .await
+    .map_err(invalid)?
+    .map(|view| Json(json!(view)))
+    .map_err(invalid)
 }
 async fn close_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let persisted = app.hub.close(&id).await.map_err(invalid)?;
@@ -632,6 +640,7 @@ struct AccountSelection {
     session_id: Option<String>,
     billing_route: String,
     account: Option<String>,
+    credential_id: Option<String>,
     #[serde(default)]
     model: String,
 }
@@ -639,74 +648,48 @@ async fn account_select(
     State(app): State<App>,
     Json(input): Json<AccountSelection>,
 ) -> ApiResult<Json<Value>> {
-    if input.billing_route == "api_key"
-        && !app.api_key_available
-        && auth(&app)?.api_key().map_err(invalid)?.is_none()
-    {
-        return Err(invalid("Use /login to enter an API key."));
+    let auth = auth(&app)?;
+    let selected = auth.profile().map_err(invalid)?;
+    let credential = input
+        .credential_id
+        .as_deref()
+        .or(input.account.as_deref())
+        .or_else(|| selected["credential_id"].as_str())
+        .ok_or_else(|| invalid("Choose a saved credential in the lock view."))?;
+    if auth.credential_type(credential).map_err(invalid)? != input.billing_route {
+        return Err(invalid(
+            "Choose a saved credential matching this billing route.",
+        ));
     }
-    let current = match &input.session_id {
-        Some(id) => app.hub.profile(id).map_err(invalid)?,
-        None => app.hub.config(),
-    };
-    let mut profile = current.clone();
-    match input.billing_route.as_str() {
-        "api_key" => {
-            profile["billing_route"] = json!("api_key");
-            profile["chatgpt_account"] = Value::Null;
-            profile["cyber_access_program"] = app.hub.api_profile()["cyber_access_program"].clone();
+    let profile = if let Some(id) = &input.session_id {
+        let current = app.hub.profile(id).map_err(invalid)?;
+        if !input.model.is_empty() && current["model"] != input.model {
+            return Err(invalid(
+                "Choose the model separately; credential assignment preserves each agent's model.",
+            ));
         }
-        "chatgpt" => {
-            let account = input
-                .account
-                .as_deref()
-                .ok_or_else(|| invalid("Choose a ChatGPT account."))?;
-            auth(&app)?.check_inference(account).map_err(invalid)?;
-            let models = auth(&app)?.models(account).await.map_err(invalid)?;
-            let preferred = if input.model.is_empty() {
-                current["model"].as_str().unwrap_or("")
-            } else {
-                &input.model
-            };
-            let model = models
-                .iter()
-                .find(|m| m["slug"] == preferred)
-                .or_else(|| models.first())
-                .and_then(|m| m["slug"].as_str())
-                .ok_or_else(|| invalid("This account has no available models."))?;
-            profile["billing_route"] = json!("chatgpt");
-            profile["chatgpt_account"] = json!(account);
-            profile["model"] = json!(model);
-            profile["cyber_access_program"] = Value::Null;
-        }
-        _ => return Err(invalid("Unknown billing route.")),
-    }
-    let welcome = if let Some(id) = &input.session_id {
+        let group = current["pane_group_id"]
+            .as_str()
+            .ok_or_else(|| invalid("Agent has no pane group."))?;
+        let revision = app.hub.pane_groups()["revision"].as_u64().unwrap();
         app.hub
-            .select_profile(id, &current, profile.clone())
+            .assign_group_credential(group, Some(credential), revision)
             .map_err(invalid)?;
-        if input.billing_route == "chatgpt" {
-            auth(&app)?
-                .welcome(input.account.as_deref().unwrap())
-                .await
-                .map_err(invalid)?
-        } else {
-            false
-        }
+        app.hub.profile(id).map_err(invalid)?
     } else {
-        auth(&app)?
-            .select(
-                &input.billing_route,
-                input.account.as_deref(),
-                profile["model"].as_str().unwrap_or(""),
-            )
+        auth.select_credential_default(credential)
             .await
-            .map_err(invalid)?
+            .map_err(invalid)?;
+        app.hub.config()
     };
+    app.hub
+        .broadcast_credentials(auth.credentials().map_err(invalid)?);
     Ok(Json(
-        json!({"session_id":input.session_id,"profile":profile,"context_window":crate::api::context_window(profile["model"].as_str().unwrap_or("")),"welcome":welcome}),
+        json!({"session_id":input.session_id,"profile":profile,
+        "context_window":crate::api::context_window(profile["model"].as_str().unwrap_or("")),"welcome":false}),
     ))
 }
+
 async fn available_models(app: &App, profile: &Value) -> anyhow::Result<Vec<Value>> {
     if profile["billing_route"] == "chatgpt" {
         let account = profile["chatgpt_account"]
@@ -767,6 +750,8 @@ async fn account_api_key(
         .save_api_key(&input.key)
         .await
         .map_err(invalid)?;
+    app.hub
+        .broadcast_credentials(auth(&app)?.credentials().map_err(invalid)?);
     Ok(Json(json!({"ok":true})))
 }
 async fn account_models(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -776,13 +761,17 @@ async fn account_models(State(app): State<App>, Path(id): Path<String>) -> ApiRe
 }
 async fn account_resume(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     auth(&app)?.pause(&id, false).await.map_err(invalid)?;
+    app.hub
+        .broadcast_credentials(auth(&app)?.credentials().map_err(invalid)?);
     Ok(Json(json!({"ok":true})))
 }
 async fn account_logout(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    app.hub.stop_account(&id).map_err(invalid)?;
-    let confirmed = auth(&app)?.logout(&id).await.map_err(invalid)?;
+    auth(&app)?.delete_credential(&id).await.map_err(invalid)?;
+    app.hub.credential_deleted(&id).map_err(invalid)?;
+    app.hub
+        .broadcast_credentials(auth(&app)?.credentials().map_err(invalid)?);
     Ok(Json(
-        json!({"revocation_confirmed":confirmed,"message":if confirmed {"Signed out."} else {"Signed out locally; remote revocation was not confirmed. Disconnect Boid in ChatGPT Settings."}}),
+        json!({"revocation_confirmed":false,"message":"Credential removed locally. Current requests may finish; affected panes are unassigned."}),
     ))
 }
 async fn auth_start(
@@ -802,6 +791,11 @@ async fn auth_callback(
         Ok(auth) => auth.complete(&query).await,
         Err(_) => Err(anyhow::anyhow!("Authentication unavailable.")),
     };
+    if result.is_ok() {
+        if let Ok(registry) = auth(&app).and_then(|auth| auth.credentials().map_err(invalid)) {
+            app.hub.broadcast_credentials(registry);
+        }
+    }
     let (status, text) = match result {
         Ok(()) => (
             StatusCode::OK,

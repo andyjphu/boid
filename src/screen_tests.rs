@@ -10,7 +10,12 @@ async fn screen_membership_filters_streams_and_survives_restart_without_changing
         message: String::new(),
     };
     let first = hub.create(input()).unwrap();
-    assert_eq!(hub.screens(), json!({"revision":0,"count":1,"panes":{}}));
+    assert_eq!(hub.screens()["count"], 1);
+    assert_eq!(hub.screens()["panes"], json!({}));
+    assert_eq!(
+        hub.pane_groups()["groups"][0]["id"],
+        format!("agent:{}", first.id)
+    );
     assert_eq!(hub.add_screen().unwrap()["count"], 2);
     let (_, mut events) = hub.subscribe();
     let second = hub.create_on_screen(input(), 2).unwrap();
