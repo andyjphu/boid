@@ -75,6 +75,11 @@ body.disconnected .workspace-actions,
 .pane-resize-vertical::after { left: 3px; top: 0; bottom: 0; width: 1px; }
 .pane-resize-horizontal::after { top: 3px; left: 0; right: 0; height: 1px; }
 .pane-resize:hover::after, .pane-resize:focus-visible::after { background: #8bafd0; }
+.pane-resize-corner { z-index: 1; cursor: all-scroll; }
+.pane-resize-corner::before { content: ""; position: absolute; pointer-events: none; left: 4px; top: 0; width: 1px; height: 10px; }
+.pane-resize-corner::after { left: 0; top: 4px; width: 10px; height: 1px; }
+.pane-resize-corner:hover::before, .pane-resize-corner:focus-visible::before,
+.pane-resize-corner.dragging::before, .pane-resize-corner.dragging::after { background: #8bafd0; }
 body.resizing-panes, body.resizing-panes * { cursor: var(--resize-cursor) !important; user-select: none !important; }
 .pane-header {
   display: flex;
