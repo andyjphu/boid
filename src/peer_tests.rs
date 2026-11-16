@@ -164,12 +164,12 @@ async fn escape_cancels_running_work_before_storage_lock_and_preserves_followup(
     release.send(json!([])).unwrap();
     wait_status(&hub, &target.id, "idle").await;
     hub.interrupt(&target.id).unwrap();
-    wait_status(&hub, &target.id, "stopped").await;
+    wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
     drop(hub);
     server.abort();
     let restored = Hub::open(Client::test_client(), state.path().into()).unwrap();
-    assert_eq!(restored.view(&target.id).unwrap().status, "stopped");
+    assert_eq!(restored.view(&target.id).unwrap().status, "idle");
     assert!(restored.view(&target.id).unwrap().pending.is_empty());
     restored.shutdown().await;
     eprintln!(
@@ -988,7 +988,7 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
     hub.stop(&stopped.id).unwrap();
     wait_status(&hub, &stopped.id, "stopped").await;
     hub.interrupt(&interrupted.id).unwrap();
-    wait_status(&hub, &interrupted.id, "stopped").await;
+    wait_status(&hub, &interrupted.id, "idle").await;
     hub.entry(
         &recovered.id,
         "notice",
@@ -1012,7 +1012,8 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
     }
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
     assert_eq!(hub.view(&ready.id).unwrap().status, "idle");
-    for view in [&stopped, &interrupted, &recovered, &failed] {
+    assert_eq!(hub.view(&interrupted.id).unwrap().status, "idle");
+    for view in [&stopped, &recovered, &failed] {
         assert_eq!(
             hub.view(&view.id).unwrap().status,
             "stopped",
@@ -1042,6 +1043,50 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
     );
     release.send(json!([])).unwrap();
     wait_status(&hub, &ready.id, "idle").await;
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let target = agent(&hub, work.path(), "recipient", "Start work");
+    let (_, _inflight) = next(&mut rx).await;
+    hub.interrupt(&target.id).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+    let sender = agent(&hub, work.path(), "sender", "");
+    assert_eq!(send(&hub, &sender, &target, "New peer task", Urgency::Regular, "after-escape")["blocked"], false);
+    let (request, release) = next(&mut rx).await;
+    assert!(request["input"].to_string().contains("New peer task"));
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    hub.interrupt(&target.id).unwrap();
+    // Await the notice, since status was already idle before Escape.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hub.view(&target.id).unwrap().entries.iter().filter(|e| e.text.starts_with("Execution interrupted.")).count() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let path = state.path().join("sessions").join(format!("{}.json", target.id));
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["paused"] = json!(true);
+    record["listen_on_restart"] = json!(false);
+    record["view"]["status"] = json!("stopped");
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
+    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+    assert_eq!(send(&hub, &sender, &target, "Contact after migration", Urgency::Regular, "migrated")["blocked"], false);
+    let (request, release) = next(&mut rx).await;
+    assert!(request["input"].to_string().contains("Contact after migration"));
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
     server.abort();
 }

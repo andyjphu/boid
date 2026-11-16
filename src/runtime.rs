@@ -173,12 +173,33 @@ struct Record {
     stream_seq: u64,
 }
 impl Record {
+    fn escape_boundary(&self) -> bool {
+        if self.stop_through > 0 && self.order == self.stop_through {
+            return false;
+        }
+        for entry in self.view.entries.iter().rev() {
+            match entry.kind.as_str() {
+                "notice" if entry.text.starts_with("Execution interrupted.") => return true,
+                "error" | "user" | "assistant" => return false,
+                "context" if entry.text.as_str() == "Stop the current task. Wait for new user direction." => return false,
+                "notice" if entry.text.starts_with("The model request was interrupted;")
+                    || entry.text.starts_with("Compaction interrupted;") => return false,
+                _ => (),
+            }
+        }
+        false
+    }
     fn restart_listening(&self) -> bool {
         if self.view.archived
             || matches!(self.view.status.as_str(), "working" | "error" | "ending")
             || !self.inputs.is_empty()
         {
             return false;
+        }
+        // Older releases made Escape a persistent peer hold. Migrate only a
+        // confirmed Escape boundary, never an explicit Stop or error/recovery.
+        if self.escape_boundary() {
+            return true;
         }
         if let Some(listen) = self.listen_on_restart {
             return listen;
@@ -2609,20 +2630,24 @@ impl Hub {
                         let mut recovery = session.recover_questions(&mut r.view.questions);
                         recovery.extend(session.recover());
                         r.engine = session.clone();
-                        r.paused = r.view.archived
-                            || r.inputs.iter().all(|input| input.order <= r.stop_through);
+                        // Escape cancels the current turn, not peer availability.
+                        // Preserve a separate explicit Stop/error hold if present.
                         r.listen_on_restart = Some(!r.paused);
                         for (kind, text) in recovery {
                             r.view.entries.push(Self::make_entry(&kind, text));
                         }
                         if !r.view.archived {
-                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Queued input will be applied next; completed results retained.".into()));
-                            r.view.status = "stopped".into();
+                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Completed results retained.".into()));
+                            r.view.status = if r.paused { "stopped" } else { "idle" }.into();
                         }
                         Ok(())
                     }) {
                         self.fault(&id, error);
                         break;
+                    }
+                    active = self.peers_ready(&id);
+                    if active {
+                        self.status(&id, "working");
                     }
                 }
                 Next::Stop => {
