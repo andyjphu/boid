@@ -190,6 +190,9 @@ impl SessionStore {
     pub fn backup_before_questions(&self, id: &str) -> Result<()> {
         self.backup_named(id, "before-prompt-user")
     }
+    pub fn backup_before_diagnostics_suspension(&self, id: &str) -> Result<()> {
+        self.backup_named(id, "before-diagnostics-suspension")
+    }
     fn backup_named(&self, id: &str, suffix: &str) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
@@ -203,10 +206,22 @@ impl SessionStore {
         }
         let backup = directory.join(format!("{id}.{suffix}"));
         if backup.exists() {
+            if suffix == "before-diagnostics-suspension"
+                && archive::digest(&backup)? != archive::digest(&source)?
+            {
+                bail!("Diagnostics preservation backup differs; original retained: {}", source.display());
+            }
             return Ok(());
         }
         let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-        temporary.write_all(&fs::read(source)?)?;
+        // Bounded copying: a large legacy diagnostics payload must not create
+        // another full-file allocation during recovery.
+        std::io::copy(&mut File::open(&source)?, &mut temporary)?;
+        if suffix == "before-diagnostics-suspension"
+            && archive::digest(temporary.path())? != archive::digest(&source)?
+        {
+            bail!("Diagnostics preservation verification failed; original retained");
+        }
         temporary.as_file().sync_all()?;
         temporary.persist_noclobber(&backup).map_err(|e| e.error)?;
         File::open(directory)?.sync_all()?;

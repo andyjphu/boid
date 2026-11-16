@@ -150,18 +150,28 @@ impl Hub {
         }
         store.archive_session(id, summary)
     }
+    fn read_active_without_diagnostics(store: &SessionStore, id: &str) -> Result<Record> {
+        // Serde skips the legacy ledger without allocating its reports. Preserve
+        // the exact old file before startup can write a ledger-free checkpoint.
+        let mut record: Record = store.read_session(id)?;
+        if matches!(record.version, 1 | 2 | 3 | 4 | 5) {
+            store.backup_before_diagnostics_suspension(id)?;
+            record.version = 6;
+        }
+        Ok(record)
+    }
     pub(super) fn load_catalog(store: &SessionStore) -> Result<Vec<Record>> {
         let mut records = vec![];
         for id in store.session_ids()? {
             if store.session_status(&id)? != "archived" {
-                records.push(store.read_session(&id)?);
+                records.push(Self::read_active_without_diagnostics(store, &id)?);
                 continue;
             }
             let probe: ArchiveProbe = store.read_session(&id)?;
             if probe.view.id != id {
                 bail!("Session identity differs from filename; original retained");
             }
-            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5) {
+            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     probe.version
@@ -170,7 +180,7 @@ impl Hub {
             if probe.view.archived {
                 Self::preserve_archive(store, &id, &probe.summary())?;
             } else {
-                records.push(store.read_session(&id)?);
+                records.push(Self::read_active_without_diagnostics(store, &id)?);
             }
         }
         Ok(records)
@@ -283,7 +293,7 @@ mod tests {
         assert!(
             hub.history(&target.id, None, None, None).is_err() && hub.reopen(&target.id).is_err()
         );
-        assert_eq!(hub.diagnostics()["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(hub.0.data.lock().unwrap().sessions.len(), 1);
         assert!(
             hub.ended_record(&target.id)
                 .view
@@ -421,7 +431,7 @@ mod tests {
         let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
         assert!(
             hub.archived_views().is_empty()
-                && hub.diagnostics()["sessions"].as_array().unwrap().is_empty()
+                && hub.0.data.lock().unwrap().sessions.is_empty()
         );
         hub.shutdown().await;
     }

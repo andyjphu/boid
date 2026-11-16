@@ -23,6 +23,8 @@ use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
 mod draft_tests;
 #[cfg(test)]
+mod diagnostics_suspension_tests;
+#[cfg(test)]
 mod image_tests;
 #[cfg(test)]
 mod persistence_tests;
@@ -158,7 +160,8 @@ struct Record {
     version: u32,
     view: View,
     engine: Session,
-    #[serde(default)]
+    // Diagnostics are suspended. Legacy bytes are backed up before migration.
+    #[serde(skip)]
     usage: crate::usage::Ledger,
     inputs: VecDeque<Input>,
     inbox: VecDeque<Peer>,
@@ -478,7 +481,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -760,74 +763,9 @@ impl Hub {
                 .map(|h| Self::project_view(&data, &h.record.view))
         })
     }
-    pub fn record_usage(
-        &self,
-        id: &str,
-        mut report: crate::usage::Report,
-        request_profile: &Value,
-    ) {
-        report.billing_route = request_profile["billing_route"]
-            .as_str()
-            .unwrap_or("api_key")
-            .into();
-        if let Err(error) = self.update(id, |record| {
-            record.usage.record(report);
-            Ok(())
-        }) {
-            self.persistence_fault(id, error);
-        }
-    }
-    pub fn record_request_failure(&self, id: &str, failure: crate::usage::RequestFailure) {
-        if let Err(error) = self.update(id, |record| {
-            record.usage.failures.push(failure);
-            Ok(())
-        }) {
-            self.persistence_fault(id, error);
-        }
-    }
     pub fn diagnostics(&self) -> Value {
-        crate::blocking::run(|| {
-            // Clone only accounting and display metadata. Price calculation does not hold the catalog lock.
-            let records: Vec<_> = {
-                let data = self.0.data.lock().unwrap();
-                data.sessions
-                    .values()
-                    .filter(|handle| !handle.record.view.archived)
-                    .map(|handle| {
-                        let r = &handle.record;
-                        (
-                            r.view.id.clone(),
-                            r.view.name.clone(),
-                            r.view.archived,
-                            r.view.status.clone(),
-                            r.usage.clone(),
-                            r.engine.request_count(),
-                            r.engine.request_in_flight(),
-                            r.engine.context_usage.clone(),
-                            crate::api::context_window(&r.engine.model),
-                        )
-                    })
-                    .collect()
-            };
-            let aggregate = crate::usage::summarize(records.iter().map(|r| (&r.4, r.5, r.6)));
-            let mut latest = None;
-            let sessions: Vec<_> = records.iter().map(|r| {
-            let response = r.4.records.iter().max_by_key(|report| report.observed_at_ms);
-            if let Some(report) = response {
-                if latest.as_ref().is_none_or(|(time, _)| *time <= report.observed_at_ms) {
-                    latest = Some((report.observed_at_ms, report.view(&r.0, &r.1)));
-                }
-            }
-            json!({"id":r.0,"name":r.1,"archived":r.2,"status":r.3,
-                "summary":crate::usage::summarize([(&r.4,r.5,r.6)]),
-                "latest_response":response.map(|report|report.view(&r.0,&r.1)),
-                "request_failure_count":r.4.failures.len(),"latest_request_failure":r.4.failures.last(),
-                "latest_context":r.7.as_ref().map(|context|json!({"input_tokens":context.input_tokens,
-                    "output_tokens":context.output_tokens,"context_window":r.8}))})
-        }).collect();
-            json!({"schema_version":1,"pricing":crate::usage::pricing(),"aggregate":aggregate,
-            "sessions":sessions,"latest_response":latest.map(|(_,response)|response)})
-        })
+        // No roster lock, aggregation, or saved-report access while suspended.
+        json!({"schema_version":1,"enabled":false,"status":"suspended","sessions":[]})
     }
     #[cfg(test)]
     pub fn subscribe(&self) -> (Value, broadcast::Receiver<Value>) {
@@ -1540,10 +1478,10 @@ impl Hub {
                 archived: false,
             };
             let mut record = Record {
-                version: 3,
+                version: 6,
                 view,
                 engine,
-                usage: crate::usage::Ledger::new(),
+                usage: crate::usage::Ledger::default(),
                 inputs: VecDeque::new(),
                 inbox: VecDeque::new(),
                 messages: vec![],
@@ -3312,7 +3250,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["version"], 3);
+        assert_eq!(saved["version"], 6);
         assert!(saved["engine"].get("skills").is_none());
         let snapshot_id = record.engine.skill_snapshot.as_ref().unwrap();
         assert_eq!(saved["engine"]["skill_snapshot"], snapshot_id.as_str());

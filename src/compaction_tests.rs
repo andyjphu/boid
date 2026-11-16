@@ -250,14 +250,7 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     )
     .unwrap();
     assert_eq!(archive["engine"]["history"], before["history"]);
-    assert_eq!(
-        hub.0.data.lock().unwrap().sessions[&view.id]
-            .record
-            .usage
-            .records
-            .len(),
-        1
-    );
+    assert!(hub.0.data.lock().unwrap().sessions[&view.id].record.usage.records.is_empty());
     hub.shutdown().await;
     drop(hub);
     let hub = Hub::open(

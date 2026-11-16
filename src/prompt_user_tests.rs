@@ -451,14 +451,8 @@ async fn crash_between_question_commit_and_tool_result_recovers_receipt_without_
     .unwrap();
     let record: Value = serde_json::from_slice(&crash_record).unwrap();
     assert_eq!(record["engine"]["running"]["id"], "crash");
-    assert_eq!(record["version"], 4);
-    assert!(
-        state
-            .path()
-            .join("sessions")
-            .join(format!("{}.before-prompt-user", a.id))
-            .exists()
-    );
+    assert_eq!(record["version"], 6);
+    // Fresh version6 records already contain the supported question schema.
     hub.shutdown().await;
     drop(hub);
     server.abort();

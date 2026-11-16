@@ -476,12 +476,6 @@ impl Session {
         self.compact_in_flight = false;
         let (kind, notice) = match result {
             Ok(result) => {
-                if let Some(report) = crate::usage::Report::from_event(
-                    self.model_requests,
-                    &json!({"type":"response.completed","response":result}),
-                ) {
-                    hub.record_usage(id, report, &self.profile);
-                }
                 // The whole returned window is canonical, including retained messages.
                 self.history = result["output"].as_array().unwrap().clone().into();
                 self.context_usage = None;
@@ -550,7 +544,6 @@ impl Session {
             let input = materialized.as_deref().unwrap_or(&self.history);
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
-            let attempt = self.model_requests;
             let partial = &mut self.partial_text;
             let context_usage = &mut self.context_usage;
             let output = client
@@ -561,14 +554,6 @@ impl Session {
                     &instructions,
                     &self.profile,
                     |event| {
-                        if let Some(failure) =
-                            crate::usage::RequestFailure::from_event(attempt, event)
-                        {
-                            hub.record_request_failure(id, failure);
-                        }
-                        if let Some(report) = crate::usage::Report::from_event(attempt, event) {
-                            hub.record_usage(id, report, &self.profile);
-                        }
                         let event_type = event["type"].as_str().unwrap_or("");
                         if matches!(event_type, "response.completed" | "response.incomplete") {
                             *context_usage = ContextUsage::from_event(event);
