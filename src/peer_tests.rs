@@ -1008,6 +1008,13 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
         record.as_object_mut().unwrap().remove("listen_on_restart");
         record["paused"] = json!(true);
         record["view"]["status"] = json!("stopped");
+        if view.id == interrupted.id {
+            for entry in record["view"]["entries"].as_array_mut().unwrap() {
+                if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
+                    entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+                }
+            }
+        }
         std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
     }
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
@@ -1081,6 +1088,11 @@ async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
     record["paused"] = json!(true);
     record["listen_on_restart"] = json!(false);
     record["view"]["status"] = json!("stopped");
+    for entry in record["view"]["entries"].as_array_mut().unwrap() {
+        if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
+            entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+        }
+    }
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
     let (request, release) = next(&mut rx).await;
@@ -1112,4 +1124,44 @@ async fn graceful_shutdown_of_running_turn_restores_peer_availability_without_re
     wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn escape_on_an_error_hold_does_not_enable_listening_after_restart() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, _rx, server) = fixture(Some(state.path().into())).await;
+    let target = agent(&hub, work.path(), "failed", "");
+    hub.entry(&target.id, "error", "Provider failed");
+    hub.update(&target.id, |r| {
+        r.paused = true;
+        r.listen_on_restart = Some(false);
+        r.view.status = "error".into();
+        Ok(())
+    }).unwrap();
+    hub.interrupt(&target.id).unwrap();
+    wait_status(&hub, &target.id, "stopped").await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    // Check both current and legacy Escape notices over the same error hold.
+    for legacy in [false, true] {
+        if legacy {
+            let path = state.path().join("sessions").join(format!("{}.json", target.id));
+            let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            for entry in record["view"]["entries"].as_array_mut().unwrap() {
+                if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
+                    entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        }
+        let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+        assert_eq!(hub.view(&target.id).unwrap().status, "stopped");
+        assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        let sender = agent(&hub, work.path(), "sender", "");
+        assert_eq!(send(&hub, &sender, &target, "Still blocked", Urgency::Regular, if legacy { "legacy-error" } else { "new-error" })["blocked"], true);
+        hub.shutdown().await;
+        server.abort();
+    }
 }

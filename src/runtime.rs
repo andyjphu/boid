@@ -177,17 +177,22 @@ impl Record {
         if self.stop_through > 0 && self.order == self.stop_through {
             return false;
         }
+        let mut escaped = false;
         for entry in self.view.entries.iter().rev() {
             match entry.kind.as_str() {
-                "notice" if entry.text.starts_with("Execution interrupted.") => return true,
-                "error" | "user" | "assistant" => return false,
+                "notice" if entry.text.as_str() == "Execution interrupted. Queued input will be applied next; completed results retained." => escaped = true,
+                // New Escape never overrides an existing hold. Only the old
+                // exact marker is evidence for the migration.
+                "notice" if entry.text.starts_with("Execution interrupted.") => return false,
+                "error" => return false,
+                "user" | "assistant" => return escaped,
                 "context" if entry.text.as_str() == "Stop the current task. Wait for new user direction." => return false,
-                "notice" if entry.text.starts_with("The model request was interrupted;")
-                    || entry.text.starts_with("Compaction interrupted;") => return false,
+                "notice" if !escaped && (entry.text.starts_with("The model request was interrupted;")
+                    || entry.text.starts_with("Compaction interrupted;")) => return false,
                 _ => (),
             }
         }
-        false
+        escaped
     }
     fn restart_listening(&self) -> bool {
         if self.view.archived
@@ -3004,7 +3009,8 @@ mod tests {
                     hub.interrupt(&view.id).unwrap();
                 }
                 tokio::time::timeout(Duration::from_secs(1), async {
-                    while hub.view(&view.id).unwrap().status != "stopped" {
+                    let expected = if action == "stop" { "stopped" } else { "idle" };
+                    while hub.view(&view.id).unwrap().status != expected {
                         tokio::task::yield_now().await;
                     }
                 })

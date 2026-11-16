@@ -75,6 +75,8 @@ async fn persistence_and_lock_wait_leave_networking_responsive() {
             message: "".into(),
         })
         .unwrap();
+    // Persistence needs a committed conversation; untouched drafts are discarded.
+    hub.entry(&view.id, "assistant", "Retained fixture history");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
