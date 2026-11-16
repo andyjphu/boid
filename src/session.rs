@@ -305,6 +305,16 @@ impl Session {
             }
         }
     }
+    pub(crate) fn history_items(&self) -> &[Arc<Value>] {
+        &self.history
+    }
+    pub(crate) fn take_history(&mut self) -> Vec<Arc<Value>> {
+        std::mem::take(&mut self.history).0
+    }
+    pub(crate) fn restore_history(&mut self, items: Vec<Arc<Value>>) {
+        let images = items.iter().any(|item| crate::images::has_refs(item));
+        self.history = ModelHistory(items, images);
+    }
     pub fn has_image_refs(&self) -> bool {
         self.history.1
     }

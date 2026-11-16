@@ -142,3 +142,41 @@ failures or changes. Validate the exact built binary and embedded assets in an
 isolated server without provider calls. Only post-deployment measurements of
 actual use can establish the live improvement. Retain unresolved limits and
 report any feature tradeoff immediately instead of hiding it behind a speed score.
+
+## Incremental session persistence (v1.1.36)
+
+Session checkpoints use an ordered event journal. A checkpoint stores current
+metadata, a model-history suffix, and changed/new transcript entries. Unchanged
+model items and transcript text are not serialized again. Streaming text and
+checkpoint events share a persistent journal sequence; the stream sequence
+remains separate. Durable tool claims and completed-work barriers still wait
+for the small journal commit. Input acceptance remains asynchronous and real.
+
+A single background compactor writes full snapshots. The FIFO writer rotates
+its active journal into a closed segment before handing the compactor an
+immutable record. New events go to a new active segment. Only closed segments
+covered by a successfully published durable snapshot can be pruned. A full
+snapshot must not be inserted ahead of tool/inference barriers. Archival and
+shutdown must account for the compactor before moving or releasing state.
+
+Version 7 session state consists of the base `<id>.json` plus
+`<id>.journal/*.jsonl`. Reading the base JSON alone does not establish the latest
+state. Preserve both when making crash-recovery fixtures or backups. Replay
+closed segments in numeric order, then the active segment; skip sequences
+already covered by the base and require consecutive new events. Startup
+preserves any incomplete active tail before truncating it to the last complete
+record. Closed-segment corruption is an error. Do not run the repairing replay
+function against a live directory as a read-only inspection tool.
+
+The ignored `incremental_disk_checkpoint_benchmark` uses temporary native disk
+storage with 4 MiB of synthetic model history, 8 MiB of transcript, and 16
+checkpoint/entry pairs. It invokes actual Hub persistence boundaries without
+provider calls. Compare the same fixture before/after; these durations are not
+browser input or model-response timings. Keep the raw measurements with the
+release evidence and state when the workload differs from live use.
+
+On mm-west-2, the 16-pair native fixture measured median checkpoint time
+27.516 -> 3.995 ms and transcript-entry commit time 27.933 -> 3.991 ms
+(v1.1.35 -> v1.1.36 candidate). Initial post-change iterations overlapped the
+seed snapshot compaction and reached about 9 ms. These are synthetic durable
+commit measurements, not a claim about inference latency or every live session.

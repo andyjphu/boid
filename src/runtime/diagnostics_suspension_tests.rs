@@ -15,6 +15,20 @@ async fn diagnostics_suspension_preserves_legacy_bytes_before_rewrite() {
         .unwrap();
     hub.entry(&view.id, "assistant", "Retained transcript and result.");
     hub.shutdown().await;
+    let mut effective: Record = hub.0.store.read_session(&view.id).unwrap();
+    hub.0
+        .store
+        .replay_events::<journal::Event>(&view.id, |event| event.apply(&mut effective))
+        .unwrap();
+    hub.0.store.save(&view.id, &effective).unwrap();
+    hub.0
+        .store
+        .rotate_events(&view.id, effective.journal_seq)
+        .unwrap();
+    hub.0
+        .store
+        .prune_events(&view.id, effective.journal_seq)
+        .unwrap();
     drop(hub);
     let path = state
         .path()
@@ -41,7 +55,7 @@ async fn diagnostics_suspension_preserves_legacy_bytes_before_rewrite() {
         0o600
     );
     let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["version"], 6);
+    assert_eq!(saved["version"], 7);
     assert!(saved.get("usage").is_none());
     assert_eq!(saved["view"]["entries"], legacy["view"]["entries"]);
     assert_eq!(saved["engine"]["history"], legacy["engine"]["history"]);

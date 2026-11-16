@@ -18,12 +18,15 @@ pub use pane_groups::GroupRevisionConflict;
 #[path = "archive.rs"]
 mod archive;
 use archive::ArchivedReceipt;
+#[cfg(test)]
+mod incremental_benchmark;
+mod journal;
 mod persistence;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
-mod draft_tests;
-#[cfg(test)]
 mod diagnostics_suspension_tests;
+#[cfg(test)]
+mod draft_tests;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
@@ -174,6 +177,8 @@ struct Record {
     #[serde(default)]
     listen_on_restart: Option<bool>,
     stream_seq: u64,
+    #[serde(default)]
+    journal_seq: u64,
 }
 impl Record {
     fn escape_boundary(&self) -> bool {
@@ -183,15 +188,30 @@ impl Record {
         let mut escaped = false;
         for entry in self.view.entries.iter().rev() {
             match entry.kind.as_str() {
-                "notice" if entry.text.as_str() == "Execution interrupted. Queued input will be applied next; completed results retained." => escaped = true,
+                "notice"
+                    if entry.text.as_str()
+                        == "Execution interrupted. Queued input will be applied next; completed results retained." =>
+                {
+                    escaped = true
+                }
                 // New Escape never overrides an existing hold. Only the old
                 // exact marker is evidence for the migration.
                 "notice" if entry.text.starts_with("Execution interrupted.") => return false,
                 "error" => return false,
                 "user" | "assistant" => return escaped,
-                "context" if entry.text.as_str() == "Stop the current task. Wait for new user direction." => return false,
-                "notice" if !escaped && (entry.text.starts_with("The model request was interrupted;")
-                    || entry.text.starts_with("Compaction interrupted;")) => return false,
+                "context"
+                    if entry.text.as_str()
+                        == "Stop the current task. Wait for new user direction." =>
+                {
+                    return false;
+                }
+                "notice"
+                    if !escaped
+                        && (entry.text.starts_with("The model request was interrupted;")
+                            || entry.text.starts_with("Compaction interrupted;")) =>
+                {
+                    return false;
+                }
                 _ => (),
             }
         }
@@ -275,6 +295,7 @@ struct Inner {
     events: broadcast::Sender<Value>,
     client: Client,
     store: SessionStore,
+    compactions: Arc<journal::Compactions>,
     images: Arc<crate::images::ImageStore>,
     pub cwd: PathBuf,
     #[cfg(test)]
@@ -468,6 +489,7 @@ impl Hub {
                 client,
                 images: Arc::new(crate::images::ImageStore::new(store.image_directory())),
                 store,
+                compactions: Arc::new(journal::Compactions::default()),
                 cwd: std::env::current_dir()?,
                 #[cfg(test)]
                 skill_scan_gate: Mutex::new(None),
@@ -481,7 +503,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -549,6 +571,13 @@ impl Hub {
                 }
                 .into();
                 hub.save_record(&record.view.id.clone(), &mut record)?;
+                // Recovery has folded every complete event into this durable base.
+                hub.0
+                    .store
+                    .rotate_events(&record.view.id, record.journal_seq)?;
+                hub.0
+                    .store
+                    .prune_events(&record.view.id, record.journal_seq)?;
                 restored_records.push(record);
             }
             // Install the complete roster before any restored worker can run.
@@ -617,12 +646,13 @@ impl Hub {
             bail!("Duplicate persisted session ID: {id}");
         }
         let start = !record.view.archived && draft.is_none();
+        let durable = draft.is_none().then(|| record.clone());
         self.ensure_agent_group_locked(data, &record.view)?;
         data.sessions.insert(
             id.clone(),
             Handle {
                 draft,
-                persistence: Lane::new(Arc::downgrade(&self.0), id.clone())?,
+                persistence: Lane::new(Arc::downgrade(&self.0), id.clone(), durable)?,
                 record,
                 cancel,
                 emergency,
@@ -950,6 +980,7 @@ impl Hub {
         })
     }
     fn prepare_record(&self, record: &mut Record) -> Result<()> {
+        record.version = record.version.max(7);
         if record.engine.has_image_refs() {
             // Older binaries must refuse these records instead of dropping images.
             record.version = record.version.max(5);
@@ -989,6 +1020,7 @@ impl Hub {
             return;
         }
         handle.record.version = handle.record.version.max(saved.version);
+        handle.record.journal_seq = handle.record.journal_seq.max(saved.journal_seq);
         if handle.record.engine.skills == saved.engine.skills {
             handle.record.engine.skill_snapshot = saved.engine.skill_snapshot.clone();
         }
@@ -1478,7 +1510,7 @@ impl Hub {
                 archived: false,
             };
             let mut record = Record {
-                version: 6,
+                version: 7,
                 view,
                 engine,
                 usage: crate::usage::Ledger::default(),
@@ -1490,6 +1522,7 @@ impl Hub {
                 paused: false,
                 listen_on_restart: Some(true),
                 stream_seq: 0,
+                journal_seq: 0,
             };
             {
                 let mut data = self.0.data.lock().unwrap();
@@ -2565,8 +2598,10 @@ impl Hub {
                         r.engine = session.clone();
                         // A completed graceful cancellation is safe to listen
                         // after restart. An abrupt crash still uses recovery holds.
-                        if r.view.status == "working" && r.listen_on_restart == Some(true)
-                            && r.inputs.is_empty() {
+                        if r.view.status == "working"
+                            && r.listen_on_restart == Some(true)
+                            && r.inputs.is_empty()
+                        {
                             r.view.status = "idle".into();
                         }
                         Ok(())
@@ -2588,7 +2623,10 @@ impl Hub {
                             r.view.entries.push(Self::make_entry(&kind, text));
                         }
                         if !r.view.archived {
-                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Completed results retained.".into()));
+                            r.view.entries.push(Self::make_entry(
+                                "notice",
+                                "Execution interrupted. Completed results retained.".into(),
+                            ));
                             r.view.status = if r.paused { "stopped" } else { "idle" }.into();
                         }
                         Ok(())
@@ -2729,6 +2767,21 @@ impl Hub {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        crate::blocking::run(|| {
+            let lanes: Vec<_> = self
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .values()
+                .map(|handle| handle.persistence.capacity())
+                .collect();
+            for lane in lanes {
+                let _ = lane.durable_record();
+            }
+            self.0.compactions.wait(None);
+        });
     }
 }
 
@@ -3250,7 +3303,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["version"], 6);
+        assert_eq!(saved["version"], 7);
         assert!(saved["engine"].get("skills").is_none());
         let snapshot_id = record.engine.skill_snapshot.as_ref().unwrap();
         assert_eq!(saved["engine"]["skill_snapshot"], snapshot_id.as_str());
@@ -3803,16 +3856,16 @@ mod tests {
         assert_eq!(hub.view(&view.id).unwrap().working_since_ms, Some(started));
         let (snapshot, _) = hub.subscribe();
         assert_eq!(snapshot["sessions"][0]["working_since_ms"], started);
-        let saved: Value = serde_json::from_slice(
-            &std::fs::read(
-                state
-                    .path()
-                    .join("sessions")
-                    .join(format!("{}.json", view.id)),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let lane = hub.0.data.lock().unwrap().sessions[&view.id]
+            .persistence
+            .capacity();
+        lane.durable_record().unwrap();
+        let mut saved: Record = hub.0.store.read_session(&view.id).unwrap();
+        hub.0
+            .store
+            .replay_events::<journal::Event>(&view.id, |event| event.apply(&mut saved))
+            .unwrap();
+        let saved = serde_json::to_value(saved).unwrap();
         assert_eq!(saved["view"]["working_since_ms"], started);
         hub.status(&view.id, "idle");
         assert_eq!(hub.view(&view.id).unwrap().working_since_ms, None);
@@ -3974,8 +4027,15 @@ mod tests {
         // truncation by retaining a delta already included in the checkpoint.
         let record = hub.0.data.lock().unwrap().sessions[&view.id].record.clone();
         hub.checkpoint(&view.id, &record.engine).unwrap();
-        hub.0.store.save(&view.id, &record).unwrap();
         hub.shutdown().await;
+        // Capture the writer's exact sequence, not a stale in-memory revision
+        // taken before the asynchronous delta became durable.
+        let lane = hub.0.data.lock().unwrap().sessions[&view.id]
+            .persistence
+            .capacity();
+        let record = lane.durable_record().unwrap().unwrap();
+        hub.0.store.save(&view.id, &record).unwrap();
+        // Deliberately retain the covered v7 journal as well as the legacy delta.
         drop(hub);
         let store = SessionStore::open(state.path().into()).unwrap();
         store
