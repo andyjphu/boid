@@ -2643,9 +2643,9 @@ impl Hub {
                         let mut recovery = session.recover_questions(&mut r.view.questions);
                         recovery.extend(session.recover());
                         r.engine = session.clone();
-                        // Escape cancels the current turn, not peer availability.
-                        // Preserve a separate explicit Stop/error hold if present.
-                        r.listen_on_restart = Some(!r.paused);
+                        // Escape does not change listening intent. In particular,
+                        // shutdown's temporary pause is not an explicit Stop.
+                        // Preserve any existing Stop/error hold unchanged.
                         for (kind, text) in recovery {
                             r.view.entries.push(Self::make_entry(&kind, text));
                         }
