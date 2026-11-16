@@ -2618,12 +2618,20 @@ impl Hub {
                 }
                 Next::Halt => {
                     session.interrupt(self, &id);
-                    let _ = self.checkpoint(&id, &session);
+                    let _ = self.update(&id, |r| {
+                        r.engine = session.clone();
+                        // A completed graceful cancellation is safe to listen
+                        // after restart. An abrupt crash still uses recovery holds.
+                        if r.view.status == "working" && r.listen_on_restart == Some(true)
+                            && r.inputs.is_empty() {
+                            r.view.status = "idle".into();
+                        }
+                        Ok(())
+                    });
                     break;
                 }
                 Next::Interrupt => {
                     urgent_turn = false;
-                    active = false;
                     // The select has dropped the active request/tool future.
                     // Recover and persist once, after cancellation, before new work.
                     if let Err(error) = self.update(&id, |r| {

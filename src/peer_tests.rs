@@ -1070,6 +1070,9 @@ async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }).await.unwrap();
+    // Reproduce the deployed old hold with a real accepted, blocked message.
+    hub.update(&target.id, |r| { r.paused = true; r.listen_on_restart = Some(false); Ok(()) }).unwrap();
+    assert_eq!(send(&hub, &sender, &target, "Contact after migration", Urgency::Regular, "migrated")["blocked"], true);
     hub.shutdown().await;
     drop(hub);
     server.abort();
@@ -1080,11 +1083,31 @@ async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
     record["view"]["status"] = json!("stopped");
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
-    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
-    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-    assert_eq!(send(&hub, &sender, &target, "Contact after migration", Urgency::Regular, "migrated")["blocked"], false);
     let (request, release) = next(&mut rx).await;
     assert!(request["input"].to_string().contains("Contact after migration"));
+    release.send(json!([])).unwrap();
+    wait_status(&hub, &target.id, "idle").await;
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn graceful_shutdown_of_running_turn_restores_peer_availability_without_resuming_it() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let target = agent(&hub, work.path(), "running", "Old unfinished turn");
+    let (_, _inflight) = next(&mut rx).await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
+    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+    let sender = agent(&hub, work.path(), "sender", "");
+    assert_eq!(send(&hub, &sender, &target, "New request after restart", Urgency::Regular, "after-halt")["blocked"], false);
+    let (request, release) = next(&mut rx).await;
+    assert!(request["input"].to_string().contains("New request after restart"));
     release.send(json!([])).unwrap();
     wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
