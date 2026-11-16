@@ -436,7 +436,15 @@ async fn crash_between_question_commit_and_tool_result_recovers_receipt_without_
     // crash after the question's durable commit, before its tool result.
     let crash_record = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let bytes = std::fs::read(&path).unwrap();
+            let capacity = hub.0.data.lock().unwrap().sessions[&a.id]
+                .persistence
+                .capacity();
+            let committed = tokio::task::spawn_blocking(move || capacity.durable_record())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let bytes = serde_json::to_vec(&committed).unwrap();
             let saved: Value = serde_json::from_slice(&bytes).unwrap();
             if saved["view"]["questions"]
                 .as_array()
@@ -451,12 +459,19 @@ async fn crash_between_question_commit_and_tool_result_recovers_receipt_without_
     .unwrap();
     let record: Value = serde_json::from_slice(&crash_record).unwrap();
     assert_eq!(record["engine"]["running"]["id"], "crash");
-    assert_eq!(record["version"], 6);
-    // Fresh version6 records already contain the supported question schema.
+    assert_eq!(record["version"], 7);
+    // Version7 reconstructs the committed question from snapshot plus journal.
     hub.shutdown().await;
     drop(hub);
     server.abort();
     // Restore the exact on-disk state observed before a tool result was committed.
+    std::fs::remove_dir_all(
+        state
+            .path()
+            .join("sessions")
+            .join(format!("{}.journal", a.id)),
+    )
+    .unwrap();
     std::fs::write(&path, crash_record).unwrap();
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
     assert_eq!(hub.view(&a.id).unwrap().status, "stopped");

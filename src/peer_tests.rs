@@ -59,6 +59,19 @@ fn agent(hub: &Hub, work: &std::path::Path, name: &str, message: &str) -> View {
     })
     .unwrap()
 }
+// Convert the durable base+journal to one complete fixture before simulating
+// an older binary's snapshot. Call only after the Hub has been shut down/dropped.
+fn materialized_fixture(root: &std::path::Path, id: &str) -> Value {
+    let store = SessionStore::open(root.into()).unwrap();
+    let mut record: Record = store.read_session(id).unwrap();
+    store
+        .replay_events::<journal::Event>(id, |event| event.apply(&mut record))
+        .unwrap();
+    store.save(id, &record).unwrap();
+    store.rotate_events(id, record.journal_seq).unwrap();
+    store.prune_events(id, record.journal_seq).unwrap();
+    serde_json::to_value(record).unwrap()
+}
 fn send(hub: &Hub, from: &View, to: &View, text: &str, urgency: Urgency, call: &str) -> Value {
     let entry = hub.entry(
         &from.id,
@@ -600,11 +613,23 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
     let target = agent(&hub, work.path(), "aero", "");
     hub.entry(&target.id, "assistant", "retained fixture work");
     hub.stop(&target.id).unwrap();
-    hub.update(&target.id, |r| {
-        r.version = 2;
-        Ok(())
-    })
+    hub.entry(&sender.id, "assistant", "retained sender fixture");
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    // Actual legacy on-disk input, not a live attempt to downgrade the v7 fence.
+    let mut legacy = materialized_fixture(state.path(), &target.id);
+    legacy["version"] = json!(2);
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    std::fs::write(
+        state
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", target.id)),
+        &legacy_bytes,
+    )
     .unwrap();
+    let (hub, _rx, server) = fixture(Some(state.path().into())).await;
     let receipt = send(
         &hub,
         &sender,
@@ -624,12 +649,15 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
         )
         .unwrap();
     assert_eq!(receipt, retry);
-    assert!(
-        state
-            .path()
-            .join("sessions")
-            .join(format!("{}.before-v9", target.id))
-            .exists()
+    assert_eq!(
+        std::fs::read(
+            state
+                .path()
+                .join("sessions")
+                .join(format!("{}.before-incremental", target.id))
+        )
+        .unwrap(),
+        legacy_bytes
     );
     assert!(
         hub.send_communication(
@@ -1005,14 +1033,19 @@ async fn legacy_restart_restores_idle_but_preserves_operator_and_recovery_bounda
             .path()
             .join("sessions")
             .join(format!("{}.json", view.id));
-        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut record = materialized_fixture(state.path(), &view.id);
         record.as_object_mut().unwrap().remove("listen_on_restart");
         record["paused"] = json!(true);
         record["view"]["status"] = json!("stopped");
         if view.id == interrupted.id {
             for entry in record["view"]["entries"].as_array_mut().unwrap() {
-                if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
-                    entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+                if entry["text"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("Execution interrupted."))
+                {
+                    entry["text"] = json!(
+                        "Execution interrupted. Queued input will be applied next; completed results retained."
+                    );
                 }
             }
         }
@@ -1064,9 +1097,23 @@ async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
     let (_, _inflight) = next(&mut rx).await;
     hub.interrupt(&target.id).unwrap();
     wait_status(&hub, &target.id, "idle").await;
-    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
     let sender = agent(&hub, work.path(), "sender", "");
-    assert_eq!(send(&hub, &sender, &target, "New peer task", Urgency::Regular, "after-escape")["blocked"], false);
+    assert_eq!(
+        send(
+            &hub,
+            &sender,
+            &target,
+            "New peer task",
+            Urgency::Regular,
+            "after-escape"
+        )["blocked"],
+        false
+    );
     let (request, release) = next(&mut rx).await;
     assert!(request["input"].to_string().contains("New peer task"));
     release.send(json!([])).unwrap();
@@ -1074,30 +1121,67 @@ async fn escape_keeps_peer_contact_available_and_migrates_old_escape_holds() {
     hub.interrupt(&target.id).unwrap();
     // Await the notice, since status was already idle before Escape.
     tokio::time::timeout(Duration::from_secs(3), async {
-        while hub.view(&target.id).unwrap().entries.iter().filter(|e| e.text.starts_with("Execution interrupted.")).count() < 2 {
+        while hub
+            .view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.text.starts_with("Execution interrupted."))
+            .count()
+            < 2
+        {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     // Reproduce the deployed old hold with a real accepted, blocked message.
-    hub.update(&target.id, |r| { r.paused = true; r.listen_on_restart = Some(false); Ok(()) }).unwrap();
-    assert_eq!(send(&hub, &sender, &target, "Contact after migration", Urgency::Regular, "migrated")["blocked"], true);
+    hub.update(&target.id, |r| {
+        r.paused = true;
+        r.listen_on_restart = Some(false);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        send(
+            &hub,
+            &sender,
+            &target,
+            "Contact after migration",
+            Urgency::Regular,
+            "migrated"
+        )["blocked"],
+        true
+    );
     hub.shutdown().await;
     drop(hub);
     server.abort();
-    let path = state.path().join("sessions").join(format!("{}.json", target.id));
-    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let path = state
+        .path()
+        .join("sessions")
+        .join(format!("{}.json", target.id));
+    let mut record = materialized_fixture(state.path(), &target.id);
     record["paused"] = json!(true);
     record["listen_on_restart"] = json!(false);
     record["view"]["status"] = json!("stopped");
     for entry in record["view"]["entries"].as_array_mut().unwrap() {
-        if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
-            entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+        if entry["text"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Execution interrupted."))
+        {
+            entry["text"] = json!(
+                "Execution interrupted. Queued input will be applied next; completed results retained."
+            );
         }
     }
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
     let (request, release) = next(&mut rx).await;
-    assert!(request["input"].to_string().contains("Contact after migration"));
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("Contact after migration")
+    );
     release.send(json!([])).unwrap();
     wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
@@ -1116,11 +1200,29 @@ async fn graceful_shutdown_of_running_turn_restores_peer_availability_without_re
     server.abort();
     let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
     assert_eq!(hub.view(&target.id).unwrap().status, "idle");
-    assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err()
+    );
     let sender = agent(&hub, work.path(), "sender", "");
-    assert_eq!(send(&hub, &sender, &target, "New request after restart", Urgency::Regular, "after-halt")["blocked"], false);
+    assert_eq!(
+        send(
+            &hub,
+            &sender,
+            &target,
+            "New request after restart",
+            Urgency::Regular,
+            "after-halt"
+        )["blocked"],
+        false
+    );
     let (request, release) = next(&mut rx).await;
-    assert!(request["input"].to_string().contains("New request after restart"));
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("New request after restart")
+    );
     release.send(json!([])).unwrap();
     wait_status(&hub, &target.id, "idle").await;
     hub.shutdown().await;
@@ -1139,7 +1241,8 @@ async fn escape_on_an_error_hold_does_not_enable_listening_after_restart() {
         r.listen_on_restart = Some(false);
         r.view.status = "error".into();
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     hub.interrupt(&target.id).unwrap();
     wait_status(&hub, &target.id, "stopped").await;
     hub.shutdown().await;
@@ -1148,20 +1251,42 @@ async fn escape_on_an_error_hold_does_not_enable_listening_after_restart() {
     // Check both current and legacy Escape notices over the same error hold.
     for legacy in [false, true] {
         if legacy {
-            let path = state.path().join("sessions").join(format!("{}.json", target.id));
-            let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let path = state
+                .path()
+                .join("sessions")
+                .join(format!("{}.json", target.id));
+            let mut record = materialized_fixture(state.path(), &target.id);
             for entry in record["view"]["entries"].as_array_mut().unwrap() {
-                if entry["text"].as_str().is_some_and(|s| s.starts_with("Execution interrupted.")) {
-                    entry["text"] = json!("Execution interrupted. Queued input will be applied next; completed results retained.");
+                if entry["text"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("Execution interrupted."))
+                {
+                    entry["text"] = json!(
+                        "Execution interrupted. Queued input will be applied next; completed results retained."
+                    );
                 }
             }
             std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         }
         let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
         assert_eq!(hub.view(&target.id).unwrap().status, "stopped");
-        assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err()
+        );
         let sender = agent(&hub, work.path(), "sender", "");
-        assert_eq!(send(&hub, &sender, &target, "Still blocked", Urgency::Regular, if legacy { "legacy-error" } else { "new-error" })["blocked"], true);
+        assert_eq!(
+            send(
+                &hub,
+                &sender,
+                &target,
+                "Still blocked",
+                Urgency::Regular,
+                if legacy { "legacy-error" } else { "new-error" }
+            )["blocked"],
+            true
+        );
         hub.shutdown().await;
         server.abort();
     }

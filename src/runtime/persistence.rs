@@ -43,6 +43,9 @@ struct Progress {
     running: bool,
     queue: VecDeque<(u64, Operation)>,
     skills: Option<SkillSnapshot>,
+    durable: Option<Record>,
+    journal_bytes: u64,
+    journal_events: u64,
 }
 type Shared = Arc<(Mutex<Progress>, Condvar)>;
 
@@ -80,6 +83,18 @@ pub(super) struct Permit {
     delta_bytes: usize,
 }
 impl Capacity {
+    // Used only after admission has stopped for End/shutdown.
+    pub(super) fn durable_record(&self) -> Result<Option<Record>> {
+        let mut progress = self.0.0.lock().unwrap();
+        while progress.running {
+            progress = self.0.1.wait(progress).unwrap();
+        }
+        if let Some(error) = &progress.error {
+            bail!("Session persistence failed: {error}");
+        }
+        Ok(progress.durable.clone())
+    }
+
     pub(super) fn reserve(&self, slots: usize) -> Result<Permit> {
         self.reserve_bytes(slots, 0)
     }
@@ -148,11 +163,17 @@ pub(super) struct Lane {
     inputs: VecDeque<Receipt>,
 }
 impl Lane {
-    pub(super) fn new(hub: Weak<Inner>, id: String) -> Result<Self> {
+    pub(super) fn new(hub: Weak<Inner>, id: String, durable: Option<Record>) -> Result<Self> {
         Ok(Self {
             hub,
             id,
-            progress: Arc::new((Mutex::new(Progress::default()), Condvar::new())),
+            progress: Arc::new((
+                Mutex::new(Progress {
+                    durable,
+                    ..Progress::default()
+                }),
+                Condvar::new(),
+            )),
             revision: 0,
             inputs: VecDeque::new(),
         })
@@ -237,12 +258,23 @@ impl Lane {
 }
 
 fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
-    let mut skills = shared.0.lock().unwrap().skills.take();
+    let (mut skills, mut durable, mut journal_bytes, mut journal_events) = {
+        let mut state = shared.0.lock().unwrap();
+        (
+            state.skills.take(),
+            state.durable.take(),
+            state.journal_bytes,
+            state.journal_events,
+        )
+    };
     loop {
         let (mut revision, operation) = {
             let mut progress = shared.0.lock().unwrap();
             let Some(next) = progress.queue.pop_front() else {
                 progress.skills = skills;
+                progress.durable = durable;
+                progress.journal_bytes = journal_bytes;
+                progress.journal_events = journal_events;
                 progress.running = false;
                 shared.1.notify_all();
                 return;
@@ -262,19 +294,39 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
                             }
                         }
                     }
-                    let result = hub.save_record(&id, &mut record);
-                    if result.is_ok() {
+                    let result = (|| -> Result<()> {
+                        hub.prepare_record(&mut record)?;
+                        for message in &mut record.messages {
+                            message.persisted = true;
+                        }
+                        if let Some(previous) = &durable {
+                            record.journal_seq = previous
+                                .journal_seq
+                                .checked_add(1)
+                                .context("Journal sequence overflow")?;
+                            let event = journal::Event::checkpoint(previous, &mut record)?;
+                            journal_bytes += hub.0.store.append_events(&id, &[event])?;
+                            journal_events += 1;
+                        } else {
+                            // Durable version fence precedes the first append.
+                            hub.save_record(&id, &mut record)?;
+                        }
                         hub.mark_durable(&id, &record);
-                        skills = Some((record.engine.skills, record.engine.skill_snapshot));
-                    }
+                        skills = Some((
+                            record.engine.skills.clone(),
+                            record.engine.skill_snapshot.clone(),
+                        ));
+                        durable = Some(*record);
+                        Ok(())
+                    })();
                     result
                 }
                 Operation::Delta(delta) => {
                     let mut deltas = vec![delta];
                     {
                         let mut progress = shared.0.lock().unwrap();
-                        // Only take ready deltas. A checkpoint must retain its
-                        // place because saving it also truncates the journal.
+                        // Only adjacent deltas can share a durable append;
+                        // checkpoints retain their chronological position.
                         while deltas.len() < CAPACITY {
                             let Some((_, Operation::Delta(next))) = progress.queue.front() else {
                                 break;
@@ -294,7 +346,30 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
                             deltas.push(next);
                         }
                     }
-                    hub.0.store.append_batch(&id, &deltas)
+                    (|| -> Result<()> {
+                        let record = durable
+                            .as_mut()
+                            .context("Stream before initial checkpoint")?;
+                        let mut sequence = record.journal_seq;
+                        let mut events = Vec::with_capacity(deltas.len());
+                        for delta in deltas {
+                            let base = sequence;
+                            sequence = sequence
+                                .checked_add(1)
+                                .context("Journal sequence overflow")?;
+                            events.push(journal::Event {
+                                seq: sequence,
+                                base,
+                                change: journal::Change::Delta { delta },
+                            });
+                        }
+                        journal_bytes += hub.0.store.append_events(&id, &events)?;
+                        journal_events += events.len() as u64;
+                        for event in events {
+                            event.apply(record)?;
+                        }
+                        Ok(())
+                    })()
                 }
                 Operation::Context(attempt, mut record) => hub
                     .prepare_record(&mut record)
@@ -331,6 +406,20 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
             progress.running = false;
             shared.1.notify_all();
             return;
+        }
+        // Optional full snapshots never occupy this ordered writer. Rotation
+        // only occurs when the single server-wide compactor is free.
+        if journal_bytes >= 8 * 1024 * 1024 || journal_events >= 256 {
+            if let (Some(hub), Some(record)) = (&hub, &durable) {
+                match journal::compact(hub, &id, record) {
+                    Ok(true) => {
+                        journal_bytes = 0;
+                        journal_events = 0;
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("Cannot compact session; journal retained: {error:#}"),
+                }
+            }
         }
         // Release the state-directory owner before signaling completion.
         drop(hub);

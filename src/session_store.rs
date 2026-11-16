@@ -193,6 +193,28 @@ impl SessionStore {
     pub fn backup_before_diagnostics_suspension(&self, id: &str) -> Result<()> {
         self.backup_named(id, "before-diagnostics-suspension")
     }
+    pub fn backup_before_incremental(&self, id: &str) -> Result<()> {
+        self.backup_named(id, "before-incremental")?;
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        let source = directory.join(format!("{id}.stream"));
+        if source.try_exists()? {
+            let backup = directory.join(format!("{id}.before-incremental-stream"));
+            if backup.try_exists()? {
+                if archive::digest(&backup)? != archive::digest(&source)? {
+                    bail!("Incremental stream backup differs; original retained");
+                }
+            } else {
+                let mut file = tempfile::NamedTempFile::new_in(directory)?;
+                std::io::copy(&mut File::open(&source)?, &mut file)?;
+                file.as_file().sync_all()?;
+                file.persist_noclobber(backup).map_err(|e| e.error)?;
+                File::open(directory)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
     fn backup_named(&self, id: &str, suffix: &str) -> Result<()> {
         let Some(directory) = &self.directory else {
             return Ok(());
@@ -206,10 +228,15 @@ impl SessionStore {
         }
         let backup = directory.join(format!("{id}.{suffix}"));
         if backup.exists() {
-            if suffix == "before-diagnostics-suspension"
-                && archive::digest(&backup)? != archive::digest(&source)?
+            if matches!(
+                suffix,
+                "before-diagnostics-suspension" | "before-incremental"
+            ) && archive::digest(&backup)? != archive::digest(&source)?
             {
-                bail!("Diagnostics preservation backup differs; original retained: {}", source.display());
+                bail!(
+                    "Diagnostics preservation backup differs; original retained: {}",
+                    source.display()
+                );
             }
             return Ok(());
         }
@@ -217,8 +244,10 @@ impl SessionStore {
         // Bounded copying: a large legacy diagnostics payload must not create
         // another full-file allocation during recovery.
         std::io::copy(&mut File::open(&source)?, &mut temporary)?;
-        if suffix == "before-diagnostics-suspension"
-            && archive::digest(temporary.path())? != archive::digest(&source)?
+        if matches!(
+            suffix,
+            "before-diagnostics-suspension" | "before-incremental"
+        ) && archive::digest(temporary.path())? != archive::digest(&source)?
         {
             bail!("Diagnostics preservation verification failed; original retained");
         }
@@ -393,3 +422,6 @@ mod tests {
 
 #[path = "session_archive.rs"]
 mod archive;
+
+#[path = "session_journal.rs"]
+mod journal;

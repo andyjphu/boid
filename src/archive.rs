@@ -158,27 +158,57 @@ impl Hub {
             store.backup_before_diagnostics_suspension(id)?;
             record.version = 6;
         }
+        if !matches!(record.version, 1..=7) {
+            bail!(
+                "Unsupported session version {}; original retained",
+                record.version
+            );
+        }
+        if record.view.id != id {
+            bail!("Session identity differs from filename; original retained");
+        }
+        if record.version < 7 {
+            store.backup_before_incremental(id)?;
+        }
+        store.replay_events::<journal::Event>(id, |event| event.apply(&mut record))?;
         Ok(record)
     }
     pub(super) fn load_catalog(store: &SessionStore) -> Result<Vec<Record>> {
         let mut records = vec![];
         for id in store.session_ids()? {
             if store.session_status(&id)? != "archived" {
-                records.push(Self::read_active_without_diagnostics(store, &id)?);
+                let record = Self::read_active_without_diagnostics(store, &id)?;
+                if record.view.archived && record.view.status == "archived" {
+                    // A final End can exist only in the journal after a crash.
+                    store.save(&id, &record)?;
+                    store.rotate_events(&id, record.journal_seq)?;
+                    store.prune_events(&id, record.journal_seq)?;
+                    Self::preserve_archive(store, &id, &ArchivedSession::from_record(&record))?;
+                } else {
+                    records.push(record);
+                }
                 continue;
             }
             let probe: ArchiveProbe = store.read_session(&id)?;
             if probe.view.id != id {
                 bail!("Session identity differs from filename; original retained");
             }
-            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6) {
+            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     probe.version
                 );
             }
             if probe.view.archived {
-                Self::preserve_archive(store, &id, &probe.summary())?;
+                if probe.version == 7 {
+                    let record = Self::read_active_without_diagnostics(store, &id)?;
+                    store.save(&id, &record)?;
+                    store.rotate_events(&id, record.journal_seq)?;
+                    store.prune_events(&id, record.journal_seq)?;
+                    Self::preserve_archive(store, &id, &ArchivedSession::from_record(&record))?;
+                } else {
+                    Self::preserve_archive(store, &id, &probe.summary())?;
+                }
             } else {
                 records.push(Self::read_active_without_diagnostics(store, &id)?);
             }
@@ -206,6 +236,19 @@ impl Hub {
             };
             let result = (|| {
                 barrier.wait()?;
+                // End has frozen admission. Let any older snapshot finish, then
+                // materialize the final durable state before archive publication.
+                self.0.compactions.wait(Some(id));
+                let capacity = {
+                    let data = self.0.data.lock().unwrap();
+                    data.sessions[id].persistence.capacity()
+                };
+                let record = capacity
+                    .durable_record()?
+                    .context("Missing final durable session")?;
+                self.0.store.save(id, &record)?;
+                self.0.store.rotate_events(id, record.journal_seq)?;
+                self.0.store.prune_events(id, record.journal_seq)?;
                 #[cfg(test)]
                 {
                     let data = self.0.data.lock().unwrap();
@@ -236,7 +279,8 @@ impl Hub {
                 // evict it, even if saving pane metadata fails. Startup prunes
                 // stale memberships after loading the complete active roster.
                 let removed = data.sessions.remove(id);
-                let groups_saved = self.remove_group_member_locked(&mut data, &format!("agent:{id}"));
+                let groups_saved =
+                    self.remove_group_member_locked(&mut data, &format!("agent:{id}"));
                 (removed, groups_saved)
             };
             drop(removed);
@@ -259,11 +303,13 @@ impl Hub {
 mod tests {
     use super::*;
     async fn agent(hub: &Hub, cwd: &Path, name: &str) -> View {
-        let view = hub.create(Create {
-            name: name.into(),
-            cwd: cwd.to_string_lossy().into(),
-            message: String::new(),
-        }).unwrap();
+        let view = hub
+            .create(Create {
+                name: name.into(),
+                cwd: cwd.to_string_lossy().into(),
+                message: String::new(),
+            })
+            .unwrap();
         hub.entry(&view.id, "assistant", "retained fixture work");
         view
     }
@@ -429,10 +475,7 @@ mod tests {
         )
         .unwrap();
         let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
-        assert!(
-            hub.archived_views().is_empty()
-                && hub.0.data.lock().unwrap().sessions.is_empty()
-        );
+        assert!(hub.archived_views().is_empty() && hub.0.data.lock().unwrap().sessions.is_empty());
         hub.shutdown().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

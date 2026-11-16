@@ -2,6 +2,20 @@ use super::persistence::Operation;
 use super::*;
 use std::time::Duration;
 
+fn persisted(hub: &Hub, id: &str) -> Record {
+    let capacity = hub.0.data.lock().unwrap().sessions[id]
+        .persistence
+        .capacity();
+    capacity.durable_record().unwrap();
+    hub.0.compactions.wait(Some(id));
+    let mut record: Record = hub.0.store.read_session(id).unwrap();
+    hub.0
+        .store
+        .replay_events::<journal::Event>(id, |event| event.apply(&mut record))
+        .unwrap();
+    record
+}
+
 // Drop also releases the writer when an assertion fails, so a failed regression
 // does not leave a runtime or storage thread permanently waiting on its fixture.
 struct WriterGate(Option<std::sync::mpsc::Sender<()>>);
@@ -120,16 +134,7 @@ async fn accepted_messages_are_real_server_state_while_storage_is_blocked() {
     .expect("another session waited for the blocked writer")
     .unwrap()
     .unwrap();
-    let persisted: Record = serde_json::from_slice(
-        &std::fs::read(
-            state
-                .path()
-                .join("sessions")
-                .join(format!("{}.json", other.id)),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let persisted: Record = persisted(&hub, &other.id);
     assert_eq!(persisted.view.name, "still-responsive");
 
     gate.release();
@@ -211,10 +216,14 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
         let filename = format!("{}.{}", target.id, extension);
         std::fs::copy(source.join(&filename), destination.join(filename)).unwrap();
     }
-    let saved: Record = serde_json::from_slice(
-        &std::fs::read(destination.join(format!("{}.json", target.id))).unwrap(),
-    )
-    .unwrap();
+    let journal_name = format!("{}.journal", target.id);
+    let journal_destination = destination.join(&journal_name);
+    std::fs::create_dir_all(&journal_destination).unwrap();
+    for entry in std::fs::read_dir(source.join(&journal_name)).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), journal_destination.join(entry.file_name())).unwrap();
+    }
+    let saved = persisted(&hub, &target.id);
     if let Some(snapshot) = saved.engine.skill_snapshot {
         let directory = restored_state.path().join("skill-snapshots");
         std::fs::create_dir_all(&directory).unwrap();
@@ -272,16 +281,7 @@ async fn tool_claim_waits_until_running_call_is_durable() {
             .unwrap()
             .unwrap()
     );
-    let saved: Value = serde_json::from_slice(
-        &std::fs::read(
-            state
-                .path()
-                .join("sessions")
-                .join(format!("{}.json", target.id)),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let saved: Value = serde_json::to_value(persisted(&hub, &target.id)).unwrap();
     assert_eq!(saved["engine"]["running"]["id"], "durable-before-effect");
     hub.shutdown().await;
 }
@@ -306,9 +306,16 @@ async fn failed_checkpoint_prevents_a_pending_tool_side_effect() {
     let checkpoint = state
         .path()
         .join("sessions")
-        .join(format!("{}.json", target.id));
-    let previous = std::fs::read(&checkpoint).unwrap();
-    std::fs::remove_file(&checkpoint).unwrap();
+        .join(format!("{}.journal", target.id))
+        .join("active.jsonl");
+    std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let previous = if checkpoint.exists() {
+        let bytes = std::fs::read(&checkpoint).unwrap();
+        std::fs::remove_file(&checkpoint).unwrap();
+        bytes
+    } else {
+        Vec::new()
+    };
     std::fs::create_dir(&checkpoint).unwrap();
     let tools = Tools::new(work.path()).unwrap();
     let result = session.step(&hub.0.client, &tools, &hub, &target.id).await;
@@ -363,16 +370,7 @@ async fn graceful_shutdown_drains_accepted_inputs_before_returning() {
         .await
         .unwrap()
         .unwrap();
-    let saved: Record = serde_json::from_slice(
-        &std::fs::read(
-            state
-                .path()
-                .join("sessions")
-                .join(format!("{}.json", target.id)),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let saved: Record = persisted(&hub, &target.id);
     assert_eq!(
         saved
             .inputs
@@ -544,7 +542,7 @@ fn disk_progress_does_not_depend_on_available_tokio_blocking_workers() {
         .unwrap();
     runtime.block_on(async {
         let hub = Hub::new(Client::test_client()).unwrap();
-        let mut lane = Lane::new(Arc::downgrade(&hub.0), Uuid::new_v4().to_string()).unwrap();
+        let mut lane = Lane::new(Arc::downgrade(&hub.0), Uuid::new_v4().to_string(), None).unwrap();
         let (occupied, ready) = tokio::sync::oneshot::channel();
         let (release_pool, wait_pool) = std::sync::mpsc::channel();
         let pool_guard = WriterGate(Some(release_pool));
@@ -683,16 +681,7 @@ async fn admitted_stream_bytes_backpressure_before_mutation_and_fence_tools() {
         .engine
         .clone();
     hub.checkpoint(&target.id, &session).unwrap();
-    let saved: Record = serde_json::from_slice(
-        &std::fs::read(
-            state
-                .path()
-                .join("sessions")
-                .join(format!("{}.json", target.id)),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let saved: Record = persisted(&hub, &target.id);
     assert_eq!(saved.stream_seq, 3);
     assert_eq!(
         saved
@@ -731,7 +720,8 @@ async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
     let stream = state
         .path()
         .join("sessions")
-        .join(format!("{}.stream", target.id));
+        .join(format!("{}.journal", target.id))
+        .join("active.jsonl");
     std::fs::remove_file(&stream).unwrap();
     std::fs::create_dir(&stream).unwrap();
     let mut serialized = serde_json::to_value(
@@ -786,9 +776,19 @@ async fn oversized_delta_waits_for_exclusive_capacity_and_durable_receipt() {
         .await
         .unwrap()
         .unwrap();
-    let deltas = hub.0.store.deltas::<Delta>(&target.id).unwrap();
-    assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].text.len(), 70000);
+    let saved = persisted(&hub, &target.id);
+    assert_eq!(saved.stream_seq, 1);
+    assert_eq!(
+        saved
+            .view
+            .entries
+            .iter()
+            .find(|item| item.id == entry)
+            .unwrap()
+            .text
+            .len(),
+        70000
+    );
     hub.shutdown().await;
 }
 
@@ -818,16 +818,7 @@ async fn stream_persistence_fixture() {
                 .clone();
             hub.checkpoint(&target.id, &session).unwrap();
             let fenced_ms = start.elapsed().as_secs_f64() * 1000.;
-            let record: Record = serde_json::from_slice(
-                &std::fs::read(
-                    state
-                        .path()
-                        .join("sessions")
-                        .join(format!("{}.json", target.id)),
-                )
-                .unwrap(),
-            )
-            .unwrap();
+            let record: Record = persisted(&hub, &target.id);
             assert_eq!(record.stream_seq, 128);
             assert_eq!(
                 record
