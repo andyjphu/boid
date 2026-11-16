@@ -10,10 +10,14 @@ const result = {id:'result',kind:'tool_result',text:'read_skill (skill-1)\n'+JSO
 const partial = {...result,text:result.text.slice(0,8192),text_complete:false};
 const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:[],entries});
 (async()=>{
-  const browser=await chromium.launch({headless:true});
+  const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   try {
     const page=await browser.newPage({viewport:{width:950,height:700}});
     const errors=[];let fullReads=0;
+    const noNativeTooltips = async () => {
+      assert.deepEqual(await page.locator('[title], svg title').evaluateAll(nodes => nodes.map(node => node.outerHTML)), []);
+      assert.equal(await page.title(), 'Boid', 'document title remains intact');
+    };
     page.on('pageerror',e=>errors.push(e.message));
     await page.addInitScript(()=>{window.EventSource=class{constructor(){window.testEvents=this;}close(){}};});
     await page.route('**/*',route=>{
@@ -27,7 +31,7 @@ const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:
       const file=path.join(root,u.pathname==='/'?'index.html':u.pathname);
       return route.fulfill({body:fs.readFileSync(file),contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});
     });
-    await page.goto('http://boid.test');await page.waitForFunction(()=>window.testEvents);
+    await page.goto('http://boid.test');await page.waitForFunction(()=>window.testEvents);await page.evaluate(()=>testEvents.onopen?.());
     const frames=()=>page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
     await page.evaluate(v=>snapshot([v],[]),view([{id:'user',kind:'user',text:'Read the humanizer skill.'},call,partial,{id:'answer',kind:'assistant',text:'Ready.'}]));await frames();
     const summary=page.locator('[data-entry-id="call"] summary');
@@ -35,6 +39,10 @@ const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:
     assert.match(await summary.innerText(),/read_skill\s+bundled:humanizer/);
     assert.equal(await output.isVisible(),false);
     assert.equal(fullReads,0,'collapsed history must not fetch large output');
+    await noNativeTooltips();
+    assert.equal(await summary.getAttribute('aria-description'), 'Expand or collapse tool call and result');
+    assert.equal(await page.getByRole('button',{name:'New agent',exact:true}).count(),1);
+    assert.equal(await page.locator('.pane-title').innerText(),'canary','visible pane title remains intact');
     assert.equal(await page.locator('.trace').innerText().then(t=>t.includes('directory')),false);
     assert.ok(await page.locator('[data-entry-id="call"]').evaluate(e=>e.getBoundingClientRect().height)<50);
     if(process.env.BOID_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.BOID_SCREENSHOT_DIR,'tool-collapsed.png')});
@@ -97,7 +105,18 @@ const view = entries => ({id:'a',name:'canary',cwd:'/tmp',status:'idle',pending:
     assert.equal(await page.locator('[data-entry-id="ordinary"]').innerText(),'Catalog refresh is internal.');
     assert.equal(fullReads,1,'hidden catalog must not fetch full JSON');
     if(process.env.BOID_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.BOID_SCREENSHOT_DIR,'skill-catalog-hidden.png')});
+    // Regression: a dynamically received send_message call/result must not restore native titles.
+    const sendCall={id:'send-call',kind:'tool_call',text:'send_message (peer-1)\n'+JSON.stringify({to:'swift',text:'Review the patch.'})};
+    const sendResult={id:'send-result',kind:'tool_result',text:'send_message (peer-1)\n'+JSON.stringify({queued:true,to:'swift'})};
+    await page.evaluate(entries=>{for(const entry of entries)putEntry(sessions.get('a'),entry);},[sendCall,sendResult]);await frames();
+    const sendSummary=page.locator('[data-entry-id="send-call"] summary');
+    await sendSummary.hover();await noNativeTooltips();
+    assert.match(await sendSummary.innerText(),/send_message/);
+    await sendSummary.click();await frames();
+    assert.equal(await page.locator('[data-entry-id="send-result"] .tool-output').isVisible(),true);
+    await noNativeTooltips();
+    if(process.env.BOID_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.BOID_SCREENSHOT_DIR,'send-message-no-tooltip.png')});
     assert.deepEqual(errors,[]);
-    console.log('PASS: partial history stays collapsed, skill summary, keyboard toggles, explicit full fetch, decoded selectable text, live update, interleaving, orphan result, virtual-window ownership');
+    console.log('PASS: partial history stays collapsed, skill summary, keyboard toggles, explicit full fetch, decoded selectable text, live update, interleaving, orphan result, virtual-window ownership, no native hover titles after dynamic send_message render');
   }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
