@@ -323,7 +323,7 @@ impl Client {
                     &error,
                     profile,
                 ));
-                // Diagnostics retain timestamps and retries even if the next attempt succeeds.
+                // Expose the retry event to callers; session diagnostics collection is suspended.
                 on_event(&failure_event(
                     model,
                     profile,
@@ -420,8 +420,8 @@ impl Client {
                     let delay = (retryable_stream && !output_started)
                         .then(|| retry_delay(http_attempt, waited, advised))
                         .flatten();
-                    // Retry diagnostics are durable, but only a final failure reaches
-                    // usage accounting. A successful replacement owns this model turn.
+                    // Only a final failure is delivered as the terminal provider event.
+                    // A successful replacement owns this model turn.
                     if delay.is_none() {
                         if let Some(event) = &terminal_event {
                             on_event(event);

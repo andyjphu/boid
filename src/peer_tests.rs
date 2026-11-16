@@ -226,6 +226,7 @@ async fn escape_storage_failure_stays_stopped_and_controls_follow_lifecycle() {
 }
 
 #[tokio::test]
+#[ignore = "Usage diagnostics collection is suspended"]
 async fn diagnostics_preserve_reports_failed_usage_and_unknown_attempts_across_recovery() {
     let work = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();

@@ -9,7 +9,7 @@ struct Manifest<M> {
     stream: Option<String>,
     metadata: M,
 }
-fn digest(path: &std::path::Path) -> Result<String> {
+pub(super) fn digest(path: &std::path::Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut bytes = [0; 64 * 1024];
