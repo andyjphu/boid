@@ -173,12 +173,38 @@ struct Record {
     stream_seq: u64,
 }
 impl Record {
+    fn escape_boundary(&self) -> bool {
+        if self.stop_through > 0 && self.order == self.stop_through {
+            return false;
+        }
+        let mut escaped = false;
+        for entry in self.view.entries.iter().rev() {
+            match entry.kind.as_str() {
+                "notice" if entry.text.as_str() == "Execution interrupted. Queued input will be applied next; completed results retained." => escaped = true,
+                // New Escape never overrides an existing hold. Only the old
+                // exact marker is evidence for the migration.
+                "notice" if entry.text.starts_with("Execution interrupted.") => return false,
+                "error" => return false,
+                "user" | "assistant" => return escaped,
+                "context" if entry.text.as_str() == "Stop the current task. Wait for new user direction." => return false,
+                "notice" if !escaped && (entry.text.starts_with("The model request was interrupted;")
+                    || entry.text.starts_with("Compaction interrupted;")) => return false,
+                _ => (),
+            }
+        }
+        escaped
+    }
     fn restart_listening(&self) -> bool {
         if self.view.archived
             || matches!(self.view.status.as_str(), "working" | "error" | "ending")
             || !self.inputs.is_empty()
         {
             return false;
+        }
+        // Older releases made Escape a persistent peer hold. Migrate only a
+        // confirmed Escape boundary, never an explicit Stop or error/recovery.
+        if self.escape_boundary() {
+            return true;
         }
         if let Some(listen) = self.listen_on_restart {
             return listen;
@@ -2597,32 +2623,44 @@ impl Hub {
                 }
                 Next::Halt => {
                     session.interrupt(self, &id);
-                    let _ = self.checkpoint(&id, &session);
+                    let _ = self.update(&id, |r| {
+                        r.engine = session.clone();
+                        // A completed graceful cancellation is safe to listen
+                        // after restart. An abrupt crash still uses recovery holds.
+                        if r.view.status == "working" && r.listen_on_restart == Some(true)
+                            && r.inputs.is_empty() {
+                            r.view.status = "idle".into();
+                        }
+                        Ok(())
+                    });
                     break;
                 }
                 Next::Interrupt => {
                     urgent_turn = false;
-                    active = false;
                     // The select has dropped the active request/tool future.
                     // Recover and persist once, after cancellation, before new work.
                     if let Err(error) = self.update(&id, |r| {
                         let mut recovery = session.recover_questions(&mut r.view.questions);
                         recovery.extend(session.recover());
                         r.engine = session.clone();
-                        r.paused = r.view.archived
-                            || r.inputs.iter().all(|input| input.order <= r.stop_through);
-                        r.listen_on_restart = Some(!r.paused);
+                        // Escape does not change listening intent. In particular,
+                        // shutdown's temporary pause is not an explicit Stop.
+                        // Preserve any existing Stop/error hold unchanged.
                         for (kind, text) in recovery {
                             r.view.entries.push(Self::make_entry(&kind, text));
                         }
                         if !r.view.archived {
-                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Queued input will be applied next; completed results retained.".into()));
-                            r.view.status = "stopped".into();
+                            r.view.entries.push(Self::make_entry("notice", "Execution interrupted. Completed results retained.".into()));
+                            r.view.status = if r.paused { "stopped" } else { "idle" }.into();
                         }
                         Ok(())
                     }) {
                         self.fault(&id, error);
                         break;
+                    }
+                    active = self.peers_ready(&id);
+                    if active {
+                        self.status(&id, "working");
                     }
                 }
                 Next::Stop => {
@@ -2971,7 +3009,8 @@ mod tests {
                     hub.interrupt(&view.id).unwrap();
                 }
                 tokio::time::timeout(Duration::from_secs(1), async {
-                    while hub.view(&view.id).unwrap().status != "stopped" {
+                    let expected = if action == "stop" { "stopped" } else { "idle" };
+                    while hub.view(&view.id).unwrap().status != expected {
                         tokio::task::yield_now().await;
                     }
                 })

@@ -394,7 +394,7 @@ async fn escape_preserves_posted_question_and_receipt_before_followup() {
         .unwrap();
     let q = question(&hub, &a.id).await;
     hub.interrupt(&a.id).unwrap();
-    idle(&hub, &a.id, "stopped").await;
+    idle(&hub, &a.id, "idle").await;
     assert_eq!(
         hub.view(&a.id).unwrap().questions[0]
             .wait_outcome

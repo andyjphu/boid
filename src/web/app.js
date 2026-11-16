@@ -53,9 +53,9 @@ function refreshComposerImages(id) {
   images.forEach((image, index) => {
     const chip = element('span', 'image-chip');
     chip.append(element('span', '', `[Image #${index + 1}]`));
-    if (image.promise) { chip.setAttribute('aria-busy', 'true'); chip.title = 'Uploading image'; }
+    if (image.promise) { chip.setAttribute('aria-busy', 'true'); chip.setAttribute('aria-description', 'Uploading image'); }
     if (image.error) {
-      chip.classList.add('image-failed'); chip.title = image.error;
+      chip.classList.add('image-failed'); chip.setAttribute('aria-description', image.error);
       if (image.file) {
         const retry = element('button', '', '↻'); retry.type = 'button'; retry.setAttribute('aria-label', `Retry image #${index + 1}`);
         retry.onclick = () => uploadComposerImage(id, image).catch(() => {}); chip.append(retry);
@@ -446,7 +446,7 @@ function createPaneGroup(record) {
   const header = element('header', 'pane-header');
   const strip = element('div', 'pane-tabs'); strip.setAttribute('role', 'tablist'); strip.setAttribute('aria-label', 'Sessions');
   const plus = element('button', 'subpane-add', '+'); plus.type = 'button'; plus.setAttribute('aria-label', 'New agent tab');
-  plus.title = 'New agent · right-click for active agents';
+  plus.setAttribute('aria-description', 'Right-click for active agents');
   const body = element('div', 'pane-body');
   const group = { record, pane, header, strip, plus, body };
   plus.addEventListener('click', () => createAgent(group, plus));
@@ -745,7 +745,7 @@ function makeCredentialPanel(host, actions) {
         const tr = element('tr'); tr.dataset.credentialId = row.id; tr.setAttribute('aria-selected', String(row.id === selectedId));
         const kind = element('td', 'credential-type', row.type === 'api_key' ? 'API key' : 'Subscription');
         const rowName = displayName(row);
-        const identity = element('td'), choose = element('button', 'credential-name', rowName); choose.type = 'button'; choose.title = rowName;
+        const identity = element('td'), choose = element('button', 'credential-name', rowName); choose.type = 'button';
         choose.disabled = !selectable; choose.setAttribute('aria-label', `Use ${rowName}`); choose.onclick = () => act(choose, () => actions.select(row.id)); identity.append(choose);
         const editCell = element('td'), edit = element('button', 'credential-action'); edit.type = 'button'; edit.setAttribute('aria-label', `Edit ${rowName}`);
         edit.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"><path d="m3 10 7-7 3 3-7 7-4 1zM9 4l3 3"/></svg>';
@@ -771,7 +771,7 @@ function renderScreens() {
     if (!link) {
       link = element("a", "", id); link.dataset.screen = id;
       link.setAttribute("aria-label", `Screen ${number}`);
-      link.title = `Screen ${number} · drag a pane tab here to move it`;
+      link.setAttribute('aria-description', 'Drag a pane tab here to move it');
       const url = new URL(location.href); url.searchParams.set("screen", id); url.hash = "";
       link.href = url.pathname + url.search;
       link.addEventListener("click", event => {
@@ -1373,7 +1373,6 @@ function makePane(name, cwd, kind, id) {
   const title = element("span", "pane-title", name);
   const status = element("span", "pane-status", "idle");
   const directory = element("p", "pane-cwd", cwd || "Server working directory");
-  directory.title = cwd || "Server working directory";
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
@@ -1381,7 +1380,7 @@ function makePane(name, cwd, kind, id) {
   close.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
   close.type = "button";
   close.setAttribute("aria-label", `Close ${name}`);
-  close.title = kind === "agent" ? "End and close this agent" : "End and close this terminal";
+  close.setAttribute("aria-description", kind === "agent" ? "End and close this agent" : "End and close this terminal");
   directory.hidden = true;
   tab.append(paneIcon(kind), title, close);
   tab.draggable = true;
@@ -1391,7 +1390,7 @@ function makePane(name, cwd, kind, id) {
 }
 
 function enablePaneRename(ui, kind) {
-  ui.title.title = "Double-click or press F2 to rename";
+  ui.title.setAttribute("aria-description", "Double-click or press F2 to rename");
   ui.title.tabIndex = ui.inactive ? -1 : 0;
   ui.setName = name => {
     ui.nameRevision = (ui.nameRevision || 0) + 1;
@@ -1756,8 +1755,8 @@ function updateContextUsage(ui) {
   ui.contextLabel.textContent = amount;
   const detail = used === null ? "Context usage available after the next model response."
     : `Last response: ${usage.input_tokens.toLocaleString("en")} input + ${usage.output_tokens.toLocaleString("en")} output tokens. Drafts and subsequent input are not included.`;
-  ui.contextLabel.title = detail;
-  ui.tab.title = detail;
+  ui.contextLabel.setAttribute("aria-description", detail);
+  ui.tab.setAttribute("aria-description", detail);
   updateContextVisibility(ui);
 }
 
@@ -2322,7 +2321,7 @@ function compactOutput(ui, item, content, text, label = "Output") {
   const openKey = `expanded${label}`;
   details.open = Boolean(item[openKey]);
   const summary = element("summary");
-  summary.title = `Expand or collapse ${label.toLowerCase()}`;
+  summary.setAttribute("aria-description", `Expand or collapse ${label.toLowerCase()}`);
   summary.append(element("span", "activity-label", label === "Arguments" ? "Tool arguments"
     : label === "Command" ? lines[0] : `${label} · ${lines.length} ${lines.length === 1 ? "line" : "lines"}`));
   const preview = element("pre", "activity-preview", lines.slice(0, 3).join("\n"));
@@ -2414,7 +2413,6 @@ function renderToolEntry(ui, item) {
   if (call) call.node.classList.toggle("tool-joined-call", joined);
   if (result) result.node.classList.toggle("tool-joined-result", joined);
   for (const entry of [call, result].filter(Boolean)) {
-    entry.node.title = tool.heading;
     entry.node.dataset.toolFailed = String(outcome.failed);
   }
   if ([call, result].some(entry => entry && selectedWithin(entry.node))) {
@@ -2429,7 +2427,7 @@ function renderToolEntry(ui, item) {
   header.append(element("span", "tool-status", outcome.label));
   const details = element("details", "activity-details tool-operation");
   details.open = expandedTool;
-  header.title = "Expand or collapse tool call and result";
+  header.setAttribute("aria-description", "Expand or collapse tool call and result");
   details.append(header);
   if (call?.partial) details.append(fullEntryButton(ui, call, "Load full arguments"));
   else if (rest) details.append(element("pre", "tool-text activity-full", rest));
@@ -2550,7 +2548,7 @@ function renderCommunication(ui, item, message) {
       node.type = "button";
       node.setAttribute("aria-label", `Find this message in ${name}`);
       node.addEventListener("click", () => locateCommunication(ui, message, id));
-    } else if (id === otherId && ended) node.title = "Session ended";
+    } else if (id === otherId && ended) node.setAttribute("aria-description", "Session ended");
     header.append(node, document.createTextNode(arrow));
   }
   item.body.replaceChildren(header, element("div", "peer-text", message.text));
@@ -3018,7 +3016,6 @@ function snapshot(views, terminalViews = [], catalog = views.map(view => String(
     rememberPosition(ui);
     ui.setName(view.name || String(view.id));
     ui.directory.textContent = view.cwd;
-    ui.directory.title = view.cwd;
     const present = new Set();
     for (const entry of view.entries || []) {
       present.add(String(entry.id));
@@ -3317,7 +3314,6 @@ function attachTerminal(info) {
     info = latest;
     ui.setName(info.name);
     ui.directory.textContent = info.cwd || "";
-    ui.directory.title = (info.cwd || "") + (info.running && info.cwd_observed === false ? " (last known directory)" : "");
     ui.status.textContent = "";
     if (info.persistence_error) showError(ui.error, `History could not be saved: ${info.persistence_error}`);
     if (!info.running) term.options.disableStdin = true;

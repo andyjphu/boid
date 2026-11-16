@@ -302,7 +302,7 @@ async fn failed_and_cancelled_compaction_keep_prior_context_and_queued_input() {
     hub.message(&view.id, "/oai-compact".into()).unwrap();
     let (_, _, release) = mock.request().await;
     hub.interrupt(&view.id).unwrap();
-    idle(&hub, &view.id, "stopped").await;
+    idle(&hub, &view.id, "idle").await;
     let _ = release.send((StatusCode::OK, compacted(window())));
     assert_eq!(engine(&hub, &view.id)["history"], original);
     hub.message(&view.id, "/oai-compact".into()).unwrap();
