@@ -1739,6 +1739,13 @@ impl Hub {
                 // The worker's profile belongs to its current request. Only the
                 // authoritative next-request preference changes here.
                 record.view.profile = profile.clone();
+                if enabled {
+                    // Transcript feedback only; never add this to model history.
+                    record.view.entries.push(Self::make_entry(
+                        "notice",
+                        "Fast mode enabled".into(),
+                    ));
+                }
                 Ok(())
             })?;
             Ok(profile)

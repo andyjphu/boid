@@ -1718,6 +1718,7 @@ function closeModelPicker(ui) {
 
 function updateProfile(ui, profile, contextWindow = ui.view.context_window) {
   ui.view.profile = profile; ui.view.context_window = contextWindow;
+  ui.tab.toggleAttribute("data-fast", profile?.service_tier === "priority");
   updateContextUsage(ui);
   ui.resizeInput?.();
 }
@@ -2312,7 +2313,7 @@ function addSession(view) {
   sessions.set(id, ui);
   refreshComposerImages(id);
   setQuestions(ui, view.questions || []);
-  updateContextUsage(ui);
+  updateProfile(ui, view.profile, view.context_window);
   setStatus(ui, view.status);
   for (const [index, entry] of (view.entries || []).entries()) putEntry(ui, { ...entry, history_index: (view.history?.start || 0) + index });
   setPending(ui, view.pending || []);
@@ -2919,7 +2920,9 @@ function renderEntry(ui, item) {
   } else if (kind === "tool_arguments") {
     body.replaceChildren(compactOutput(ui, item, element("pre", "tool-text", text), text, "Arguments"));
   } else {
-    body.textContent = text;
+    // Keep the recorded interruption event intact for server recovery.
+    body.textContent = kind === "notice" && text === "Execution interrupted. Completed results retained."
+      ? "Interrupted." : text;
     if (kind === "user") appendEntryImages(ui, item);
   }
 }
