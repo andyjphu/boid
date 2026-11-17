@@ -66,7 +66,7 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
     let entries = hub.view(&view.id).unwrap().entries;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, "notice");
-    assert_eq!(entries[0].text, "Fast mode enabled");
+    assert_eq!(entries[0].text.as_str(), "Fast mode enabled");
     assert!(
         hub.0.data.lock().unwrap().sessions[&view.id]
             .draft
@@ -151,7 +151,7 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
     );
     assert_eq!(restored.profile(&view.id).unwrap()["model"], "chosen-model");
     assert_eq!(restored.view(&view.id).unwrap().entries.iter()
-        .filter(|entry| entry.text == "Fast mode enabled").count(), 2,
+        .filter(|entry| entry.text.as_str() == "Fast mode enabled").count(), 2,
         "each enable transition is retained once across retries and restart");
     restored.shutdown().await;
     server.abort();

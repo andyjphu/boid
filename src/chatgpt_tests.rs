@@ -798,6 +798,6 @@ async fn fast_subscription_capability_and_wire_preserve_account_model_and_reason
     let entries = hub.view(&view.id).unwrap().entries;
     assert_eq!(entries.len(), 1, "configuration adds only the fast-mode UI notice");
     assert_eq!(entries[0].kind, "notice");
-    assert_eq!(entries[0].text, "Fast mode enabled");
+    assert_eq!(entries[0].text.as_str(), "Fast mode enabled");
     hub.shutdown().await;
 }
