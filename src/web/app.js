@@ -762,10 +762,33 @@ function makeCredentialPanel(host, actions) {
 const screensNav = document.querySelector("#screens");
 const addScreenButton = document.querySelector("#add-screen");
 const activeScreenKey = `boid:screen:${location.origin}`;
-function paneScreen(key) { return screenCatalog.panes[key] || 1; }
+function screenNumbers() {
+  const removed = new Set(screenCatalog.removed || []);
+  return Array.from({ length: screenCatalog.count }, (_, index) => index + 1).filter(number => !removed.has(number));
+}
+function screenExists(number) {
+  return Number.isInteger(number) && number > 0 && number <= screenCatalog.count && !(screenCatalog.removed || []).includes(number);
+}
+function firstScreen() { return screenNumbers()[0] || 1; }
+function paneScreen(key) { return screenCatalog.panes[key] || firstScreen(); }
+const screenCreations = new Map();
+const screenRemovals = new Set();
+function beginScreenCreation(number) { screenCreations.set(number, (screenCreations.get(number) || 0) + 1); }
+function endScreenCreation(number) {
+  const remaining = (screenCreations.get(number) || 1) - 1;
+  if (remaining) screenCreations.set(number, remaining);
+  else { screenCreations.delete(number); pruneEmptyScreen(number); }
+}
+async function pruneEmptyScreen(number) {
+  if (number === activeScreen || !screenExists(number) || screenCreations.has(number) || screenRemovals.has(number)) return;
+  screenRemovals.add(number);
+  try { receiveScreens(await request(`/api/screens/${number}`, "DELETE")); }
+  catch (error) { showError(workspaceError, error); }
+  finally { screenRemovals.delete(number); }
+}
 function renderScreens() {
   const wanted = new Set();
-  for (let number = 1; number <= screenCatalog.count; number++) {
+  for (const [index, number] of screenNumbers().entries()) {
     const id = String(number); wanted.add(id);
     let link = screensNav.querySelector(`[data-screen="${number}"]`);
     if (!link) {
@@ -795,6 +818,8 @@ function renderScreens() {
       });
       screensNav.insertBefore(link, addScreenButton);
     }
+    link.textContent = String(index + 1);
+    link.setAttribute("aria-label", `Screen ${index + 1}`);
     if (number === activeScreen) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
@@ -806,6 +831,10 @@ function receiveScreens(value, reconcile = true) {
   const previous = screenCatalog;
   screenCatalog = value;
   renderScreens();
+  if (reconcile && !screenExists(activeScreen)) {
+    switchScreen(firstScreen(), { prune: false });
+    return;
+  }
   if (reconcile && catalogReady) {
     const changed = new Set([...Object.keys(previous.panes), ...Object.keys(value.panes)]);
     if ([...changed].some(key => (previous.panes[key] || 1) !== paneScreen(key)
@@ -892,8 +921,9 @@ function clearScreenPanes() {
   paneResizeHandles.clear();
   reconcilingCatalog = false;
 }
-function switchScreen(number) {
-  if (number === activeScreen || number < 1 || number > screenCatalog.count) return Promise.resolve();
+function switchScreen(number, { prune = true } = {}) {
+  if (number === activeScreen || !screenExists(number)) return Promise.resolve();
+  const previous = activeScreen;
   finishPaneDrag();
   finishPaneResize(true);
   rememberPaneOrder();
@@ -904,7 +934,9 @@ function switchScreen(number) {
   storeScreenSelection();
   loadPaneOrder(agentDefaults.cwd);
   layout();
-  return startEvents();
+  const ready = startEvents();
+  if (prune) pruneEmptyScreen(previous);
+  return ready;
 }
 addScreenButton.addEventListener("click", async () => {
   addScreenButton.disabled = true;
@@ -3080,11 +3112,14 @@ function startEvents() {
   screenLoaded?.();
   const ready = new Promise(resolve => { screenLoaded = resolve; });
   const source = events = new EventSource(`/api/events?history=recent&screen=${activeScreen}`);
-  events.onopen = () => { document.body.classList.remove("disconnected"); };
+  events.onopen = () => { if (events === source) document.body.classList.remove("disconnected"); };
   events.onerror = () => {
+    if (events !== source) return;
     document.body.classList.add("disconnected");
-    request("/api/config").catch(error => {
-      if (error.status === 401) { events.close(); requireLogin(); }
+    request("/api/screens").then(value => {
+      if (events === source) receiveScreens(value);
+    }).catch(error => {
+      if (events === source && error.status === 401) { source.close(); requireLogin(); }
     });
   };
   events.onmessage = event => {
@@ -3094,6 +3129,7 @@ function startEvents() {
       if (message.type === "snapshot") {
         lastSequence = message.seq;
         receiveScreens(message.screens, false);
+        if (!screenExists(activeScreen)) { switchScreen(firstScreen(), { prune: false }); return; }
         if (message.pane_groups) receivePaneGroups(message.pane_groups, false);
         snapshot(message.sessions, message.terminals || [], message.catalog);
         if (credentialMode) request('/api/credentials').then(receiveCredentialRegistry).catch(showCredentialError);
@@ -3342,6 +3378,7 @@ function focusSession(ui) {
 async function createAgent(group = null, button = document.querySelector('#add-agent')) {
   button.disabled = true; workspaceError.hidden = true;
   const screen = activeScreen, startedAt = catalogRevision;
+  beginScreenCreation(screen);
   try {
     const view = await request(`/api/sessions?screen=${screen}${group && serverPaneGroups ? `&group_id=${encodeURIComponent(group.record.id)}` : ''}`, 'POST', { name: '', cwd: '~' });
     const key = `agent:${view.id}`;
@@ -3367,7 +3404,7 @@ async function createAgent(group = null, button = document.querySelector('#add-a
       login.onclick = () => openLogin(); workspaceError.append(' ', login);
     }
   }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; endScreenCreation(screen); }
 }
 const sessionHistory = element('dialog', 'session-history');
 sessionHistory.setAttribute('aria-label', 'Active agents');
@@ -3414,6 +3451,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
   button.disabled = true;
   workspaceError.hidden = true;
   const screen = activeScreen;
+  beginScreenCreation(screen);
   try {
     const info = await request(`/api/terminals?screen=${screen}`, "POST", { cols: 80, rows: 24, cwd: agentDefaults.cwd });
     const paneKey = `terminal:${info.id}`;
@@ -3421,7 +3459,7 @@ document.querySelector("#add-terminal").addEventListener("click", async event =>
     if (!terminalCatalog.has(String(info.id))) terminalCatalog.set(String(info.id), info);
     if (paneScreen(paneKey) === activeScreen) attachTerminal(terminalCatalog.get(String(info.id)));
   } catch (error) { showError(workspaceError, error); }
-  finally { button.disabled = false; }
+  finally { button.disabled = false; endScreenCreation(screen); }
 });
 
 
@@ -3680,10 +3718,10 @@ async function connect(token) {
   agentDefaults.cwd = launchCwd || config.cwd;
 
   receiveScreens(await request("/api/screens"), false);
-  if (!orderKey) {
+  if (!orderKey || !screenExists(activeScreen)) {
     let saved; try { saved = sessionStorage.getItem(activeScreenKey); } catch {}
-    const number = Number(new URLSearchParams(location.search).get("screen") || saved || 1);
-    activeScreen = Number.isInteger(number) && number > 0 && number <= screenCatalog.count ? number : 1;
+    const number = Number(new URLSearchParams(location.search).get("screen") || saved || firstScreen());
+    activeScreen = screenExists(number) ? number : firstScreen();
   }
   storeScreenSelection();
   loadPaneOrder(agentDefaults.cwd);

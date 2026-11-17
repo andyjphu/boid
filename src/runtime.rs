@@ -22,6 +22,7 @@ use archive::ArchivedReceipt;
 mod incremental_benchmark;
 mod journal;
 mod persistence;
+mod screen_lifecycle;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
 mod diagnostics_suspension_tests;
@@ -312,7 +313,10 @@ struct Screens {
     groups_revision: u64,
     #[serde(default)]
     revision: u64,
+    // Stable IDs are never reused. Labels are ordinals over nonremoved IDs.
     count: u32,
+    #[serde(default)]
+    removed: BTreeSet<u32>,
     panes: BTreeMap<String, u32>,
 }
 impl Default for Screens {
@@ -322,16 +326,32 @@ impl Default for Screens {
             groups: BTreeMap::new(),
             groups_revision: 0,
             count: 1,
+            removed: BTreeSet::new(),
             panes: BTreeMap::new(),
         }
     }
 }
 impl Screens {
+    fn first(&self) -> u32 {
+        (1..=self.count)
+            .find(|id| !self.removed.contains(id))
+            .expect("Screen catalog must retain one window")
+    }
+    fn validate_catalog(&self) -> Result<()> {
+        if self.count == 0
+            || self.removed.len() >= self.count as usize
+            || self.removed.iter().any(|id| *id == 0 || *id > self.count)
+            || self.panes.values().any(|id| self.validate(*id).is_err())
+        {
+            bail!("Invalid screen assignments; original retained");
+        }
+        Ok(())
+    }
     fn screen(&self, key: &str) -> u32 {
-        self.panes.get(key).copied().unwrap_or(1)
+        self.panes.get(key).copied().unwrap_or_else(|| self.first())
     }
     fn validate(&self, screen: u32) -> Result<()> {
-        if screen == 0 || screen > self.count {
+        if screen == 0 || screen > self.count || self.removed.contains(&screen) {
             bail!("Unknown screen.");
         }
         Ok(())
@@ -346,6 +366,7 @@ struct Data {
     ending: BTreeSet<String>,
     archive_generation: u64,
     terminal_summaries: BTreeMap<String, Value>,
+    terminal_creating: BTreeSet<String>,
     messages: BTreeMap<(String, String), Communication>,
     message_receipts: BTreeMap<(String, String), Receipt>,
 }
@@ -452,15 +473,8 @@ impl Hub {
                 validate_agent_name(name)?;
             }
             let mut screens: Screens = store.load_screens()?;
+            screens.validate_catalog()?;
             Self::validate_groups(&mut screens, client.auth.as_deref())?;
-            if screens.count == 0
-                || screens
-                    .panes
-                    .values()
-                    .any(|id| *id == 0 || *id > screens.count)
-            {
-                bail!("Invalid screen assignments; original retained");
-            }
             store.save_screens(&screens)?;
             let records = Self::load_catalog(&store)?;
             let messages: BTreeMap<_, _> = records
@@ -482,6 +496,7 @@ impl Hub {
                     ending: BTreeSet::new(),
                     archive_generation: 0,
                     terminal_summaries: BTreeMap::new(),
+                    terminal_creating: BTreeSet::new(),
                     messages: messages.clone(),
                     message_receipts: BTreeMap::new(),
                 }),
@@ -838,11 +853,32 @@ impl Hub {
     }
     // Used before a newly created terminal can emit its first catalog event.
     pub fn assign_terminal_screen(&self, id: &str, screen: u32) -> Result<()> {
+        self.reserve_terminal_screen(id, Some(screen)).map(|_| ())
+    }
+    pub fn reserve_terminal_screen(&self, id: &str, requested: Option<u32>) -> Result<u32> {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
+            if data.closing {
+                bail!("Server is shutting down.");
+            }
+            let screen = requested.unwrap_or_else(|| data.screens.first());
             self.assign_screen_locked(&mut data, &format!("terminal:{id}"), screen)?;
-            self.ensure_terminal_group_locked(&mut data, id, screen)
+            self.ensure_terminal_group_locked(&mut data, id, screen)?;
+            data.terminal_creating.insert(id.to_owned());
+            Ok(screen)
         })
+    }
+    pub fn cancel_terminal_creation(&self, id: &str) {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            if data.terminal_creating.remove(id) {
+                if let Err(error) =
+                    self.remove_group_member_locked(&mut data, &format!("terminal:{id}"))
+                {
+                    eprintln!("Cannot save failed terminal creation cleanup: {error}");
+                }
+            }
+        });
     }
     pub fn move_pane(&self, key: &str, screen: u32) -> Result<Value> {
         crate::blocking::run(|| {
@@ -975,6 +1011,7 @@ impl Hub {
                     eprintln!("Cannot save terminal pane-group removal: {error}");
                 }
             }
+            data.terminal_creating.remove(id);
             data.terminal_summaries.insert(id.into(), summary.clone());
             self.emit(&mut data, json!({"type":"terminal","terminal":summary}));
         })
@@ -1445,18 +1482,28 @@ impl Hub {
     }
     #[cfg(test)]
     pub fn create(&self, input: Create) -> Result<View> {
-        self.create_on_screen(input, 1)
+        self.create_in_selected_group(input, None, None)
     }
     pub fn create_on_screen(&self, input: Create, screen: u32) -> Result<View> {
         self.create_in_group(input, screen, None)
     }
     pub fn create_in_group(
         &self,
-        mut input: Create,
+        input: Create,
         screen: u32,
         group_id: Option<&str>,
     ) -> Result<View> {
-        self.validate_screen(screen)?;
+        self.create_in_selected_group(input, Some(screen), group_id)
+    }
+    pub fn create_in_selected_group(
+        &self,
+        mut input: Create,
+        requested_screen: Option<u32>,
+        group_id: Option<&str>,
+    ) -> Result<View> {
+        if let Some(screen) = requested_screen {
+            self.validate_screen(screen)?;
+        }
         crate::blocking::run(|| {
             input.name = input.name.trim().to_owned();
             if !input.name.is_empty() {
@@ -1529,6 +1576,8 @@ impl Hub {
                 if data.closing {
                     bail!("Server is shutting down.");
                 }
+                let screen = requested_screen.unwrap_or_else(|| data.screens.first());
+                data.screens.validate(screen)?;
                 if record.view.name.is_empty() {
                     record.view.name = next_agent_name(&data, &self.0.agent_names, uuid.as_u128());
                 }

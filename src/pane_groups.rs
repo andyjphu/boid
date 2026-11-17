@@ -75,7 +75,10 @@ mod tests {
             hub.pane_groups()["groups"][0]["tabs"],
             json!([retained_key])
         );
-        assert_eq!(hub.profile(&background.id).unwrap()["credential_id"], assigned);
+        assert_eq!(
+            hub.profile(&background.id).unwrap()["credential_id"],
+            assigned
+        );
         {
             let data = hub.0.data.lock().unwrap();
             assert_eq!(data.screens.groups[&group].tabs, vec![retained_key.clone()]);
@@ -88,8 +91,14 @@ mod tests {
         let restored = Hub::open(client(), dir.path().join("state")).unwrap();
         assert!(restored.view(&foreground.id).is_none());
         assert!(restored.profile(&foreground.id).is_err());
-        assert_eq!(restored.profile(&background.id).unwrap()["pane_group_id"], group);
-        assert_eq!(restored.profile(&background.id).unwrap()["credential_id"], assigned);
+        assert_eq!(
+            restored.profile(&background.id).unwrap()["pane_group_id"],
+            group
+        );
+        assert_eq!(
+            restored.profile(&background.id).unwrap()["credential_id"],
+            assigned
+        );
         let saved: Screens = restored.0.store.load_screens().unwrap();
         assert_eq!(saved.groups[&group].tabs, vec![retained_key]);
         assert!(!saved.panes.contains_key(&ended_key));
@@ -198,8 +207,13 @@ impl Hub {
         let registry = auth.map(|auth| auth.credentials()).transpose()?;
         let mut seen = BTreeSet::new();
         let mut changed = false;
+        let fallback = screens.first();
         for (id, group) in &mut screens.groups {
-            if id != &group.id || group.screen == 0 || group.screen > screens.count {
+            if id != &group.id
+                || group.screen == 0
+                || group.screen > screens.count
+                || screens.removed.contains(&group.screen)
+            {
                 bail!("Invalid saved pane groups; original retained.");
             }
             for key in &group.tabs {
@@ -208,7 +222,7 @@ impl Hub {
                 {
                     bail!("Conflicting saved pane membership; original retained.");
                 }
-                if screens.panes.get(key).copied().unwrap_or(1) != group.screen {
+                if screens.panes.get(key).copied().unwrap_or(fallback) != group.screen {
                     bail!("Conflicting saved pane screen; original retained.");
                 }
             }
