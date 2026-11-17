@@ -141,7 +141,14 @@ async fn exhausted_retries_stop_after_four_attempts() {
         .unwrap_err();
     assert_eq!(mock.count.load(Ordering::SeqCst), 4);
     assert!(error.to_string().contains("after 4 HTTP attempts"));
-    assert!(events.iter().rev().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
     assert!(error.to_string().contains("upstream reset"));
     assert!(!error.to_string().contains("No error detail"));
 }
@@ -167,7 +174,13 @@ async fn permission_quota_and_invalid_requests_fail_without_retry() {
                 .is_err()
         );
         assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-        assert!(events.iter().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_delay_ms"].is_null());
+        assert!(
+            events
+                .iter()
+                .find(|e| e["type"] == "boid.request_failure")
+                .unwrap()["failure"]["retry_delay_ms"]
+                .is_null()
+        );
     }
     let plan = json!({"billing_route":"chatgpt"});
     assert!(
@@ -209,8 +222,20 @@ async fn transient_rate_limit_honors_retry_after_and_long_delays_are_not_shorten
             .is_err()
     );
     assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-    assert_eq!(events.iter().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_after_ms"], 1_801_000);
-    assert!(events.iter().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_after_ms"],
+        1_801_000
+    );
+    assert!(
+        events
+            .iter()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 }
 
 #[test]
@@ -288,9 +313,27 @@ async fn connect_failure_is_recorded_and_retried_with_a_bound() {
             .await
             .is_err()
     );
-    assert_eq!(events.iter().filter(|e| e["type"] == "boid.request_failure").count(), 4);
-    assert!(events.iter().filter(|e| e["type"] == "boid.request_failure").all(|e| e["failure"]["phase"] == "connect"));
-    assert!(events.iter().rev().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "boid.request_failure")
+            .count(),
+        4
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "boid.request_failure")
+            .all(|e| e["failure"]["phase"] == "connect")
+    );
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 }
 
 #[tokio::test]
@@ -310,8 +353,22 @@ async fn broad_http_failures_and_empty_stream_share_one_retry_budget() {
             .is_err()
     );
     assert_eq!(mock.count.load(Ordering::SeqCst), 4);
-    assert_eq!(events.iter().rev().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["phase"], "stream");
-    assert!(events.iter().rev().find(|e| e["type"] == "boid.request_failure").unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["phase"],
+        "stream"
+    );
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 
     let mock = Mock::new(vec![
         response(
@@ -562,12 +619,20 @@ async fn unknown_hosted_work_and_permanent_errors_never_replay() {
 
 #[tokio::test]
 async fn nested_long_retry_advice_waits_then_recovers_without_early_request() {
-    let body = stream(&[json!({"type":"error","error":{"code":"server_is_overloaded","headers":{"retry-after":"325","retry-after-ms":"325000"}}})]);
+    let body = stream(&[
+        json!({"type":"error","error":{"code":"server_is_overloaded","headers":{"retry-after":"325","retry-after-ms":"325000"}}}),
+    ]);
     let mock = Mock::new(vec![response(200, &body, None), success()]).await;
     let client = mock.client();
     let (send, mut notices) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        client.respond(&[], json!([]), |e| { if e["type"] == "boid.request_retry" { send.send(e.clone()).unwrap(); } }).await
+        client
+            .respond(&[], json!([]), |e| {
+                if e["type"] == "boid.request_retry" {
+                    send.send(e.clone()).unwrap();
+                }
+            })
+            .await
     });
     notices.recv().await.unwrap();
     tokio::time::pause();

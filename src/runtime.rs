@@ -23,14 +23,14 @@ use archive::ArchivedReceipt;
 #[cfg(test)]
 mod handoff_tests;
 #[cfg(test)]
-mod response_retry_tests;
-#[cfg(test)]
 mod incremental_benchmark;
 mod journal;
 #[cfg(test)]
 mod message_dispatch_tests;
 mod persistence;
 mod recovery;
+#[cfg(test)]
+mod response_retry_tests;
 mod screen_lifecycle;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -1467,22 +1467,33 @@ impl Hub {
     pub fn retry_wait(&self, id: &str, delay_ms: Option<u64>) {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
-            let Some(handle) = data.sessions.get(id) else { return };
+            let Some(handle) = data.sessions.get(id) else {
+                return;
+            };
             let deadline = if handle.record.view.status == "working" {
                 delay_ms.map(|delay| {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH)
-                        .unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64;
                     now.saturating_add(delay)
                 })
-            } else { None };
-            if handle.record.view.retry_at_ms == deadline { return; }
+            } else {
+                None
+            };
+            if handle.record.view.retry_at_ms == deadline {
+                return;
+            }
             // Publish the deadline once, without reserving or awaiting disk I/O.
             let result = self.update_locked(&mut data, id, None, |record| {
                 record.view.retry_at_ms = deadline;
                 Ok(())
             });
             drop(data);
-            if let Err(error) = result { self.fault(id, error); }
+            if let Err(error) = result {
+                self.fault(id, error);
+            }
         });
     }
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
@@ -4102,9 +4113,13 @@ mod tests {
     async fn retry_deadline_is_published_once_and_cleared_with_status() {
         let state = tempfile::tempdir().unwrap();
         let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
-        let view = hub.create(Create {
-            name: "retry-clock".into(), cwd: String::new(), message: String::new(),
-        }).unwrap();
+        let view = hub
+            .create(Create {
+                name: "retry-clock".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
         hub.entry(&view.id, "assistant", "retained fixture work");
         hub.status(&view.id, "working");
         let (_, mut events) = hub.subscribe();
@@ -4115,13 +4130,22 @@ mod tests {
         hub.retry_wait(&view.id, None);
         {
             let data = hub.0.data.lock().unwrap();
-            assert_eq!((data.seq, data.sessions[&view.id].record.journal_seq), before,
-                "normal request start must not publish or enqueue a checkpoint");
+            assert_eq!(
+                (data.seq, data.sessions[&view.id].record.journal_seq),
+                before,
+                "normal request start must not publish or enqueue a checkpoint"
+            );
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         hub.retry_wait(&view.id, Some(325_000));
         let deadline = hub.view(&view.id).unwrap().retry_at_ms.unwrap();
-        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         assert!((now + 325_000..=after + 325_000).contains(&deadline));
         let event = events.try_recv().unwrap();
         assert_eq!(event["type"], "status");
@@ -4137,7 +4161,10 @@ mod tests {
         assert!(events.try_recv().unwrap()["retry_at_ms"].is_null());
         assert!(hub.view(&view.id).unwrap().retry_at_ms.is_none());
         hub.retry_wait(&view.id, Some(325_000));
-        assert!(events.try_recv().is_err(), "stopped session cannot acquire a wait deadline");
+        assert!(
+            events.try_recv().is_err(),
+            "stopped session cannot acquire a wait deadline"
+        );
         hub.shutdown().await;
     }
 
