@@ -30,6 +30,8 @@ never subtract browser and server timestamps across hosts.
 Browser `submitToDispatchMs` captures local dispatch delay; submit-to-headers,
 acknowledgment, entry, composer-clear, and DOM intervals overlap. DOM completion
 is not physical pixel display. Check viewport/document visibility in the sample.
+The opt-in per-message worker/send trace and immediate disable/clear procedure are
+in [input-path timing](input-timing.md); it is off by default.
 Server-Timing values are milliseconds and cover these nested intervals:
 
 | Metric | Scope |

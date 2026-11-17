@@ -268,7 +268,8 @@ function runMessageSubmissions(id) {
         if (item.images?.length) await Promise.all(item.images.map(image => uploadComposerImage(id, image)));
         item.attempted = true;
         inputTiming.dispatched(item.timing);
-        const admission = state.admission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text, ...(item.images?.length ? { images: item.images.map(image => image.id) } : {}) }, {},
+        const admission = state.admission = request(`/api/sessions/${encodeURIComponent(id)}/messages`, "POST", { text: item.text, ...(item.images?.length ? { images: item.images.map(image => image.id) } : {}) },
+          inputTiming.tracing(item.timing) ? { "X-Boid-Input-Timing": "1" } : {},
           item.timing ? (response, headersAt) => inputTiming.response(item.timing, response, headersAt) : null);
         try { inputTiming.acknowledge(item.timing, await admission); }
         finally { if (state.admission === admission) state.admission = null; }
@@ -313,6 +314,12 @@ const inputTiming = (() => {
       outcome: record.failure || (record.ended ? "observation_disabled" : record.ackAt == null ? (record.dispatchAt == null ? "awaiting_dispatch" : "awaiting_http")
         : entryMs == null ? "accepted_waiting_server_entry" : domMs == null ? "accepted_waiting_dom" : "rendered"),
       httpStatus: record.httpStatus,
+      enterToSubmitMs: record.enterAt == null ? null : elapsed({ startedAt: record.enterAt }, record.startedAt),
+      enterToDispatchMs: record.enterAt == null ? null : elapsed({ startedAt: record.enterAt }, record.dispatchAt),
+      enterToAcknowledgmentMs: record.enterAt == null ? null : elapsed({ startedAt: record.enterAt }, record.ackAt),
+      enterToServerEntryMs: record.enterAt == null ? null : elapsed({ startedAt: record.enterAt }, record.entryAt),
+      enterToDOMRenderMs: record.enterAt == null ? null : elapsed({ startedAt: record.enterAt }, record.domAt),
+      keydownQueueMs: record.keydownQueueMs,
       submitToDispatchMs: elapsed(record, record.dispatchAt),
       submitToHeadersMs: elapsed(record, record.headersAt),
       submitToAcknowledgmentMs: elapsed(record, record.ackAt),
@@ -327,13 +334,26 @@ const inputTiming = (() => {
     enable() { enabled = true; return stats(); },
     disable() { enabled = false; for (const record of records) record.ended = record.domAt == null || record.ackAt == null; entries.clear(); return stats(); },
     clear() { records.length = 0; entries.clear(); evictedRecords = evictedEntries = 0; },
-    samples() { return records.map(copy); }, stats,
+    samples() { return records.map(copy); },
+    // These are server-local durations. Match IDs to samples, but never subtract
+    // server timestamps from browser performance.now() timestamps.
+    server: () => request("/api/input-timing"),
+    stats,
   });
   return {
     startedAt: () => enabled ? performance.now() : null,
-    begin(sessionId, startedAt) {
+    keyboard(event) {
+      if (!enabled) return null;
+      const at = performance.now();
+      // Browser event timestamps share performance.now's time origin on current
+      // browsers. Treat an unexpected origin as unavailable, never as a delay.
+      const queue = at - event.timeStamp;
+      return { at, queueMs: Number.isFinite(queue) && queue >= 0 && queue < 60_000 ? queue : null };
+    },
+    begin(sessionId, startedAt, keyboard = null) {
       if (!enabled || startedAt == null) return null;
-      const record = { serial: ++serial, sessionId, startedAt, messageId: null,
+      const record = { serial: ++serial, sessionId, startedAt,
+        enterAt: keyboard?.at ?? null, keydownQueueMs: keyboard?.queueMs ?? null, messageId: null,
         httpStatus: null, dispatchAt: null, headersAt: null, ackAt: null, clearAt: null,
         entryAt: null, entrySource: null, domAt: null, inViewport: null,
         documentVisible: null, serverTiming: {}, failure: null, ended: false };
@@ -341,6 +361,7 @@ const inputTiming = (() => {
       if (records.length > limit) { records.shift(); evictedRecords++; }
       return record;
     },
+    tracing: record => current(record),
     dispatched(record) { if (current(record)) record.dispatchAt = performance.now(); },
     response(record, response, headersAt) {
       if (!current(record)) return;
@@ -2202,6 +2223,7 @@ function addSession(view) {
   ui.resizeInput = resizeInput;
   let historyIndex = null;
   let savedDraft = null;
+  let enterTiming = null;
   ui.input.addEventListener("input", () => { noteMessageDraft(ui, true); historyIndex = null; savedDraft = null; ui.slashDismissed = false; ui.slashCommand = null; resizeInput(); activatePromptSpace(ui); });
   ui.traceHeight = ui.trace.clientHeight;
   const traceResize = new ResizeObserver(() => {
@@ -2258,11 +2280,14 @@ function addSession(view) {
     }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
+      enterTiming = inputTiming.keyboard(event);
       ui.composer.requestSubmit();
     }
   });
   ui.composer.addEventListener("submit", async event => {
     event.preventDefault();
+    const keyboard = enterTiming;
+    enterTiming = null;
     if (!ui.input.value.trim() && !ui.messageState.images.length) return;
     noteMessageDraft(ui);
     const submittedAt = inputTiming.startedAt();
@@ -2303,7 +2328,7 @@ function addSession(view) {
     }
     const submitted = !ui.slashSuggestion.hidden ? ui.slashCommand : text;
     const item = { text: submitted, images: [...state.images], revision: state.revision, attempted: false,
-      timing: inputTiming.begin(id, submittedAt) };
+      timing: inputTiming.begin(id, submittedAt, keyboard) };
     state.queue.push(item);
     scheduleMessageRecovery();
     if (!state.paused) ui.error.hidden = true;
