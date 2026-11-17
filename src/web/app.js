@@ -2964,7 +2964,8 @@ function putEntry(ui, entry, delta = false) {
     node.dataset.kind = kind;
     node.dataset.entryId = id;
     const body = element("div", "entry-body");
-    if (kind === "context" && ui.entries.size === 0) {
+    if (kind === "context" && [...ui.entries.values()].every(item =>
+      item.kind === "notice" && item.text === "Fast mode enabled")) {
       const details = element("details", "session-context");
       details.append(element("summary", null, "Context"), body);
       const raw = element("a", "raw-transcript", "Full session record");

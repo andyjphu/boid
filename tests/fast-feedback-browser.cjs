@@ -72,7 +72,34 @@ const root = path.resolve(__dirname, '../src/web');
     assert.equal(await color(), initialColor);
     assert.equal(await notice.getByText('Fast mode enabled', { exact: true }).count(), 1, 'historical enable notice retained');
     assert.ok(mutations.every(url => url.endsWith('/fast')), 'commands never sent as model messages');
+    // An empty draft can publish multiple enable notices before its first input.
+    // Exercise entry events rather than replacing history with a snapshot.
+    const draft = agents[1];
+    draft.entries = [];
+    await page.reload(); await page.waitForFunction(() => sessions.has('swift'));
+    const draftPane = page.locator('[data-pane-key="agent:swift"]');
+    const append = async entry => {
+      draft.entries.push(entry);
+      await emit({ type: 'entry', session_id: draft.id, entry });
+    };
+    for (let i = 0; i < 2; i++) await append({ id: `draft-fast-${i}`, kind: 'notice', text: 'Fast mode enabled' });
+    await append({ id: 'draft-context', kind: 'context', text: 'Initial context must remain collapsed.' });
+    await append({ id: 'draft-user', kind: 'user', text: 'First operator input' });
+    await draftPane.locator('[data-entry-id="draft-user"]').waitFor();
+    const initialContext = draftPane.locator('[data-entry-id="draft-context"] details.session-context');
+    await initialContext.waitFor();
+    assert.equal(await initialContext.getAttribute('open'), null);
+    assert.equal(await initialContext.locator('.entry-body').isVisible(), false);
+    assert.deepEqual(await draftPane.locator('.entry').evaluateAll(nodes => nodes.map(node => node.dataset.entryId)), draft.entries.map(entry => entry.id));
+    await append({ id: 'later-context', kind: 'context', text: 'Later context retains its existing display.' });
+    await draftPane.getByText('Later context retains its existing display.', { exact: true }).waitFor();
+    assert.equal(await draftPane.locator('[data-entry-id="later-context"] details').count(), 0);
+    await page.reload(); await page.waitForFunction(() => sessions.has('swift'));
+    await initialContext.waitFor();
+    assert.equal(await initialContext.getAttribute('open'), null, 'initial context stays collapsed after history restore');
+    assert.deepEqual(await draftPane.locator('.entry').evaluateAll(nodes => nodes.map(node => node.dataset.entryId)), draft.entries.map(entry => entry.id));
+    if (process.env.SCREENSHOT) await page.screenshot({ path: process.env.SCREENSHOT.replace(/\.png$/, '-activation.png') });
     assert.deepEqual(errors, []);
-    console.log('PASS fast feedback: accepted/rejected toggle, per-agent red active/inactive tab, reconnect, notice style/dedup, off reset, shortened interrupt, retained results, no message submissions');
+    console.log('PASS fast feedback: accepted/rejected toggle, per-agent red active/inactive tab, reconnect, notice style/dedup, off reset, shortened interrupt, retained results, no message submissions; draft activation live-event order and collapsed context survive reload');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

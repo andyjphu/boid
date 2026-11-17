@@ -52,6 +52,7 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
         )
         .unwrap();
     let before = hub.profile(&view.id).unwrap();
+    let (_, mut events) = hub.subscribe();
     let fast = hub
         .set_fast(&view.id, true, &hub.profile(&view.id).unwrap())
         .unwrap();
@@ -90,6 +91,10 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
         seq,
         "idempotent retry emits no new mutation"
     );
+    hub.set_fast(&view.id, false, &hub.profile(&view.id).unwrap()).unwrap();
+    hub.set_fast(&view.id, true, &hub.profile(&view.id).unwrap()).unwrap();
+    let draft_entries = hub.view(&view.id).unwrap().entries;
+    assert_eq!(draft_entries.len(), 2);
     // A chooser opened before /fast must preserve that newer preference.
     let mut model = before.clone();
     model["model"] = json!("chosen-model");
@@ -104,6 +109,21 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
     assert!(!first.to_string().contains("Fast mode enabled"), "UI notice must not enter model input");
     assert_eq!(first["model"], "chosen-model");
     assert_eq!(first["reasoning"]["effort"], before["reasoning_effort"]);
+    // The response is held: compare the actual event stream with authoritative
+    // history before any assistant output can add entries.
+    let activated = hub.view(&view.id).unwrap();
+    let mut published = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event["type"] == "entry" && event["session_id"] == view.id {
+            published.push(event["entry"]["id"].as_str().unwrap().to_owned());
+        }
+    }
+    let expected: Vec<_> = activated.entries.iter().map(|entry| entry.id.clone()).collect();
+    assert_eq!(published, expected, "live entries must exactly match history order without omissions or duplicates");
+    assert_eq!(activated.entries[0].id, draft_entries[0].id);
+    assert_eq!(activated.entries[1].id, draft_entries[1].id);
+    assert_eq!(activated.entries[2].kind, "context");
+    assert_eq!(activated.entries[3].kind, "user");
     hub.set_fast(&view.id, false, &hub.profile(&view.id).unwrap())
         .unwrap();
     assert_eq!(hub.view(&view.id).unwrap().status, "working");
@@ -151,7 +171,7 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
     );
     assert_eq!(restored.profile(&view.id).unwrap()["model"], "chosen-model");
     assert_eq!(restored.view(&view.id).unwrap().entries.iter()
-        .filter(|entry| entry.text.as_str() == "Fast mode enabled").count(), 2,
+        .filter(|entry| entry.text.as_str() == "Fast mode enabled").count(), 3,
         "each enable transition is retained once across retries and restart");
     restored.shutdown().await;
     server.abort();

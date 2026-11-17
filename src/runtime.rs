@@ -1235,7 +1235,12 @@ impl Hub {
                 if next.view.name == handle.record.view.name {
                     next.view.name = activation_name;
                 }
-                next.view.entries.insert(0, Self::initial_context(&next));
+                // Draft feedback has already been published. Keep that prefix
+                // stable so append-only events include context before new input.
+                next.view.entries.insert(
+                    handle.record.view.entries.len(),
+                    Self::initial_context(&next),
+                );
             }
         }
         // Engine profile describes the last/current request. Pane assignment and
