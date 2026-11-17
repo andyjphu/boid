@@ -2180,6 +2180,7 @@ function addSession(view) {
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
       "/clear": "/clear  Start fresh model context",
+      "/clear-first-half": "/clear-first-half  Remove older half of context",
     };
     ui.slashMatches = Object.keys(commands).filter(command => command.startsWith(text));
     if (!ui.slashMatches.includes(ui.slashCommand)) ui.slashCommand = ui.slashMatches[0];

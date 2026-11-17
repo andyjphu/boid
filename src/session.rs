@@ -558,6 +558,65 @@ impl Session {
     pub fn has_pending_tools(&self) -> bool {
         !self.pending.is_empty()
     }
+    /// Remove approximately the older half by JSON text size, never splitting
+    /// a message or replaying an orphan function result. No token estimation call.
+    pub fn clear_first_half(&mut self) -> (usize, usize) {
+        fn size(value: &Value) -> usize {
+            match value {
+                Value::String(text) => text.len(),
+                Value::Array(items) => items.iter().map(size).sum(),
+                Value::Object(fields) => fields
+                    .iter()
+                    .map(|(key, value)| key.len() + size(value))
+                    .sum(),
+                _ => 8,
+            }
+        }
+        let history = self.take_history();
+        let total = history.len();
+        let target = history.iter().map(|item| size(item)).sum::<usize>() / 2;
+        let mut cut = 0;
+        let mut removed_size = 0;
+        while cut < total.saturating_sub(1) && removed_size < target {
+            removed_size += size(&history[cut]);
+            cut += 1;
+        }
+        // A retained call may need the reasoning from its original model output.
+        if history
+            .get(cut)
+            .is_some_and(|item| item["type"] == "function_call")
+        {
+            while cut > 0
+                && matches!(
+                    history[cut - 1]["type"].as_str(),
+                    Some("reasoning" | "function_call")
+                )
+            {
+                cut -= 1;
+            }
+        }
+        let mut calls = std::collections::BTreeSet::new();
+        let retained: Vec<_> = history
+            .into_iter()
+            .skip(cut)
+            .filter(|item| {
+                if item["type"] == "function_call" {
+                    if let Some(id) = item["call_id"].as_str() {
+                        calls.insert(id.to_owned());
+                    }
+                }
+                item["type"] != "function_call_output"
+                    || item["call_id"]
+                        .as_str()
+                        .is_some_and(|id| calls.contains(id))
+            })
+            .collect();
+        let count = retained.len();
+        self.clear_context();
+        self.restore_history(retained);
+        (total - count, count)
+    }
+
     pub fn clear_context(&mut self) {
         self.history.clear();
         self.partial_text.clear();
@@ -804,7 +863,8 @@ impl Session {
             }
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
-            "set_working_context" => hub.set_working_context(id, &call.arguments)
+            "set_working_context" => hub
+                .set_working_context(id, &call.arguments)
                 .unwrap_or_else(|error| json!({"error":error.to_string()})),
             "prompt_user" => {
                 match serde_json::from_str::<crate::runtime::PromptArgs>(&call.arguments) {

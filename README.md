@@ -160,3 +160,8 @@ not reach this handler and have no admission metrics. Browser rendering timings
 report DOM work, not when pixels became visible. No latency figure in the test
 fixtures establishes production speed: inspect samples from actual messages to
 measure the current browser and server.
+
+`/clear-first-half` removes approximately the older half of model context by
+text size, keeping whole messages and valid tool-call/result boundaries. The
+visible transcript and persistent working context remain intact. Like `/clear`,
+it runs at the next safe tool boundary and makes no provider call.
