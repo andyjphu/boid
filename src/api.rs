@@ -47,6 +47,8 @@ pub struct Client {
     cyber_access_program: Option<String>,
     #[cfg(test)]
     endpoint: Option<String>,
+    #[cfg(test)]
+    handoff_probe: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
 }
 
 impl Client {
@@ -93,6 +95,8 @@ impl Client {
             cyber_access_program,
             #[cfg(test)]
             endpoint: None,
+            #[cfg(test)]
+            handoff_probe: None,
         })
     }
 
@@ -218,7 +222,11 @@ impl Client {
         }
         // Encode borrowed input once. Building a Value with json! would copy all
         // historical payloads before serialization; retries can reuse these bytes.
+        #[cfg(test)]
+        self.test_handoff_mark("payload_encode_start");
         let body = crate::blocking::run(|| encode_input(&request, input))?;
+        #[cfg(test)]
+        self.test_handoff_mark("payload_encode_end");
         let request = self
             .http
             .post(endpoint)
@@ -257,6 +265,8 @@ impl Client {
                     })
             };
             http_attempt += 1;
+            #[cfg(test)]
+            self.test_handoff_mark("http_send");
             let sent = request
                 .try_clone()
                 .expect("In-memory JSON request body can be cloned")
@@ -570,6 +580,7 @@ impl Client {
             model: "test".into(),
             cyber_access_program: None,
             endpoint: Some("http://127.0.0.1:1".into()),
+            handoff_probe: None,
         }
     }
 
@@ -578,6 +589,21 @@ impl Client {
         let mut client = Self::test_client();
         client.endpoint = Some(endpoint);
         client
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_handoff_probe(
+        &mut self,
+        probe: Arc<dyn Fn(&'static str) + Send + Sync>,
+    ) {
+        self.handoff_probe = Some(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_handoff_mark(&self, stage: &'static str) {
+        if let Some(probe) = &self.handoff_probe {
+            probe(stage);
+        }
     }
 }
 

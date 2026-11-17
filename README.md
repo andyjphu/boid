@@ -46,16 +46,19 @@ State and background server logs live under `~/.local/share/boid` by default.
 For browser access without copying a server token, use
 [SSH-authorized passkey enrollment](docs/passkeys.md).
 
-After a restart, idle agents return ready for peer messages without a greeting.
-Explicitly stopped agents and interrupted or failed work remain paused until
-operator input. Already accepted peer messages can run after recovery; simply
-restoring an idle agent does not start a model request. `list_agents` reports
-whether each open agent is listening. Browser reloads do not change availability.
+After a clean restart, idle agents return ready for peer messages without a
+greeting. Explicitly stopped agents remain paused until operator input. After
+an unclean shutdown, unfinished actions and queued work are retained for review
+instead of automatically replayed. Fresh operator input can continue the agent.
+Browser reloads do not change agent availability.
 
-Streaming text is saved through a bounded background journal queue. Writes
-already waiting together can share a disk sync. A crash can lose the unfinished
-stream tail that has not reached disk; completed responses, tool claims and
-results, peer receipts, and shutdown still wait for their durable checkpoints.
+Model responses, tool starts/results, peer delivery and streaming update accepted
+server memory immediately. A background recorder saves them without making
+execution wait for disk. When recording falls behind, queued updates coalesce
+into the latest complete state, retaining transcript content while bounding the
+recording queue. A crash can lose the unsaved tail, including recent tool results;
+recovery treats unfinished actions as uncertain. End and graceful shutdown drain
+the recorder. Previously saved transcripts remain preserved.
 
 Rapid composer submissions retain their order across pane and screen changes.
 A draft clears only when the server acknowledges that exact draft revision.

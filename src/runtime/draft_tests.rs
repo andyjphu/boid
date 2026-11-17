@@ -295,6 +295,8 @@ async fn peer_input_activates_draft_and_records_final_recipient_name() {
         assert_eq!(handle.record.view.entries[0].kind, "context");
         assert_eq!(handle.record.view.entries[1].kind, "peer");
     }
+    durable(&hub, &sender.id);
+    durable(&hub, &target.id);
     let saved: Vec<Record> = hub.0.store.load().unwrap();
     assert_eq!(saved.len(), 2);
     hub.shutdown().await;

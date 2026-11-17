@@ -62,6 +62,12 @@ impl SessionStore {
         })
     }
 
+    pub(crate) fn state_directory(&self) -> Option<PathBuf> {
+        self.directory
+            .as_ref()
+            .map(|directory| directory.parent().unwrap().to_owned())
+    }
+
     pub fn image_directory(&self) -> Option<PathBuf> {
         self.directory
             .as_ref()

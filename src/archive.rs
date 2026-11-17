@@ -158,7 +158,7 @@ impl Hub {
             store.backup_before_diagnostics_suspension(id)?;
             record.version = 6;
         }
-        if !matches!(record.version, 1..=7) {
+        if !matches!(record.version, 1..=8) {
             bail!(
                 "Unsupported session version {}; original retained",
                 record.version
@@ -193,14 +193,14 @@ impl Hub {
             if probe.view.id != id {
                 bail!("Session identity differs from filename; original retained");
             }
-            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
+            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     probe.version
                 );
             }
             if probe.view.archived {
-                if probe.version == 7 {
+                if probe.version >= 7 {
                     let record = Self::read_active_without_diagnostics(store, &id)?;
                     store.save(&id, &record)?;
                     store.rotate_events(&id, record.journal_seq)?;

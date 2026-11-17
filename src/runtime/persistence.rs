@@ -1,10 +1,11 @@
-//! Ordered disk work. Never wait for this lane while holding the roster lock.
+//! Bounded background recording. Execution publishes memory state without waiting for disk.
 use super::*;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Condvar, Weak};
 
 const CAPACITY: usize = 16;
+const ARCHIVE_CAPACITY: usize = 16;
 pub(super) const DELTA_BYTES: usize = 64 * 1024;
 // Allow for JSON escaping, field names and the largest sequence number.
 pub(super) fn delta_bytes(entry: &str, text: &str) -> usize {
@@ -25,6 +26,17 @@ pub(super) enum Operation {
     Gate(mpsc::Sender<()>, mpsc::Receiver<()>),
 }
 impl Operation {
+    fn is_archive(&self) -> bool {
+        matches!(self, Self::Context(..) | Self::Clear(..))
+    }
+    fn retained(&self) -> bool {
+        match self {
+            Self::Context(..) | Self::Clear(..) => true,
+            #[cfg(test)]
+            Self::Gate(..) => true,
+            _ => false,
+        }
+    }
     fn delta_bytes(&self) -> usize {
         match self {
             Self::Delta(delta) => delta_bytes(&delta.entry, &delta.text),
@@ -37,11 +49,15 @@ impl Operation {
 struct Progress {
     completed: u64,
     error: Option<String>,
-    // Includes reserved slots and the operation currently being written.
+    // Includes queued operations and the one currently being written.
     used: usize,
+    archives: usize,
     delta_bytes: usize,
     running: bool,
     queue: VecDeque<(u64, Operation)>,
+    // Keep pre-clear/compaction contexts recoverable in memory if recording
+    // fails after execution has already advanced. Admission is then stopped.
+    failed_archive: Option<Operation>,
     skills: Option<SkillSnapshot>,
     durable: Option<Record>,
     journal_bytes: u64,
@@ -68,13 +84,10 @@ impl Receipt {
             progress = changed.wait(progress).unwrap();
         }
     }
-    fn complete(&self) -> bool {
-        self.progress.0.lock().unwrap().completed >= self.revision
-    }
 }
 
-// A reservation carries no snapshot. Concurrent callers wait for capacity before
-// cloning or mutating their session, and always outside the roster lock.
+// Permits validate ownership and storage health, never wait for disk capacity.
+// Latest complete states coalesce; retained context archives have a separate quota.
 #[derive(Clone)]
 pub(super) struct Capacity(Shared);
 pub(super) struct Permit {
@@ -98,60 +111,20 @@ impl Capacity {
     pub(super) fn reserve(&self, slots: usize) -> Result<Permit> {
         self.reserve_bytes(slots, 0)
     }
-    pub(super) fn reserve_delta(&self, bytes: usize) -> Result<Permit> {
-        self.reserve_bytes(1, bytes)
-    }
-    fn available(progress: &Progress, slots: usize, bytes: usize) -> bool {
-        progress.used + slots <= CAPACITY
-            && (bytes == 0
-                || (bytes > DELTA_BYTES && progress.used == 0)
-                || (bytes <= DELTA_BYTES && progress.delta_bytes <= DELTA_BYTES - bytes))
-    }
     fn reserve_bytes(&self, slots: usize, bytes: usize) -> Result<Permit> {
         assert!((1..=CAPACITY).contains(&slots));
-        let mut progress = self.0.0.lock().unwrap();
-        loop {
-            if let Some(error) = &progress.error {
-                bail!("Session persistence failed: {error}");
-            }
-            if Self::available(&progress, slots, bytes) {
-                progress.used += slots;
-                progress.delta_bytes += bytes;
-                return Ok(Permit {
-                    progress: self.0.clone(),
-                    slots,
-                    delta_bytes: bytes,
-                });
-            }
-            progress = self.0.1.wait(progress).unwrap();
-        }
-    }
-    fn try_reserve(&self, bytes: usize) -> Result<Permit> {
-        let mut progress = self.0.0.lock().unwrap();
+        let progress = self.0.0.lock().unwrap();
         if let Some(error) = &progress.error {
             bail!("Session persistence failed: {error}");
         }
-        if !Self::available(&progress, 1, bytes) {
-            bail!("Session storage is catching up; retry shortly.");
-        }
-        progress.used += 1;
-        progress.delta_bytes += bytes;
         Ok(Permit {
             progress: self.0.clone(),
-            slots: 1,
+            slots,
             delta_bytes: bytes,
         })
     }
-}
-impl Drop for Permit {
-    fn drop(&mut self) {
-        if self.slots != 0 {
-            let mut progress = self.progress.0.lock().unwrap();
-            progress.used -= self.slots;
-            progress.delta_bytes -= self.delta_bytes;
-            drop(progress);
-            self.progress.1.notify_all();
-        }
+    fn try_reserve(&self, bytes: usize) -> Result<Permit> {
+        self.reserve_bytes(1, bytes)
     }
 }
 
@@ -160,7 +133,6 @@ pub(super) struct Lane {
     id: String,
     progress: Shared,
     revision: u64,
-    inputs: VecDeque<Receipt>,
 }
 impl Lane {
     pub(super) fn new(hub: Weak<Inner>, id: String, durable: Option<Record>) -> Result<Self> {
@@ -175,7 +147,6 @@ impl Lane {
                 Condvar::new(),
             )),
             revision: 0,
-            inputs: VecDeque::new(),
         })
     }
     pub(super) fn barrier(&self) -> Receipt {
@@ -186,6 +157,12 @@ impl Lane {
     }
     pub(super) fn capacity(&self) -> Capacity {
         Capacity(self.progress.clone())
+    }
+    pub(super) fn delta_needs_snapshot(&self, bytes: usize) -> bool {
+        let progress = self.progress.0.lock().unwrap();
+        progress.used >= CAPACITY
+            || bytes > DELTA_BYTES
+            || progress.delta_bytes.saturating_add(bytes) > DELTA_BYTES
     }
     pub(super) fn enqueue(&mut self, operation: Operation) -> Result<Receipt> {
         let mut permit = self.capacity().try_reserve(operation.delta_bytes())?;
@@ -203,7 +180,29 @@ impl Lane {
         if let Some(error) = &progress.error {
             bail!("Session persistence failed: {error}");
         }
+        let retained = operation.retained();
+        if retained && progress.archives >= ARCHIVE_CAPACITY {
+            bail!("Context recording is catching up; retry this archive request shortly.");
+        }
+        // Only the final state in this recording segment is needed. Its full
+        // transcript preserves every entry, while FIFO archives remain boundaries.
+        if matches!(&operation, Operation::Snapshot(_)) {
+            while progress
+                .queue
+                .back()
+                .is_some_and(|(_, queued)| !queued.retained())
+            {
+                let (_, superseded) = progress.queue.pop_back().unwrap();
+                progress.used -= 1;
+                progress.delta_bytes -= superseded.delta_bytes();
+            }
+        }
         self.revision += 1;
+        progress.used += 1;
+        progress.delta_bytes += bytes;
+        if retained {
+            progress.archives += 1;
+        }
         permit.slots -= 1;
         permit.delta_bytes = 0;
         progress.queue.push_back((self.revision, operation));
@@ -220,6 +219,11 @@ impl Lane {
             {
                 // No operation was admitted or published: restore its permit.
                 progress.queue.pop_back();
+                progress.used -= 1;
+                progress.delta_bytes -= bytes;
+                if retained {
+                    progress.archives -= 1;
+                }
                 progress.running = false;
                 self.revision -= 1;
                 permit.slots += 1;
@@ -232,17 +236,25 @@ impl Lane {
             progress: self.progress.clone(),
         })
     }
-    pub(super) fn check_input_capacity(&mut self) -> Result<()> {
-        while self.inputs.front().is_some_and(Receipt::complete) {
-            self.inputs.pop_front();
-        }
-        if self.inputs.len() >= 3 {
-            bail!("Three messages are awaiting storage; retry when saving catches up.");
-        }
-        Ok(())
+    #[cfg(test)]
+    pub(super) fn queued_recording(&self) -> (usize, usize) {
+        let progress = self.progress.0.lock().unwrap();
+        (progress.queue.len(), progress.delta_bytes)
     }
-    pub(super) fn track_input(&mut self, receipt: Receipt) {
-        self.inputs.push_back(receipt);
+    #[cfg(test)]
+    pub(super) fn retained_archive_records(&self) -> Vec<Record> {
+        let progress = self.progress.0.lock().unwrap();
+        progress
+            .failed_archive
+            .iter()
+            .chain(progress.queue.iter().map(|(_, operation)| operation))
+            .filter_map(|operation| match operation {
+                Operation::Context(_, record) | Operation::Clear(_, record) => {
+                    Some((**record).clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
     #[cfg(test)]
     pub(super) fn gate(&mut self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
@@ -281,9 +293,11 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
             };
             next
         };
+        let retained = operation.retained();
         let mut count = 1;
         let mut bytes = operation.delta_bytes();
         let hub = owner.upgrade().map(Hub);
+        let mut failed_archive = None;
         let result = match &hub {
             Some(hub) => match operation {
                 Operation::Snapshot(mut record) => {
@@ -371,12 +385,24 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
                         Ok(())
                     })()
                 }
-                Operation::Context(attempt, mut record) => hub
-                    .prepare_record(&mut record)
-                    .and_then(|()| hub.0.store.archive_context(&id, attempt, &record)),
-                Operation::Clear(command, mut record) => hub
-                    .prepare_record(&mut record)
-                    .and_then(|()| hub.0.store.archive_clear(&id, &command, &record)),
+                Operation::Context(attempt, mut record) => {
+                    let result = hub
+                        .prepare_record(&mut record)
+                        .and_then(|()| hub.0.store.archive_context(&id, attempt, &record));
+                    if result.is_err() {
+                        failed_archive = Some(Operation::Context(attempt, record));
+                    }
+                    result
+                }
+                Operation::Clear(command, mut record) => {
+                    let result = hub
+                        .prepare_record(&mut record)
+                        .and_then(|()| hub.0.store.archive_clear(&id, &command, &record));
+                    if result.is_err() {
+                        failed_archive = Some(Operation::Clear(command, record));
+                    }
+                    result
+                }
                 #[cfg(test)]
                 Operation::Gate(started, release) => {
                     let _ = started.send(());
@@ -395,14 +421,13 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
             drop(hub);
             let mut progress = shared.0.lock().unwrap();
             progress.error = Some(message);
-            progress.used -= count + progress.queue.len();
-            let queued_bytes = progress
+            progress.failed_archive = failed_archive;
+            progress
                 .queue
-                .iter()
-                .map(|(_, operation)| operation.delta_bytes())
-                .sum::<usize>();
-            progress.delta_bytes -= bytes + queued_bytes;
-            progress.queue.clear();
+                .retain(|(_, operation)| operation.is_archive());
+            progress.used = progress.queue.len() + usize::from(progress.failed_archive.is_some());
+            progress.archives = progress.used;
+            progress.delta_bytes = 0;
             progress.running = false;
             shared.1.notify_all();
             return;
@@ -426,6 +451,9 @@ fn drain(owner: Weak<Inner>, id: String, shared: Shared) {
         let mut progress = shared.0.lock().unwrap();
         progress.completed = revision;
         progress.used -= count;
+        if retained {
+            progress.archives -= 1;
+        }
         progress.delta_bytes -= bytes;
         shared.1.notify_all();
     }

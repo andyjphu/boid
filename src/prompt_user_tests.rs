@@ -459,7 +459,7 @@ async fn crash_between_question_commit_and_tool_result_recovers_receipt_without_
     .unwrap();
     let record: Value = serde_json::from_slice(&crash_record).unwrap();
     assert_eq!(record["engine"]["running"]["id"], "crash");
-    assert_eq!(record["version"], 7);
+    assert_eq!(record["version"], 8);
     // Version7 reconstructs the committed question from snapshot plus journal.
     hub.shutdown().await;
     drop(hub);
