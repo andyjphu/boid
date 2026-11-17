@@ -271,3 +271,40 @@ the candidate. These results isolate the dispatch changes before adding `/fast`;
 provider priority processing was never involved. Remaining request encoding,
 shared-state work and scheduling are measurable, particularly with large
 concurrent histories. This does not establish provider-only production latency.
+
+## Parallel tool execution (v1.1.51)
+
+Responses requests permit multiple tool calls. Within one response, Boid executes
+contiguous groups of independent reads, searches, shell commands, skill reads,
+roster reads and peer-trace reads with at most eight calls in flight per agent.
+A finished call releases its slot immediately; a slow sibling does not stall
+admission of the next independent call. There is no cross-agent execution lock.
+
+Native file writes/edits, peer sends/wakes, questions, context exports/changes and
+other tools form serial barriers. They wait for preceding calls and finish before
+following calls start. Shell commands have arbitrary effects: issuing several in
+one response declares them independent. The stable instructions tell agents to
+put dependent work in a later response after reading results. Boid does not try
+to infer arbitrary shell dependencies. Enabling parallel calls permits batching;
+it does not force a model to emit more than one call.
+
+Results enter the transcript and model history as they finish, linked by call ID.
+One tool error or timeout is its own result and does not discard sibling results.
+The next inference waits until the response's whole tool batch is resolved.
+There is no disk-receipt wait on dispatch or completion.
+
+Escape, emergency steering and shutdown drop the concurrent futures. Existing
+process-group guards kill unfinished shell/search processes and their children;
+deliberately detached processes retain the existing containment limitation.
+Completed results stay recorded. Started blocking file reads can finish after
+cancellation but cannot publish a late result or mutate a file. Unstarted calls
+get a distinct cancellation result. Crash recovery records uncertain outstanding
+outcomes and does not replay them. State format10 protects outstanding concurrent
+call metadata from older binaries; rollback requires its matching state backup.
+
+Verification uses loopback model responses and actual shell processes on
+mm-west-2: mutually blocked starts prove overlap, the ninth/tenth calls prove the
+cap and refill behavior, a queued write proves the barrier, and Escape verifies
+process-group termination plus completed-result retention. These are harness
+checks without external provider calls, not a measured end-to-end provider
+speedup or proof that models always choose useful batches.

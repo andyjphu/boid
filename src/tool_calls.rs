@@ -254,7 +254,10 @@ async fn dispatch(
     match name {
         "read_file" => {
             let args: ReadArgs = serde_json::from_str(arguments)?;
-            Ok(output(tools.read(args.path)?))
+            let tools = tools.clone();
+            Ok(output(
+                tokio::task::spawn_blocking(move || tools.read(args.path)).await??,
+            ))
         }
         "write_file" => {
             let args: WriteArgs = serde_json::from_str(arguments)?;

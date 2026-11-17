@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+mod parallel;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
@@ -88,6 +89,8 @@ pub struct Session {
     history: ModelHistory,
     pending: VecDeque<Call>,
     running: Option<Call>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parallel_running: Vec<Call>,
     pub partial_text: String,
     #[serde(default)]
     model_requests: u64,
@@ -362,6 +365,7 @@ impl Session {
     pub(crate) fn has_unfinished_execution(&self) -> bool {
         self.request_in_flight
             || self.running.is_some()
+            || !self.parallel_running.is_empty()
             || !self.pending.is_empty()
             || self.compact_requested
             || self.compact_in_flight
@@ -395,7 +399,12 @@ impl Session {
             ));
             self.request_in_flight = false;
         }
-        if let Some(call) = self.running.take() {
+        for call in self
+            .running
+            .take()
+            .into_iter()
+            .chain(std::mem::take(&mut self.parallel_running))
+        {
             let result = json!({"error": if uncertain {
                 "Interrupted. The action may have completed fully or partially; inspect state before retrying."
             } else {
@@ -424,10 +433,11 @@ impl Session {
 
     pub(crate) fn stable_instructions(&self) -> String {
         format!(
-            "## Stable context\n{}\n\n{}\n\n{}",
+            "## Stable context\n{}\n\n{}\n\n{}\n\n{}",
             self.instructions,
             tool_calls::PEER_TRACE_GUIDANCE,
-            crate::request_context::GUIDANCE
+            crate::request_context::GUIDANCE,
+            parallel::GUIDANCE
         )
     }
 
@@ -558,7 +568,10 @@ impl Session {
         self.model_requests + 1
     }
     pub fn has_pending_tools(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.parallel_running.is_empty()
+    }
+    pub(crate) fn has_parallel_tools(&self) -> bool {
+        !self.parallel_running.is_empty()
     }
     /// Remove approximately the older half by JSON text size, never splitting
     /// a message or replaying an orphan function result. No token estimation call.
@@ -837,6 +850,15 @@ impl Session {
             hub.checkpoint(id, self)?;
             return Ok(!self.pending.is_empty());
         };
+        if parallel::eligible(&call.name)
+            && self
+                .pending
+                .front()
+                .is_some_and(|next| parallel::eligible(&next.name))
+        {
+            self.pending.push_front(call);
+            return self.run_parallel(client, tools, hub, id).await;
+        }
         let sender_entry = hub.entry_replacing(
             id,
             "tool_call",

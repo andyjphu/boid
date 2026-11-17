@@ -37,6 +37,7 @@ pub struct ExecOutput {
     pub timed_out: bool,
 }
 
+#[derive(Clone)]
 pub struct Tools {
     pub(crate) cwd: PathBuf,
 }
