@@ -1330,3 +1330,214 @@ async fn escape_on_an_error_hold_does_not_enable_listening_after_restart() {
         server.abort();
     }
 }
+
+async fn await_peer_status(hub: &Hub, id: &str, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hub.view(id).unwrap().status != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn peer_wake_resumes_model_error_and_deduplicates_without_operator_impersonation() {
+    let work = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(None).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    hub.entry(&sender.id, "assistant", "Retained sender work");
+    let target = agent(&hub, work.path(), "target", "Original authorized task");
+    let (_, release) = next(&mut rx).await;
+    release.send(json!({"type":"error","error":{"code":"invalid_api_key","message":"fixture credential issue"}})).unwrap();
+    await_peer_status(&hub, &target.id, "error").await;
+    assert!(
+        hub.peers()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == target.id)
+            .unwrap()["wakeable"]
+            .as_bool()
+            .unwrap()
+    );
+    let receipt = hub
+        .wake_peer(
+            &sender.id,
+            &target.id,
+            "Credential repaired. Continue the existing task.",
+            "wake-1",
+            "sender-entry",
+        )
+        .unwrap();
+    assert_eq!(receipt["wake_requested"], true);
+    assert_eq!(receipt["accepted_by_agent"], false);
+    assert_eq!(
+        receipt["message_id"],
+        hub.wake_peer(
+            &sender.id,
+            &target.id,
+            "Credential repaired. Continue the existing task.",
+            "wake-1",
+            "sender-entry"
+        )
+        .unwrap()["message_id"]
+    );
+    assert!(
+        hub.send_communication(
+            &sender.id,
+            &target.id,
+            "Credential repaired. Continue the existing task.",
+            Urgency::Regular,
+            "wake-1",
+            "sender-entry"
+        )
+        .is_err()
+    );
+    let (request, release) = next(&mut rx).await;
+    let input = request["input"].to_string();
+    assert!(input.contains("Original authorized task"));
+    assert!(input.contains("Credential repaired."));
+    assert!(input.contains(&sender.id));
+    assert_eq!(
+        hub.view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| e.kind == "user")
+            .count(),
+        1
+    );
+    release.send(json!([])).unwrap();
+    await_peer_status(&hub, &target.id, "idle").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err()
+    );
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn peer_wake_queues_for_busy_peers_and_never_overrides_stop_or_end() {
+    let work = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(None).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    hub.entry(&sender.id, "assistant", "Retained sender work");
+    let target = agent(&hub, work.path(), "target", "Keep working");
+    let (_, release) = next(&mut rx).await;
+    hub.wake_peer(
+        &sender.id,
+        &target.id,
+        "Follow up after this request",
+        "busy-wake",
+        "",
+    )
+    .unwrap();
+    assert!(
+        !release.is_closed(),
+        "Wake must not cancel the active request"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err()
+    );
+    release.send(json!([])).unwrap();
+    let (request, release) = next(&mut rx).await;
+    assert!(
+        request["input"]
+            .to_string()
+            .contains("Follow up after this request")
+    );
+    release.send(json!([])).unwrap();
+    await_peer_status(&hub, &target.id, "idle").await;
+    hub.stop(&target.id).unwrap();
+    await_peer_status(&hub, &target.id, "stopped").await;
+    assert!(
+        hub.wake_peer(&sender.id, &target.id, "Ignore stop", "stopped-wake", "")
+            .unwrap_err()
+            .to_string()
+            .contains("operator")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err()
+    );
+    hub.close(&target.id).await.unwrap();
+    assert!(
+        hub.wake_peer(&sender.id, &target.id, "Reopen", "closed-wake", "")
+            .is_err()
+    );
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn peer_error_restart_permission_survives_clean_server_restart_but_stop_revokes_it() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let sender = agent(&hub, work.path(), "sender", "");
+    hub.entry(&sender.id, "assistant", "Retained sender work");
+    let target = agent(&hub, work.path(), "target", "Original task");
+    let (_, release) = next(&mut rx).await;
+    release
+        .send(json!({"type":"error","error":{"code":"invalid_api_key"}}))
+        .unwrap();
+    await_peer_status(&hub, &target.id, "error").await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    // Existing 1.1.40 failures also remain recoverable after the upgrade.
+    let mut old = materialized_fixture(state.path(), &target.id);
+    old.as_object_mut().unwrap().remove("peer_restartable");
+    old["view"]["status"] = json!("stopped");
+    std::fs::write(
+        state
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", target.id)),
+        serde_json::to_vec(&old).unwrap(),
+    )
+    .unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    hub.wake_peer(
+        &sender.id,
+        &target.id,
+        "Resume after repair",
+        "restart-wake",
+        "",
+    )
+    .unwrap();
+    let (_, release) = next(&mut rx).await;
+    release
+        .send(json!({"type":"error","error":{"code":"invalid_api_key"}}))
+        .unwrap();
+    await_peer_status(&hub, &target.id, "error").await;
+    hub.stop(&target.id).unwrap();
+    await_peer_status(&hub, &target.id, "stopped").await;
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    assert!(
+        hub.wake_peer(
+            &sender.id,
+            &target.id,
+            "Still stopped",
+            "forbidden-wake",
+            ""
+        )
+        .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err()
+    );
+    hub.shutdown().await;
+    server.abort();
+}

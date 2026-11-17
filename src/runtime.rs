@@ -114,6 +114,8 @@ pub struct Communication {
     pub sender_entry: String,
     pub text: Arc<String>,
     pub urgency: Urgency,
+    #[serde(default)]
+    pub wake: bool,
     pub state: String,
     pub applied_batch: Option<u64>,
     pub blocked: bool,
@@ -123,7 +125,7 @@ impl Communication {
     pub fn receipt(&self) -> Value {
         json!({"queued":true,"to":self.recipient_id,"message_id":self.id,
             "urgency":self.urgency,"state":self.state,"blocked":self.blocked,
-            "accepted_by_agent":false})
+            "accepted_by_agent":false,"wake_requested":self.wake})
     }
 }
 // Index by ID, retaining all rows so even duplicate IDs preserve full equality
@@ -190,6 +192,8 @@ struct Record {
     // None identifies records saved before restart availability was persisted.
     #[serde(default)]
     listen_on_restart: Option<bool>,
+    #[serde(default)]
+    peer_restartable: Option<bool>,
     stream_seq: u64,
     #[serde(default)]
     journal_seq: u64,
@@ -559,6 +563,35 @@ impl Hub {
                     record.stream_seq = delta.seq;
                 }
                 let unfinished = record.engine.has_unfinished_execution();
+                // Older releases did not persist why peer listening was held.
+                if record.peer_restartable.is_none() {
+                    let stopped = record.order > 0 && record.order == record.stop_through;
+                    let last_boundary = record.view.entries.iter().rev().find(|entry| {
+                        matches!(entry.kind.as_str(), "error" | "user" | "assistant")
+                            || (entry.kind == "context"
+                                && entry.text.as_str()
+                                    == "Stop the current task. Wait for new user direction.")
+                    });
+                    record.peer_restartable = Some(
+                        !stopped
+                            && record.paused
+                            && last_boundary.is_some_and(|entry| {
+                                entry.kind == "error"
+                                    && [
+                                        "OpenAI response stopped:",
+                                        "Cannot reach the OpenAI API:",
+                                        "Completed output index is outside the response.",
+                                        "API stream ended",
+                                        "Invalid JSON in the API stream.",
+                                    ]
+                                    .iter()
+                                    .any(|prefix| entry.text.starts_with(prefix))
+                            }),
+                    );
+                }
+                if unclean || unfinished {
+                    record.peer_restartable = Some(false);
+                }
                 if let Some(call) = record.engine.recovering_send_call() {
                     let key = (record.view.id.clone(), call.to_owned());
                     if !recovery_messages.contains_key(&key) {
@@ -588,6 +621,9 @@ impl Hub {
                 };
                 let listen =
                     recovery.is_empty() && !(unclean && unfinished) && record.restart_listening();
+                if !recovery.is_empty() {
+                    record.peer_restartable = Some(false);
+                }
                 for (kind, text) in recovery {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
@@ -1265,6 +1301,9 @@ impl Hub {
         } else {
             None
         };
+        if next.paused && next.order > 0 && next.order == next.stop_through {
+            next.peer_restartable = Some(false);
+        }
         if next.view.status != "working" {
             next.view.retry_at_ms = None;
         }
@@ -1409,6 +1448,7 @@ impl Hub {
                 handle.storage_error = Some(message.clone());
                 handle.record.paused = true;
                 handle.record.listen_on_restart = Some(false);
+                handle.record.peer_restartable = Some(false);
                 handle.record.view.status = "error".into();
                 handle.record.view.working_since_ms = None;
                 handle.record.view.retry_at_ms = None;
@@ -1700,6 +1740,7 @@ impl Hub {
                 stop_through: 0,
                 paused: false,
                 listen_on_restart: Some(true),
+                peer_restartable: Some(false),
                 stream_seq: 0,
                 journal_seq: 0,
             };
@@ -2013,6 +2054,7 @@ impl Hub {
                     r.view.pending.push(message_id.clone());
                     r.paused = false;
                     r.listen_on_restart = Some(true);
+                    r.peer_restartable = Some(false);
                     Ok(())
                 })?;
                 let handle = data.sessions.get_mut(id).unwrap();
@@ -2058,6 +2100,7 @@ impl Hub {
                 r.cancel_queued_question_answers();
                 r.paused = true;
                 r.listen_on_restart = Some(false);
+                r.peer_restartable = Some(false);
                 Ok(r.order)
             })?;
             if let Some(handle) = self.0.data.lock().unwrap().sessions.get(id) {
@@ -2121,6 +2164,7 @@ impl Hub {
             r.view.status = "ending".into();
             r.paused = true;
             r.listen_on_restart = Some(false);
+            r.peer_restartable = Some(false);
             r.order += 1;
             r.stop_through = r.order;
             r.cancel_queued_question_answers();
@@ -2212,6 +2256,7 @@ impl Hub {
             h.record.view.status = "ending".into();
             h.record.view.working_since_ms = None;
             h.record.view.retry_at_ms = None;
+            h.record.peer_restartable = Some(false);
             h.record.paused = true;
             h.record.order += 1;
             h.record.stop_through = h.record.order;
@@ -2327,7 +2372,8 @@ impl Hub {
                     .map(|h| {
                         let v = &h.record.view;
                         json!({"id":v.id,"name":v.name,"status":v.status,"cwd":v.cwd,
-                "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error"})
+                "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error",
+                "wakeable":h.storage_error.is_none() && !h.archiving && (!h.record.paused || h.record.peer_restartable.unwrap_or(false))})
                     })
                     .collect::<Vec<_>>()
             )
@@ -2353,6 +2399,36 @@ impl Hub {
         call_id: &str,
         sender_entry: &str,
     ) -> Result<Value> {
+        self.send_communication_inner(from, to, text, urgency, call_id, sender_entry, false)
+    }
+    pub fn wake_peer(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        call_id: &str,
+        sender_entry: &str,
+    ) -> Result<Value> {
+        self.send_communication_inner(
+            from,
+            to,
+            text,
+            Urgency::Regular,
+            call_id,
+            sender_entry,
+            true,
+        )
+    }
+    fn send_communication_inner(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        urgency: Urgency,
+        call_id: &str,
+        sender_entry: &str,
+        wake: bool,
+    ) -> Result<Value> {
         crate::blocking::run(|| {
             if from == to {
                 bail!("Address another session.");
@@ -2368,6 +2444,7 @@ impl Hub {
                     if message.recipient_id != to
                         || message.text.as_str() != text
                         || message.urgency != urgency
+                        || message.wake != wake
                     {
                         bail!("A send operation cannot change its recipient, text or urgency.");
                     }
@@ -2393,7 +2470,7 @@ impl Hub {
                         }
                     }
                     if let Some(receipt) = archived {
-                        if !receipt.matches(to, text, urgency) {
+                        if !receipt.matches(to, text, urgency) || receipt.message.wake != wake {
                             bail!("A send operation cannot change its recipient, text or urgency.");
                         }
                         return Ok(receipt.message.receipt());
@@ -2401,7 +2478,7 @@ impl Hub {
                     checked_generation = Some(generation);
                     continue;
                 }
-                if permit.is_some() {
+                if wake || permit.is_some() {
                     break data;
                 }
                 drop(data);
@@ -2441,6 +2518,7 @@ impl Hub {
                 sender_entry: sender_entry.into(),
                 text: text.to_owned().into(),
                 urgency,
+                wake,
                 state: "queued".into(),
                 applied_batch: None,
                 blocked: false,
@@ -2459,6 +2537,14 @@ impl Hub {
                     || (urgency == Urgency::Regular && r.inbox.len().saturating_sub(urgent) >= 64)
                 {
                     bail!("Recipient inbox is full for this urgency.");
+                }
+                if wake {
+                    if r.paused && !r.peer_restartable.unwrap_or(false) {
+                        bail!("Recipient is held by an operator Stop or uncertain recovery. New operator direction is required.");
+                    }
+                    r.paused = false;
+                    r.listen_on_restart = Some(true);
+                    r.peer_restartable = Some(false);
                 }
                 message.blocked = r.paused;
                 r.inbox.push_back(Peer {
@@ -2866,11 +2952,13 @@ impl Hub {
                 }
                 Next::Finished(Err(error)) => {
                     active = false;
+                    let peer_restartable = session.request_in_flight();
                     session.interrupt(self, &id);
                     let _ = self.update(&id, |r| {
                         r.engine = session.clone();
                         r.paused = true;
                         r.listen_on_restart = Some(false);
+                        r.peer_restartable = Some(peer_restartable);
                         Ok(())
                     });
                     self.entry(&id, "error", format!("{error:#}"));
