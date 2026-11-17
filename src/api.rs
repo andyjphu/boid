@@ -298,6 +298,8 @@ impl Client {
                 .expect("In-memory JSON request body can be cloned")
                 .bearer_auth(&credential);
             on_send();
+            #[cfg(test)]
+            self.test_handoff_mark("http_send_after_observer");
             let sent = attempt.send().await;
             let response = match sent {
                 Ok(response) => response,

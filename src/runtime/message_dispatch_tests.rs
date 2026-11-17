@@ -211,6 +211,7 @@ impl Fixture {
         fixture
     }
     async fn round(&self, round: usize, report: bool) {
+        let observed = std::env::var_os("BOID_INPUT_TIMING_BENCHMARK").is_some();
         let barrier = Arc::new(tokio::sync::Barrier::new(self.ids.len() + 1));
         let mut tasks = Vec::new();
         for id in &self.ids {
@@ -218,8 +219,11 @@ impl Fixture {
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
                 let start = Instant::now();
-                let (result, timings) =
-                    hub.message_timed(&id, format!("dispatch fixture round {round}"));
+                let (result, timings) = if observed {
+                    hub.message_observed_timed(&id, format!("dispatch fixture round {round}"))
+                } else {
+                    hub.message_timed(&id, format!("dispatch fixture round {round}"))
+                };
                 let acknowledged = Instant::now();
                 result.unwrap();
                 (id, start, acknowledged, timings)
@@ -244,10 +248,11 @@ impl Fixture {
                         "agents":self.ids.len(),"history_mib_per_agent":self.history_mib,
                         "transcript_entries_per_agent":(self.history_mib * 1024).max(1),
                         "local_skill_files":self.local_skills,"discovered_skills":self.discovered_skills,
-                        "round":round,"session_id":id,
+                        "round":round,"session_id":id,"input_timing_observed":observed,
                         "admission_ms":millis(timings.admission),
                         "lock_wait_ms":timings.lock_wait.map(millis),"mutation_ms":timings.mutation.map(millis),
                         "message_to_http_send_ms":elapsed(start,at("http_send")),
+                        "message_to_http_send_after_trace_ms":elapsed(start,at("http_send_after_observer")),
                         "ack_to_http_send_ms":elapsed(acknowledged,at("http_send")),
                         "message_to_response_observed_ms":elapsed(start,at("response_observed")),
                         "message_to_first_assistant_delta_ms":elapsed(start,at("assistant_delta_observed")),
