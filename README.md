@@ -77,7 +77,10 @@ credentials are shared across browser windows. Selected tabs and resized
 positions survive refresh in that browser window. Right-click either agent
 creation button to find active agents.
 Drag a pane's empty header area to move the whole pane, or drag an individual
-tab onto a screen number to move that session to another screen.
+tab onto a screen number to move that session to another screen. An empty window
+is removed when leaving it. Hidden agent tabs and running or starting terminals
+keep their window open. Window numbers are display labels; stable window IDs
+preserve assignments across browsers, and at least one window remains.
 
 Each pane has one [credential](docs/credentials.md) for all its agent tabs,
 including background tabs. Changing or removing it takes effect on the next

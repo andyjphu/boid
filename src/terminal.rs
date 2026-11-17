@@ -904,11 +904,12 @@ async fn create(
     Query(query): Query<ScreenQuery>,
     Json(request): Json<Create>,
 ) -> Result<Json<Summary>, Error> {
-    let screen = query.screen.unwrap_or(1);
-    hub.0
-        .catalog
-        .validate_screen(screen)
-        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    if let Some(screen) = query.screen {
+        hub.0
+            .catalog
+            .validate_screen(screen)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    }
     let size = size(request.cols.unwrap_or(80), request.rows.unwrap_or(24))?;
     let cwd = hub.0.cwd.join(request.cwd.unwrap_or_default());
     let cwd = crate::blocking::run(|| {
@@ -926,16 +927,21 @@ async fn create(
     let id = format!("term-{}", uuid::Uuid::new_v4());
     hub.0
         .catalog
-        .assign_terminal_screen(&id, screen)
+        .reserve_terminal_screen(&id, query.screen)
         .map_err(internal)?;
     let name = format!("#{}", hub.0.next_number.fetch_add(1, Ordering::SeqCst));
     let path = hub.0.state_dir.join(format!("{id}.jsonl"));
     let catalog = hub.0.catalog.clone();
-    let terminal =
-        tokio::task::spawn_blocking(move || Terminal::open(id, name, cwd, size, path, catalog))
-            .await
-            .map_err(internal)?
-            .map_err(internal)?;
+    let terminal = tokio::task::spawn_blocking(move || {
+        let result = Terminal::open(id.clone(), name, cwd, size, path, catalog.clone());
+        if result.is_err() {
+            catalog.cancel_terminal_creation(&id);
+        }
+        result
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
     {
         let mut terminals = hub.0.terminals.lock().unwrap();
         if hub.0.closing.load(Ordering::SeqCst) {

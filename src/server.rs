@@ -14,7 +14,7 @@ use axum::{
         Html, IntoResponse, Redirect, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
@@ -129,6 +129,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/shutdown", post(shutdown_server))
         .route("/api/config", get(config))
         .route("/api/screens", get(screens).post(add_screen))
+        .route("/api/screens/{id}", delete(remove_screen))
         .route("/api/screens/move", post(move_pane))
         .route("/api/accounts", get(accounts))
         .route("/api/accounts/sign-in", post(account_sign_in))
@@ -303,6 +304,13 @@ async fn add_screen(State(app): State<App>) -> ApiResult<Json<Value>> {
         .map(Json)
         .map_err(invalid)
 }
+async fn remove_screen(State(app): State<App>, Path(id): Path<u32>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || app.hub.remove_empty_screen(id))
+        .await
+        .map_err(invalid)?
+        .map(Json)
+        .map_err(invalid)
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MovePane {
@@ -408,7 +416,7 @@ async fn create(
 ) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(move || {
         app.hub
-            .create_in_group(input, query.screen.unwrap_or(1), query.group_id.as_deref())
+            .create_in_selected_group(input, query.screen, query.group_id.as_deref())
     })
     .await
     .map_err(invalid)?
