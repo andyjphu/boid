@@ -1825,8 +1825,6 @@ function createQuestions(ui) {
   ui.questionSelect.setAttribute("aria-label", "Choose a question");
   ui.questionText = element("p", "question-text");
   ui.questionText.id = `question-text-${ui.id}`;
-  ui.questionMeta = element("p", "question-meta");
-  ui.questionMeta.setAttribute("role", "status");
   ui.questionForm = element("form", "question-form");
   ui.questionInput = element("textarea", "question-reply");
   ui.questionInput.rows = 2;
@@ -1834,13 +1832,13 @@ function createQuestions(ui) {
   ui.questionInput.placeholder = "Reply…";
   ui.questionInput.setAttribute("aria-label", "Answer this question");
   ui.questionInput.setAttribute("aria-describedby", ui.questionText.id);
-  ui.questionSubmit = element("button", "question-submit", "Send reply");
+  ui.questionSubmit = element("button", "question-submit", "Send");
   ui.questionSubmit.type = "submit";
   ui.questionError = element("p", "question-error");
   ui.questionError.hidden = true;
   ui.questionError.setAttribute("role", "alert");
   ui.questionForm.append(ui.questionInput, ui.questionSubmit);
-  ui.questionPanel.append(ui.questionSelect, ui.questionText, ui.questionMeta, ui.questionForm, ui.questionError);
+  ui.questionPanel.append(ui.questionSelect, ui.questionText, ui.questionForm, ui.questionError);
   ui.questionsBox.append(ui.questionsToggle, ui.questionPanel);
   ui.pane.append(ui.questionsBox);
   ui.questionsToggle.onclick = () => {
@@ -1896,8 +1894,8 @@ function setQuestions(ui, questions) {
   const freshUrgent = urgent && !previous.has(urgent.id);
   const selected = ui.questions.find(q => q.id === ui.questionId);
   const next = freshUrgent && !ui.questionInput.value ? urgent : selected || urgent || ui.questions[0];
-  ui.questionSelect.replaceChildren(...ui.questions.map(q => {
-    const option = element("option", "", `${q.blocking ? "! " : ""}${q.question.replace(/\s+/g, " ").slice(0, 100)}`);
+  ui.questionSelect.replaceChildren(...ui.questions.map((q, index) => {
+    const option = element("option", "", `Question ${index + 1}: ${q.question.replace(/\s+/g, " ").slice(0, 100)}`);
     option.value = q.id;
     return option;
   }));
@@ -1916,17 +1914,8 @@ function updateQuestionAttention(ui) {
   ui.tab.classList.toggle("needs-answer", urgent);
   ui.group.pane.classList.toggle("needs-answer", ui.group.record.tabs.some(key => subpanes.get(key)?.pane.classList.contains("needs-answer")));
   ui.questionsBox.classList.toggle("blocking", urgent);
-  const count = ui.questions.length;
-  ui.questionsToggle.textContent = `${urgent ? "⚠ Reply needed" : "Questions"} · ${count}`;
-  const question = ui.questions.find(q => q.id === ui.questionId);
-  if (!question) return;
-  if (questionWaiting(question)) {
-    const seconds = Math.ceil((question.wait_until_ms - Date.now()) / 1000);
-    const time = seconds >= 60 ? `${Math.ceil(seconds / 60)}m` : `${seconds}s`;
-    ui.questionMeta.textContent = `Waiting for reply · can continue in ${time}`;
-  } else {
-    ui.questionMeta.textContent = question.blocking ? "Wait ended · a reply is still welcome" : "Reply when convenient · work can continue";
-  }
+  const index = ui.questions.findIndex(q => q.id === ui.questionId);
+  ui.questionsToggle.textContent = `Question ${Math.max(0, index) + 1}`;
 }
 
 function addSession(view) {
