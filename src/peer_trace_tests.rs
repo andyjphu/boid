@@ -51,7 +51,7 @@ async fn trace_reads_live_text_without_disk_access_peer_changes_or_events() {
         json!({"to":"PEER","kind":"assistant","limit":1}),
     );
     assert_eq!(result["entries"][0]["text"], "The newest received text 🐦");
-    assert_eq!(result["source"], "live_memory");
+    assert!(result.get("source").is_none());
     let after = {
         let data = hub.0.data.lock().unwrap();
         serde_json::to_value(&data.sessions[&peer.id].record).unwrap()
@@ -137,7 +137,7 @@ async fn trace_pages_preserve_latest_tail_utf8_attribution_and_identity() {
             .ends_with("NEWEST")
     );
     assert!(tail["entries"][0]["text"].as_str().unwrap().len() <= 16 * 1024);
-    assert_eq!(tail["entries"][0]["text_complete"], false);
+    assert_eq!(tail["entries"][0]["truncated"], true);
     let mut offset = json!(0);
     let mut reconstructed = String::new();
     loop {
@@ -399,4 +399,95 @@ async fn agent_tool_reads_a_peer_while_its_response_is_still_streaming() {
     hub.shutdown().await;
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn compact_trace_keeps_citations_mixed_evidence_and_exact_tool_pairing() {
+    let hub = Hub::new(Client::test_client()).unwrap();
+    let reader = create(&hub, "reader", "");
+    let peer = create(&hub, "peer", "");
+    for i in 0..12 {
+        hub.entry(
+            &peer.id,
+            if i % 2 == 0 { "assistant" } else { "notice" },
+            format!("item {i}"),
+        );
+    }
+    let page = read(&hub, &reader, json!({"to":peer.id}));
+    assert_eq!(page["entries"].as_array().unwrap().len(), 10);
+    let first = &page["entries"][0];
+    assert_eq!(first["text"], "item 2");
+    assert_eq!(
+        first.as_object().unwrap().len(),
+        3,
+        "complete ordinary entries need only index, kind, text"
+    );
+    let cited = read(
+        &hub,
+        &reader,
+        json!({"to":peer.id,"entry_id":first["index"].to_string()}),
+    );
+    assert_eq!(cited["entries"][0], *first);
+    assert!(cited.get("next_before").is_none());
+    for field in [
+        "source",
+        "snapshot_seq",
+        "stream_seq",
+        "observed_at_ms",
+        "text_byte_limit",
+    ] {
+        assert!(page.get(field).is_none());
+    }
+    let call_id = hub.entry(
+        &peer.id,
+        "tool_call",
+        "exec (call-123)\n{\"command\":\"check\"}",
+    );
+    let call = read(&hub, &reader, json!({"to":peer.id,"entry_id":call_id}));
+    let index = call["entries"][0]["index"].to_string();
+    hub.entry(
+        &peer.id,
+        "assistant",
+        "Unrelated report that must not count as a tool result",
+    );
+    hub.entry(&peer.id, "tool_result", "exec (call-other)\nwrong result");
+    let missing = read(
+        &hub,
+        &reader,
+        json!({"to":peer.id,"entry_id":index,"related":"result"}),
+    );
+    assert_eq!(missing["related_not_found"], "result");
+    assert!(missing["entries"].as_array().unwrap().is_empty());
+    let result_id = hub.entry(
+        &peer.id,
+        "tool_result",
+        "exec (call-123)\n{\"queued\":true}",
+    );
+    let paired = read(
+        &hub,
+        &reader,
+        json!({"to":peer.id,"entry_id":index,"related":"result","kind":"tool_call"}),
+    );
+    assert_eq!(
+        paired["entries"][0]["text"],
+        "exec (call-123)\n{\"queued\":true}"
+    );
+    assert_eq!(paired["entries"][0]["kind"], "tool_result");
+    let reverse = read(
+        &hub,
+        &reader,
+        json!({"to":peer.id,"entry_id":result_id,"related":"call"}),
+    );
+    assert_eq!(reverse["entries"][0], call["entries"][0]);
+    for bad in [
+        json!({"to":peer.id,"related":"result"}),
+        json!({"to":peer.id,"entry_id":index,"related":"reply"}),
+    ] {
+        assert!(
+            hub.read_peer_trace(&reader.id, &bad.to_string())
+                .get("error")
+                .is_some()
+        );
+    }
+    hub.shutdown().await;
 }
