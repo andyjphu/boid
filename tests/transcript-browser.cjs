@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '../src/web');
 const entries = Array.from({ length: 600 }, (_, i) => ({ id: String(i), kind: 'assistant', text: `Entry ${i}: ` + 'text '.repeat(60) }));
 const views = [{ id: 'sender', name: 'canary', cwd: '/tmp', status: 'idle', entries, pending: [] },
   { id: 'recipient', name: 'swift', cwd: '/tmp', status: 'idle', entries: [{ id: 'peer-old', kind: 'peer', text: 'Old message' }], pending: [] }];
-const message = { id: 'peer-old', sender_id: 'sender', recipient_id: 'recipient', sender_entry: '10', sender_name: 'canary', recipient_name: 'swift', text: 'Old message', state: 'delivered' };
+const message = { wake: true, id: 'peer-old', sender_id: 'sender', recipient_id: 'recipient', sender_entry: '10', sender_name: 'canary', recipient_name: 'swift', text: 'Old message', state: 'delivered' };
 views.forEach(view => view.communications = [message]);
 (async () => {
   const browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}) });
@@ -64,17 +64,28 @@ views.forEach(view => view.communications = [message]);
       const ui = sessions.get('sender');
       putEntry(ui, { id: 'call', kind: 'tool_call', text: 'exec_command (call-1)\n{"command":"echo hello"}' });
       putEntry(ui, { id: 'result', kind: 'tool_result', text: 'exec_command (call-1)\n{"stdout":{"text":"hello"},"exit_code":0}' });
-      putEntry(ui, { id: 'receipt', kind: 'tool_result', text: 'send_message (send-1)\n{"message_id":"new-peer","queued":true}' });
+      putEntry(ui, { id: 'receipt', kind: 'tool_result', text: 'wake_agent (send-1)\n{"message_id":"new-peer","queued":true,"wake_requested":true}' });
     });
     await frames();
     await page.locator('[data-pane-key="agent:sender"] .tool-operation > summary').first().click();
     await page.evaluate(() => { window.testTool = sessions.get('sender').entries.get('call').body.firstChild; });
-    await page.evaluate(message => receiveCommunication({ ...message, id: 'new-peer', sender_entry: '599' }), message);
+    await page.evaluate(message => {
+      putEntry(sessions.get('recipient'), { id: 'new-peer', kind: 'peer', text: message.text });
+      receiveCommunication({ ...message, id: 'new-peer', sender_entry: '599' });
+    }, message);
     await frames();
     assert.deepEqual(await page.evaluate(() => {
       const ui = sessions.get('sender');
       return [ui.entries.get('call').body.firstChild === testTool, testTool.open, ui.entries.get('receipt').node.hidden];
     }), [true, true, true]);
+    assert.equal(await page.locator('[data-pane-key="agent:sender"] .peer-link').count(), 2);
+    assert.equal(await page.locator('[data-pane-key="agent:recipient"] .peer-link').count(), 2);
+    await page.evaluate(() => { const ui = sessions.get('sender'); ui.follow = true; followLatest(ui); });
+    await frames();
+    if (process.env.BOID_WAKE_SCREENSHOT) await page.screenshot({ path: process.env.BOID_WAKE_SCREENSHOT });
+    assert.equal(await page.locator('[data-pane-key="agent:sender"] [data-communication-id="new-peer"][data-communication-direction="outgoing"]').count(), 1);
+    assert.equal(await page.locator('[data-pane-key="agent:recipient"] [data-communication-id="new-peer"][data-communication-direction="incoming"]').count(), 1);
+    console.log('wake receipt hidden; outgoing/incoming peer links present; expanded unrelated tool retained');
 
     // Text selected during streaming remains intact until selection clears.
     await page.evaluate(() => {
@@ -191,9 +202,10 @@ views.forEach(view => view.communications = [message]);
     const composer = page.locator('[data-pane-key="agent:sender"] .composer textarea');
     await composer.fill('/');
     assert.deepEqual(await page.locator('.slash-option:visible').allTextContents(), [
-      '/login  Choose credentials', '/model  Select model and effort', '/skills  Select a skill',
+      '/login  Choose credentials', '/model  Select model and effort', '/fast  Turn fast mode on', '/skills  Select a skill',
       '/oai-compact  Compact OpenAI context', '/clear  Start fresh model context'
     ]);
+    await composer.press('ArrowDown');
     await composer.press('ArrowDown');
     await composer.press('ArrowDown');
     await composer.press('ArrowDown');
