@@ -185,6 +185,7 @@ impl Client {
 
     /// Stream text and return complete API items for the next request's input.
     /// Dropping the future closes the active request.
+    #[cfg(test)]
     pub async fn respond_with<I: Serialize + Sync + ?Sized>(
         &self,
         input: &I,
