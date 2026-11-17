@@ -205,8 +205,8 @@ async fn context_refreshes_each_request_without_rewriting_history_or_stable_inst
     assert_eq!(working, note);
     assert_eq!(result(&second, "remember")["text"], note);
     assert_eq!(
-        result(&second, "remember")["words"],
-        note.split_whitespace().count()
+        result(&second, "remember")["characters"],
+        note.chars().count()
     );
     assert_no_saved_snapshots(&hub, &captain.id);
     release.send(json!([])).unwrap();
@@ -257,16 +257,17 @@ async fn working_context_edits_are_bounded_and_explicitly_clearable() {
     let peer = create(&hub, work.path(), "peer", "");
     let actor = create(&hub, work.path(), "actor", "Test local context edits.");
     let (_, release) = fixture.next().await;
-    let note = vec!["delegate"; 150].join(" ");
+    let note = format!("{}界", "a ".repeat(511)) + "界";
+    assert_eq!(note.chars().count(), 1024);
     release
         .send(call("boundary", json!({"text":note,"to":null})))
         .unwrap();
     let (next, mut release) = fixture.next().await;
     assert_eq!(context(&next).1, note);
-    assert_eq!(result(&next, "boundary")["words"], 150);
+    assert_eq!(result(&next, "boundary")["characters"], 1024);
     for (id, arguments) in [
-        ("too-many", json!({"text":format!("{note} extra")})),
-        ("too-large", json!({"text":"x".repeat(8193)})),
+        ("too-many", json!({"text":format!("{note}界")})),
+        ("too-large", json!({"text":"x".repeat(1025)})),
         (
             "unknown-agent",
             json!({"text":"No mutation", "to":"missing-session-id"}),
@@ -295,7 +296,7 @@ async fn working_context_edits_are_bounded_and_explicitly_clearable() {
     release.send(call("clear", json!({"text":""}))).unwrap();
     let (next, release) = fixture.next().await;
     assert_eq!(context(&next).1, "");
-    assert_eq!(result(&next, "clear")["words"], 0);
+    assert_eq!(result(&next, "clear")["characters"], 0);
     assert_no_saved_snapshots(&hub, &actor.id);
     release.send(json!([])).unwrap();
     idle(&hub, &actor.id).await;
@@ -449,4 +450,71 @@ async fn peer_working_context_survives_target_checkpoint_rename_clear_and_restar
     release.send(json!([])).unwrap();
     idle(&restored, &target.id).await;
     restored.shutdown().await;
+}
+
+#[tokio::test]
+async fn eject_context_exports_without_clearing_waking_or_provider_calls() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new().await;
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(fixture.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    let view = create(&hub, work.path(), "exporter", "");
+    hub.set_working_context(&view.id, &json!({"text":"Keep this role"}).to_string())
+        .unwrap();
+    let original = vec![Arc::new(
+        json!({"role":"user","content":"Preserve the exact evidence: 界"}),
+    )];
+    hub.update(&view.id, |record| {
+        record.engine.restore_history(original.clone());
+        record.paused = true;
+        Ok(())
+    })
+    .unwrap();
+    let receipt_id = hub.message(&view.id, "/eject-context".into()).unwrap();
+    let entries = hub.view(&view.id).unwrap().entries;
+    let notice = entries.iter().find(|entry| entry.id == receipt_id).unwrap();
+    let path = PathBuf::from(notice.text.strip_prefix("Context exported: ").unwrap());
+    let export: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(path.starts_with(state.path().join("context-exports").join(&view.id)));
+    assert_eq!(export["format"], "boid-context-v1");
+    assert_eq!(export["input"][0], *original[0]);
+    assert_eq!(context(&export).1, "Keep this role");
+    assert!(
+        export["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("## Stable context")
+    );
+    assert!(
+        export["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "eject_context")
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let second = hub.eject_context(&view.id).unwrap();
+    assert_ne!(second["path"], path.to_string_lossy().as_ref());
+    let directory = state.path().join("context-exports");
+    std::fs::rename(&directory, state.path().join("preserved-exports")).unwrap();
+    std::fs::write(&directory, b"force export directory failure").unwrap();
+    assert!(hub.eject_context(&view.id).is_err());
+    {
+        let data = hub.0.data.lock().unwrap();
+        let record = &data.sessions[&view.id].record;
+        assert_eq!(record.engine.history_items(), original);
+        assert_eq!(record.working_context, "Keep this role");
+        assert!(record.paused);
+        assert!(record.inputs.is_empty());
+    }
+    assert!(fixture.requests.try_recv().is_err());
+    hub.shutdown().await;
 }

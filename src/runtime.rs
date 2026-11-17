@@ -20,6 +20,7 @@ pub use pane_groups::GroupRevisionConflict;
 #[path = "archive.rs"]
 mod archive;
 use archive::ArchivedReceipt;
+mod context_export;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
@@ -2050,6 +2051,10 @@ impl Hub {
             if images.is_empty() && text.trim() == "/login" {
                 bail!("Open /login in the Boid web composer to select API or subscription access.");
             }
+            if images.is_empty() && text.trim() == "/eject-context" {
+                let exported = self.eject_context(id)?;
+                return Ok(exported["message_id"].as_str().context("Missing export receipt")?.into());
+            }
             let waiting = Instant::now();
             let mut data = self.0.data.lock().unwrap();
             timings.lock_wait = Some(waiting.elapsed());
@@ -2429,10 +2434,10 @@ impl Hub {
         }
         let edit: Edit = serde_json::from_str(arguments)?;
         let text = edit.text.trim();
-        let words = text.split_whitespace().count();
-        if words > 150 || text.len() > 8192 {
+        let characters = text.chars().count();
+        if characters > 1024 {
             bail!(
-                "Working context must be at most 150 whitespace-separated words and 8192 UTF-8 bytes. Existing context retained."
+                "Working context must be at most 1024 Unicode characters, including spaces and line breaks. Existing context retained."
             );
         }
         let to = edit.to.as_deref().unwrap_or(from);
@@ -2463,7 +2468,7 @@ impl Hub {
                     .is_some_and(|e| e.id == from)
             {
                 return Ok(
-                    json!({"to":to,"text":text,"words":words,"max_words":150,"editor":editor}),
+                    json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}),
                 );
             }
             let notice = Self::make_entry(
@@ -2483,7 +2488,7 @@ impl Hub {
                 record.view.entries.push(notice);
                 Ok(())
             })?;
-            Ok(json!({"to":to,"text":text,"words":words,"max_words":150,"editor":editor}))
+            Ok(json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}))
         })
     }
     #[cfg(test)]
