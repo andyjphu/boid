@@ -3232,7 +3232,7 @@ function startEvents() {
       const message = JSON.parse(event.data);
       if (message.type === "snapshot") {
         lastSequence = message.seq;
-        receiveScreens(message.screens, false);
+        receiveScreens({ ...message.screens, pane_groups: message.pane_groups }, false);
         if (!screenExists(activeScreen)) { switchScreen(firstScreen(), { prune: false }); return; }
         if (message.pane_groups) receivePaneGroups(message.pane_groups, false);
         snapshot(message.sessions, message.terminals || [], message.catalog);
