@@ -591,6 +591,7 @@ impl Session {
             let partial = &mut self.partial_text;
             let context_usage = &mut self.context_usage;
             let observed_inputs = std::mem::take(&mut self.observed_inputs);
+            hub.mark_request_ready(id, &observed_inputs);
             struct FirstSend<'a> {
                 hub: &'a Hub,
                 id: &'a str,

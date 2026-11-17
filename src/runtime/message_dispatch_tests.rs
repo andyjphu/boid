@@ -381,9 +381,14 @@ async fn input_timing_opt_in_follows_actual_worker_and_mock_send_only() {
         .unwrap();
     assert_eq!(record["state"], "http_send_attempt");
     assert!(record["accepted_to_consumed_ms"].is_number());
+    assert!(record["accepted_to_request_ready_ms"].is_number());
+    assert!(
+        record["accepted_to_request_ready_ms"].as_f64().unwrap()
+            >= record["accepted_to_consumed_ms"].as_f64().unwrap()
+    );
     assert!(
         record["accepted_to_http_send_attempt_ms"].as_f64().unwrap()
-            >= record["accepted_to_consumed_ms"].as_f64().unwrap()
+            >= record["accepted_to_request_ready_ms"].as_f64().unwrap()
     );
     let started = Instant::now();
     fixture
