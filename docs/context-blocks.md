@@ -8,9 +8,10 @@ Andy subsequently clarified that peers may edit each other's working context,
 and that it must remain attached to agent identity through memory changes until
 explicitly changed or cleared. This supersedes the initial self-only proposal.
 
-The third block is **working context**. It describes the agent's current way of
-working, and persists until replaced or cleared. “Ephemeral” would misleadingly
-suggest that it disappears after a turn or restart.
+Andy superseded the broad “agents can put anything” scope on 2026-11-17 after
+observing task histories and result counts filling this space. The third block is
+now **role context**. The original wording invited memory-bank use; this change
+narrows the contract rather than treating that use as a proven agent violation.
 
 - **Stable context:** operator-independent rules and practices, available-skill
   guidance, and tool-use conventions. This is the request's `instructions` field.
@@ -21,8 +22,11 @@ suggest that it disappears after a turn or restart.
   summaries, wall-clock ticker or speculative task progress. A working status does
   not prove completion. Status can change during inference; tool dispatch checks
   the actual current state.
-- **Working context:** an agent-authored note for the current role, reminders,
-  priorities or other useful information. `set_working_context({"text":"...","to":null})`
+- **Role context:** role, responsibilities, team, working style, current hard
+  constraints and at most one pointer to a task/handoff file.
+  Results, counts, completed work, next steps and interaction history belong in
+  that file. Preserve those details before replacing an existing mixed note.
+  `set_role_context({"text":"...","to":null})`
   replaces the caller's note; `to` can instead name an open peer's stable session
   ID. At most 1024 Unicode characters, including spaces and line breaks; empty text
   clears it. Each edit records the editor's stable ID and name. Changes
@@ -37,14 +41,14 @@ Example captain note:
 > Keep ownership clear and surface blockers promptly.
 
 This example is not installed automatically. An agent can edit its own or a peer's
-note in response to its assigned work. It should revise stale reminders when roles change;
+note in response to its assigned work. It should revise the note when the role or hard constraints change;
 no periodic rewriting is required.
 
 ## Request representation and authority
 
-Status and working context (text plus editor attribution) are serialized as
+Status and role context (text plus editor attribution) are serialized as
 quoted JSON data in one request-only user-role item after conversation history. They are not new operator messages.
-Stable instructions define their meaning: the working note is fallible agent data,
+Stable instructions define their meaning: the role note is fallible agent data,
 subordinate to stable rules, operator directions, stop orders and permissions.
 Putting a reminder here does not grant authority or alter tool permissions.
 
@@ -56,7 +60,7 @@ retries reuse the same encoded request; the next new model request takes a new
 snapshot. `list_agents` remains available for an explicit refresh.
 
 Compaction receives conversation history and current identity without the transient
-roster/note item. The working note and its editor are stored against the stable
+roster/note item. The role note and its editor are stored against the stable
 session ID, outside worker-owned model memory and independently of the compacted window,
 so compaction, `/clear`, rename, restart and an older worker checkpoint cannot
 overwrite a newer peer edit. Only an explicit replacement or clear changes it.
@@ -85,8 +89,32 @@ and does not clear, compact, wake or interrupt the agent. The `eject-context`
 skill uses the equivalent `eject_context` tool.
 
 The JSON contains the latest committed model history, instructions, tool
-schemas, model name, and current status/working context. Images are embedded.
+schemas, model name, and current status/role context. Images are embedded.
 In-flight partial output and unapplied queued messages are excluded. This is
 a current context snapshot, not a historical API request or full transcript.
 Each export gets a new filename. Serialization and disk writes run outside
 the global session lock; normal turns do not perform export work.
+
+## Compatibility and existing-note migration
+
+New requests advertise only `set_role_context`. Already-emitted
+`set_working_context` calls remain executable; saved historical calls are not
+rewritten. The on-disk `working_context` and `working_context_editor` fields keep
+their names so existing state and recovery tooling remain compatible.
+
+The authenticated operator endpoint `GET /api/sessions/{id}/role-context` returns
+`{text, editor}` without a transcript. `PATCH` accepts `{text, expected}` where
+`expected` is the exact prior GET object. It rejects stale text or attribution,
+keeps the 1024-character cap, records Operator attribution and does not wake the
+agent. The caller must preserve displaced task notes before replacing them.
+
+For this transition, the release migration preserves each inspected nonempty
+note verbatim with its editor in a private task-note file under
+`$BOID_STATE_DIR/task-notes/<session-id>/`. Curated role notes retain current
+constraints and point to that file. The migration compares the live note with
+the inspected snapshot before changing it; changed notes require a fresh review.
+Empty notes stay empty. Archived sessions are not rewritten. This is an explicit
+operator-authorized migration, not an automatic semantic filter on future edits.
+
+The content boundary is guidance. The server enforces length and edit authority,
+not whether prose describes a role. Improved agent adherence remains unmeasured.

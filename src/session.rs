@@ -170,7 +170,7 @@ mod tests {
     fn restored_sessions_receive_current_wake_definition_once() {
         let retained = json!({"type":"function", "name":"fixture_tool", "description":"keep me"});
         let mut session = Session {
-            tools: json!([{"type":"function", "name":"read_peer_trace", "description":"old"}, retained.clone()]),
+            tools: json!([{"type":"function", "name":"read_peer_trace", "description":"old"}, {"type":"function", "name":"set_working_context"}, retained.clone()]),
             ..Session::default()
         };
         session.ensure_peer_trace_tool();
@@ -194,6 +194,18 @@ mod tests {
             tools
                 .iter()
                 .filter(|tool| tool["name"] == "read_peer_trace")
+                .count(),
+            1
+        );
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool["name"] == "set_working_context")
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] == "set_role_context")
                 .count(),
             1
         );
@@ -280,10 +292,12 @@ impl Session {
     }
     pub fn ensure_peer_trace_tool(&mut self) {
         if let Some(tools) = self.tools.as_array_mut() {
+            // Saved calls retain the legacy name; new requests advertise only the current tool.
+            tools.retain(|tool| tool["name"] != "set_working_context");
             for definition in [
                 tool_calls::peer_trace_definition(),
                 tool_calls::wake_agent_definition(),
-                tool_calls::working_context_definition(),
+                tool_calls::role_context_definition(),
                 tool_calls::agent_color_definition(),
                 tool_calls::eject_context_definition(),
             ] {
@@ -897,7 +911,7 @@ impl Session {
             "set_agent_color" => hub
                 .set_agent_color(id, &call.arguments)
                 .unwrap_or_else(|error| json!({"error":error.to_string()})),
-            "set_working_context" => hub
+            "set_role_context" | "set_working_context" => hub
                 .set_working_context(id, &call.arguments)
                 .unwrap_or_else(|error| json!({"error":error.to_string()})),
             "prompt_user" => {

@@ -156,6 +156,10 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/sessions/{id}/models", get(session_models))
         .route("/api/sessions/{id}/model", post(session_model))
         .route("/api/sessions/{id}/fast", post(session_fast))
+        .route(
+            "/api/sessions/{id}/role-context",
+            get(role_context).patch(patch_role_context),
+        )
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
@@ -741,6 +745,19 @@ async fn available_models(app: &App, profile: &Value) -> anyhow::Result<Vec<Valu
         }
         Ok(models)
     }
+}
+async fn role_context(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub.role_context(&id).map(Json).map_err(invalid)
+}
+async fn patch_role_context(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(edit): Json<crate::runtime::RoleContextPatch>,
+) -> ApiResult<Json<Value>> {
+    app.hub
+        .patch_role_context(&id, edit)
+        .map(Json)
+        .map_err(invalid)
 }
 async fn session_models(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let profile = app.hub.profile(&id).map_err(invalid)?;

@@ -22,6 +22,8 @@ mod archive;
 use archive::ArchivedReceipt;
 mod agent_colors;
 mod context_export;
+mod role_context;
+pub use role_context::RoleContextPatch;
 #[cfg(test)]
 mod context_tests;
 #[cfg(test)]
@@ -182,7 +184,7 @@ struct Peer {
     sender: String,
     text: String,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct WorkingContextEditor {
     id: String,
     name: String,
@@ -1319,6 +1321,7 @@ impl Hub {
                     || (entry.kind == "notice"
                         && (entry.text.as_str() == FAST_MODE_ENABLED_NOTICE
                             || entry.text.starts_with("Working context updated by ")
+                            || entry.text.starts_with("Role context updated by ")
                             || entry.text.starts_with("Tab color updated by ")))
             });
             if activating {
@@ -2447,75 +2450,6 @@ impl Hub {
             )
         })
     }
-    pub fn set_working_context(&self, from: &str, arguments: &str) -> Result<Value> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Edit {
-            text: String,
-            #[serde(default)]
-            to: Option<String>,
-        }
-        let edit: Edit = serde_json::from_str(arguments)?;
-        let text = edit.text.trim();
-        let characters = text.chars().count();
-        if characters > 1024 {
-            bail!(
-                "Working context must be at most 1024 Unicode characters, including spaces and line breaks. Existing context retained."
-            );
-        }
-        let to = edit.to.as_deref().unwrap_or(from);
-        crate::blocking::run(|| {
-            let mut data = self.0.data.lock().unwrap();
-            if data.closing {
-                bail!("Server is shutting down.");
-            }
-            let sender = data
-                .sessions
-                .get(from)
-                .filter(|h| !h.record.view.archived && !h.archiving && h.storage_error.is_none())
-                .context("Editor is unavailable.")?;
-            let editor = WorkingContextEditor {
-                id: from.into(),
-                name: sender.record.view.name.clone(),
-            };
-            let target = data
-                .sessions
-                .get(to)
-                .filter(|h| !h.record.view.archived)
-                .context("Unknown open session.")?;
-            if target.record.working_context == text
-                && target
-                    .record
-                    .working_context_editor
-                    .as_ref()
-                    .is_some_and(|e| e.id == from)
-            {
-                return Ok(
-                    json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}),
-                );
-            }
-            let notice = Self::make_entry(
-                "notice",
-                format!(
-                    "Working context updated by {} ({})\n{}",
-                    editor.name,
-                    editor.id,
-                    if text.is_empty() { "[cleared]" } else { text }
-                ),
-            );
-            // Normal coalescing persistence does not wait for disk. No inbox
-            // entry, wake, interruption or model request is triggered.
-            self.update_locked(&mut data, to, None, |record| {
-                record.working_context = text.to_owned();
-                record.working_context_editor = Some(editor.clone());
-                record.view.entries.push(notice);
-                Ok(())
-            })?;
-            Ok(
-                json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}),
-            )
-        })
-    }
     #[cfg(test)]
     pub fn send_peer(&self, from: &str, to: &str, text: &str) -> Result<Value> {
         self.send_communication(
@@ -2862,7 +2796,7 @@ impl Hub {
                 let selected = if input.clear {
                     let notice = if input.text.trim() == "/clear-first-half" {
                         let (removed, retained) = session.clear_first_half();
-                        format!("Older context cleared: {removed} items removed, {retained} retained. Transcript and working context preserved.")
+                        format!("Older context cleared: {removed} items removed, {retained} retained. Transcript and role context preserved.")
                     } else {
                         session.clear_context();
                         "Context cleared. The transcript is retained; new messages start a fresh conversation.".into()
