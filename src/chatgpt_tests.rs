@@ -546,6 +546,7 @@ async fn pane_login_switches_existing_worker_preserves_history_and_never_uses_ap
     for r in &requests {
         assert_eq!(r["model"], "second");
         assert_eq!(r["stream"], true);
+        assert_eq!(r["parallel_tool_calls"], true);
         assert_eq!(r["store"], false);
         assert!(r.get("previous_response_id").is_none());
         assert!(r.get("access_programs").is_none());

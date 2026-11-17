@@ -31,6 +31,8 @@ mod incremental_benchmark;
 mod journal;
 #[cfg(test)]
 mod message_dispatch_tests;
+#[cfg(test)]
+mod parallel_tests;
 mod persistence;
 mod recovery;
 #[cfg(test)]
@@ -573,7 +575,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -1163,6 +1165,10 @@ impl Hub {
     }
     fn prepare_record(&self, record: &mut Record) -> Result<()> {
         record.version = record.version.max(8);
+        if record.engine.has_parallel_tools() {
+            // Earlier readers would drop unfinished concurrent calls on recovery.
+            record.version = record.version.max(10);
+        }
         if !record.working_context.is_empty() || record.working_context_editor.is_some() {
             // Older binaries must refuse this state rather than silently erase
             // agent-owned context when they rewrite an unknown field.

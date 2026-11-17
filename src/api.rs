@@ -201,7 +201,7 @@ impl Client {
             "model": model,
             "instructions": instructions,
             "tools": tools,
-            "parallel_tool_calls": false,
+            "parallel_tool_calls": true,
             "stream": true,
             "store": false,
             "include": ["reasoning.encrypted_content"],
@@ -1093,7 +1093,7 @@ mod tests {
         ];
         let metadata = json!({"model":"test", "instructions":"unchanged", "stream":true,
             "store":false,"reasoning":{"summary":"auto","effort":"medium"},
-            "include":["reasoning.encrypted_content"],"parallel_tool_calls":false,
+            "include":["reasoning.encrypted_content"],"parallel_tool_calls":true,
             "access_programs":{"cyber":"daybreak_blue"},
             "tools":[{"type":"function","name":"exec_command","strict":true,
                 "parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"],"additionalProperties":false}}]});
