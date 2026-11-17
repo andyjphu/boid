@@ -12,9 +12,9 @@ const { chromium } = require(process.env.BOID_PLAYWRIGHT || 'playwright-core');
       profile:{model:'fixture'}, entries:[{id:'retry',kind:'notice',text:'Request interrupted; retrying (2/4).'}] };
     const screens = { revision:1,count:1,panes:{} };
     const emit = message => page.evaluate(m => testEvents.onmessage({data:JSON.stringify(m)}), {...message,seq:++seq});
-    await page.exposeFunction('snapshot', () => emit({type:'snapshot',screens,catalog:[agent.id],sessions:[agent],terminals:[]}));
+    await page.exposeFunction('fixtureSnapshot', () => emit({type:'snapshot',screens,catalog:[agent.id],sessions:[agent],terminals:[]}));
     await page.addInitScript(() => { window.EventSource = class {
-      constructor(){window.testEvents=this;setTimeout(()=>{this.onopen?.();window.snapshot();},0);} close(){}
+      constructor(){window.testEvents=this;setTimeout(()=>{this.onopen?.();window.fixtureSnapshot();},0);} close(){}
     }; });
     page.on('pageerror', e => errors.push(e.message));
     await page.route('**/*', route => {
