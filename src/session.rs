@@ -85,6 +85,8 @@ pub struct Session {
     #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
+    #[serde(skip)]
+    observed_inputs: Vec<String>,
     history: ModelHistory,
     pending: VecDeque<Call>,
     running: Option<Call>,
@@ -540,6 +542,13 @@ impl Session {
     }
     // Returns whether another step is needed. Queued input is applied before
     // the next model request, after this response's tool calls have finished.
+    pub(crate) fn finish_observed_inputs(&mut self, hub: &Hub, id: &str) {
+        let ids = std::mem::take(&mut self.observed_inputs);
+        hub.mark_no_send(id, &ids);
+    }
+    pub(crate) fn observe_input(&mut self, message_id: String) {
+        self.observed_inputs.push(message_id);
+    }
     pub async fn step(
         &mut self,
         client: &Client,
@@ -581,13 +590,41 @@ impl Session {
             let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
             let context_usage = &mut self.context_usage;
+            let observed_inputs = std::mem::take(&mut self.observed_inputs);
+            struct FirstSend<'a> {
+                hub: &'a Hub,
+                id: &'a str,
+                ids: Vec<String>,
+                sent: bool,
+            }
+            impl Drop for FirstSend<'_> {
+                fn drop(&mut self) {
+                    if !self.sent {
+                        self.hub.mark_no_send(self.id, &self.ids);
+                    }
+                }
+            }
+            let mut first_send = FirstSend {
+                hub,
+                id,
+                ids: observed_inputs,
+                sent: false,
+            };
             let output = client
-                .respond_with(
+                .respond_with_observed(
                     input,
                     self.tools.clone(),
                     &self.model,
                     &instructions,
                     &self.profile,
+                    || {
+                        if !first_send.sent {
+                            first_send
+                                .hub
+                                .mark_http_send(first_send.id, &first_send.ids);
+                            first_send.sent = true;
+                        }
+                    },
                     |event| {
                         let event_type = event["type"].as_str().unwrap_or("");
                         #[cfg(test)]

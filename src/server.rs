@@ -139,6 +139,10 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/accounts/{id}/logout", post(account_logout))
         .route("/api/accounts/{id}/resume", post(account_resume))
         .route("/api/diagnostics", get(diagnostics))
+        .route(
+            "/api/input-timing",
+            get(input_timing).delete(clear_input_timing),
+        )
         .route("/api/sessions", get(sessions).post(create))
         .route("/api/sessions/archived", get(archived_sessions))
         .route("/api/sessions/{id}/reopen", post(reopen_session))
@@ -452,19 +456,37 @@ struct Input {
     #[serde(default)]
     images: Vec<String>,
 }
+async fn input_timing(State(app): State<App>) -> Json<Value> {
+    Json(app.hub.input_timing())
+}
+async fn clear_input_timing(State(app): State<App>) -> Json<Value> {
+    app.hub.clear_input_timing();
+    Json(json!({"capacity":64,"messages":[]}))
+}
 async fn message(
     State(app): State<App>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<Input>,
 ) -> Response {
+    let observe = headers.get("x-boid-input-timing").is_some_and(|v| v == "1");
     // Axum authentication/body extraction has already completed. This measures
     // handler entry to response construction, not socket flush or client receipt.
     let started = Instant::now();
     let (result, timings) = if input.images.is_empty() {
-        app.hub.message_timed(&id, input.text)
+        if observe {
+            app.hub.message_observed_timed(&id, input.text)
+        } else {
+            app.hub.message_timed(&id, input.text)
+        }
     } else {
         match tokio::task::spawn_blocking(move || {
-            app.hub.message_images_timed(&id, input.text, input.images)
+            if observe {
+                app.hub
+                    .message_images_observed_timed(&id, input.text, input.images)
+            } else {
+                app.hub.message_images_timed(&id, input.text, input.images)
+            }
         })
         .await
         {

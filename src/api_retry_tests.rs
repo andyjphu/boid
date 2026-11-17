@@ -484,3 +484,26 @@ async fn reset_and_timeout_before_headers_recover() {
         assert!(!failures[0].message.contains("unused-test-key"));
     }
 }
+
+#[tokio::test]
+async fn observed_send_reports_each_attempt_before_mock_request_even_with_retry() {
+    let mock = Mock::new(vec![response(503, "{}", None), success()]).await;
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    mock.client()
+        .respond_with_observed(
+            &[] as &[Value],
+            serde_json::json!([]),
+            "fixture",
+            "fixture",
+            &serde_json::json!({"billing_route":"api_key"}),
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 2); // callback is each actual attempt; session observer marks first only
+    assert_eq!(mock.count.load(Ordering::SeqCst), 2);
+}

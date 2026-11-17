@@ -132,6 +132,7 @@ mod tests {
             text: "old task".into(),
             images: vec![],
             order: 1,
+            observe: false,
             compact: false,
             clear: false,
         });
@@ -230,6 +231,7 @@ mod tests {
             text: "old user work".into(),
             images: vec![],
             order: 1,
+            observe: false,
             compact: false,
             clear: false,
         });

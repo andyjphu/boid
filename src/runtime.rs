@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Notify, broadcast, watch};
@@ -54,6 +57,99 @@ pub(crate) struct MessageTimings {
     pub mutation: Option<Duration>,
     /// Includes Data guard release and the return from blocking::run.
     pub admission: Duration,
+}
+
+const INPUT_TIMING_CAPACITY: usize = 64;
+
+#[derive(Serialize)]
+struct InputTimingRecord {
+    session_id: String,
+    message_id: String,
+    state: &'static str,
+    #[serde(skip)]
+    accepted: Instant,
+    accepted_to_consumed_ms: Option<f64>,
+    accepted_to_http_send_attempt_ms: Option<f64>,
+}
+
+// A mark only updates an existing record. Clearing or eviction therefore revokes
+// every pending mark, including callbacks from requests already in flight.
+#[derive(Default)]
+struct InputTimingStore {
+    records: Mutex<VecDeque<InputTimingRecord>>,
+    enabled: AtomicBool,
+}
+impl InputTimingStore {
+    fn accept(&self, session_id: &str, message_id: &str) {
+        let mut records = self.records.lock().unwrap();
+        if records.len() == INPUT_TIMING_CAPACITY {
+            records.pop_front();
+        }
+        records.push_back(InputTimingRecord {
+            session_id: session_id.into(),
+            message_id: message_id.into(),
+            state: "queued",
+            accepted: Instant::now(),
+            accepted_to_consumed_ms: None,
+            accepted_to_http_send_attempt_ms: None,
+        });
+        self.enabled.store(true, Ordering::Release);
+    }
+    fn consume(&self, session_id: &str, message_id: &str, cancelled: bool, ended: bool) -> bool {
+        if !self.enabled.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut records = self.records.lock().unwrap();
+        if let Some(r) = records
+            .iter_mut()
+            .find(|r| r.session_id == session_id && r.message_id == message_id)
+        {
+            if r.state != "queued" {
+                return false;
+            }
+            r.accepted_to_consumed_ms = Some(r.accepted.elapsed().as_secs_f64() * 1000.0);
+            r.state = if cancelled {
+                "cancelled"
+            } else if ended {
+                "ended"
+            } else {
+                "consumed"
+            };
+            return true;
+        }
+        false
+    }
+    fn send(&self, session_id: &str, message_ids: &[String]) {
+        let mut records = self.records.lock().unwrap();
+        for r in records.iter_mut().filter(|r| {
+            r.session_id == session_id
+                && r.state == "consumed"
+                && message_ids.contains(&r.message_id)
+        }) {
+            r.accepted_to_http_send_attempt_ms = Some(r.accepted.elapsed().as_secs_f64() * 1000.0);
+            r.state = "http_send_attempt";
+        }
+    }
+    fn no_send(&self, session_id: &str, ids: &[String]) {
+        if ids.is_empty() || !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let mut records = self.records.lock().unwrap();
+        for r in records.iter_mut().filter(|r| {
+            r.session_id == session_id && r.state == "consumed" && ids.contains(&r.message_id)
+        }) {
+            r.state = "no_send";
+        }
+    }
+    fn read(&self) -> Value {
+        let records = self.records.lock().unwrap();
+        json!({"capacity":INPUT_TIMING_CAPACITY,"messages":*records})
+    }
+    fn clear(&self) {
+        let mut records = self.records.lock().unwrap();
+        records.clear();
+        self.enabled.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -157,6 +253,8 @@ struct Input {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     images: Vec<crate::images::Image>,
     order: u64,
+    #[serde(skip)]
+    observe: bool,
     #[serde(default)]
     compact: bool,
     #[serde(default)]
@@ -299,6 +397,7 @@ struct Delta {
 pub struct Hub(Arc<Inner>);
 struct Inner {
     data: Mutex<Data>,
+    input_timing: InputTimingStore,
     // Cancellation must not queue behind a session save holding `data`.
     interrupts: Mutex<BTreeMap<String, watch::Sender<()>>>,
     agent_names: Vec<String>,
@@ -501,6 +600,7 @@ impl Hub {
             let hub = Self(Arc::new(Inner {
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
+                input_timing: InputTimingStore::default(),
                 data: Mutex::new(Data {
                     api_program: client.api_profile()["cyber_access_program"].clone(),
                     screens,
@@ -852,6 +952,20 @@ impl Hub {
                 .filter(|h| !h.record.view.archived)
                 .map(|h| Self::project_view(&data, &h.record.view))
         })
+    }
+    pub fn input_timing(&self) -> Value {
+        self.0.input_timing.read()
+    }
+    pub fn clear_input_timing(&self) {
+        self.0.input_timing.clear();
+    }
+    pub(crate) fn mark_no_send(&self, id: &str, message_ids: &[String]) {
+        self.0.input_timing.no_send(id, message_ids);
+    }
+    pub(crate) fn mark_http_send(&self, id: &str, message_ids: &[String]) {
+        if !message_ids.is_empty() {
+            self.0.input_timing.send(id, message_ids);
+        }
     }
     pub fn diagnostics(&self) -> Value {
         // No roster lock, aggregation, or saved-report access while suspended.
@@ -1228,8 +1342,7 @@ impl Hub {
             // feedback visible in memory without restoring other startup notices.
             next.view.entries.retain(|entry| {
                 !matches!(entry.kind.as_str(), "notice" | "context")
-                    || (entry.kind == "notice"
-                        && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
+                    || (entry.kind == "notice" && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
             });
             if activating {
                 if next.view.name == handle.record.view.name {
@@ -1750,10 +1863,10 @@ impl Hub {
                 record.view.profile = profile.clone();
                 if enabled {
                     // Transcript feedback only; never add this to model history.
-                    record.view.entries.push(Self::make_entry(
-                        "notice",
-                        FAST_MODE_ENABLED_NOTICE.into(),
-                    ));
+                    record
+                        .view
+                        .entries
+                        .push(Self::make_entry("notice", FAST_MODE_ENABLED_NOTICE.into()));
                 }
                 Ok(())
             })?;
@@ -1881,7 +1994,7 @@ impl Hub {
         let started = Instant::now();
         let result = self.0.images.for_message(id, &ids);
         let (result, mut timings) = match result {
-            Ok(images) => self.admit_message(id, text, images),
+            Ok(images) => self.admit_message(id, text, images, false),
             Err(error) => (Err(error), MessageTimings::default()),
         };
         timings.admission = started.elapsed();
@@ -1891,13 +2004,36 @@ impl Hub {
         self.message_timed(id, text).0
     }
     pub(crate) fn message_timed(&self, id: &str, text: String) -> (Result<String>, MessageTimings) {
-        self.admit_message(id, text, vec![])
+        self.admit_message(id, text, vec![], false)
+    }
+    pub(crate) fn message_observed_timed(
+        &self,
+        id: &str,
+        text: String,
+    ) -> (Result<String>, MessageTimings) {
+        self.admit_message(id, text, vec![], true)
+    }
+    pub(crate) fn message_images_observed_timed(
+        &self,
+        id: &str,
+        text: String,
+        ids: Vec<String>,
+    ) -> (Result<String>, MessageTimings) {
+        let started = Instant::now();
+        let result = self.0.images.for_message(id, &ids);
+        let (result, mut timings) = match result {
+            Ok(images) => self.admit_message(id, text, images, true),
+            Err(error) => (Err(error), MessageTimings::default()),
+        };
+        timings.admission = started.elapsed();
+        (result, timings)
     }
     fn admit_message(
         &self,
         id: &str,
         text: String,
         images: Vec<crate::images::Image>,
+        observe: bool,
     ) -> (Result<String>, MessageTimings) {
         let started = Instant::now();
         let mut timings = MessageTimings::default();
@@ -1943,6 +2079,7 @@ impl Hub {
                         text,
                         images,
                         order: r.order,
+                        observe,
                     });
                     r.view.entries.push(entry.clone());
                     r.view.pending.push(message_id.clone());
@@ -1951,6 +2088,9 @@ impl Hub {
                     Ok(())
                 })?;
                 let handle = data.sessions.get_mut(id).unwrap();
+                if observe {
+                    self.0.input_timing.accept(id, &message_id);
+                }
                 handle.wake.notify_one();
                 Ok(message_id)
             })();
@@ -2560,15 +2700,16 @@ impl Hub {
                     &mut permit,
                 )?;
             }
-            let (event, _) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
+            let ((event, timing), _) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
             let Some(input) = r.inputs.front() else {
-                return Ok(None);
+                return Ok((None, None));
             };
             if r.paused && input.order > r.stop_through {
-                return Ok(None);
+                return Ok((None, None));
             };
             let input = r.inputs.pop_front().unwrap();
             let cancelled = input.order <= r.stop_through;
+            let timing = input.observe.then(|| (input.id.clone(), cancelled, input.clear || input.compact));
             if !cancelled {
                 let selected = if input.clear {
                     session.clear_context();
@@ -2593,9 +2734,20 @@ impl Hub {
                 }
             }
             r.view.pending.retain(|p| p != &input.id);
-            Ok((!cancelled).then_some(!input.clear))
+            Ok(((!cancelled).then_some(!input.clear), timing))
         })?;
             drop(data);
+            if let Some((message_id, cancelled, ended)) = timing {
+                if self
+                    .0
+                    .input_timing
+                    .consume(id, &message_id, cancelled, ended)
+                    && !cancelled
+                    && !ended
+                {
+                    session.observe_input(message_id);
+                }
+            }
             Ok(event)
         })
     }
@@ -2719,6 +2871,7 @@ impl Hub {
                     if !self.urgent_ready(&id) {
                         continue;
                     }
+                    session.finish_observed_inputs(self, &id);
                     session.interrupt(self, &id);
                     urgent_turn = self.urgent_ready(&id);
                     active = urgent_turn;
@@ -2727,6 +2880,7 @@ impl Hub {
                     }
                 }
                 Next::Halt => {
+                    session.finish_observed_inputs(self, &id);
                     session.interrupt(self, &id);
                     let _ = self.update(&id, |r| {
                         r.engine = session.clone();
@@ -2743,6 +2897,7 @@ impl Hub {
                     break;
                 }
                 Next::Interrupt => {
+                    session.finish_observed_inputs(self, &id);
                     urgent_turn = false;
                     // The select has dropped the active request/tool future.
                     // Recover and persist once, after cancellation, before new work.
@@ -2774,6 +2929,7 @@ impl Hub {
                     }
                 }
                 Next::Stop => {
+                    session.finish_observed_inputs(self, &id);
                     urgent_turn = false;
                     session.interrupt(self, &id);
                     session.user("Stop the current task. Wait for new user direction.".into());
@@ -2795,10 +2951,12 @@ impl Hub {
                     urgent_turn = false;
                     active = more || self.peers_ready(&id);
                     if !active {
+                        session.finish_observed_inputs(self, &id);
                         self.status(&id, "idle");
                     }
                 }
                 Next::Finished(Err(error)) => {
+                    session.finish_observed_inputs(self, &id);
                     active = false;
                     session.interrupt(self, &id);
                     let _ = self.update(&id, |r| {
@@ -4322,3 +4480,42 @@ mod peer_trace;
 #[cfg(test)]
 #[path = "peer_trace_tests.rs"]
 mod peer_trace_tests;
+
+#[cfg(test)]
+mod input_timing_tests {
+    use super::*;
+
+    #[test]
+    fn clear_revokes_late_consume_and_send() {
+        let store = InputTimingStore::default();
+        store.accept("session", "first");
+        assert!(store.consume("session", "first", false, false));
+        store.clear();
+        assert!(!store.consume("session", "first", false, false));
+        store.send("session", &["first".into()]);
+        store.no_send("session", &["first".into()]);
+        assert_eq!(store.read()["messages"], json!([]));
+        store.accept("session", "second");
+        store.send("session", &["first".into()]);
+        assert_eq!(store.read()["messages"][0]["state"], "queued");
+        assert_eq!(store.read()["messages"][0]["message_id"], "second");
+    }
+
+    #[test]
+    fn bounded_recording_and_shared_request_marks_each_consumed_input() {
+        let store = InputTimingStore::default();
+        for n in 0..65 {
+            store.accept("agent", &n.to_string());
+        }
+        assert_eq!(store.read()["messages"].as_array().unwrap().len(), 64);
+        assert_eq!(store.read()["messages"][0]["message_id"], "1");
+        assert!(store.consume("agent", "1", false, false));
+        assert!(store.consume("agent", "2", false, false));
+        assert!(store.consume("agent", "3", true, false));
+        store.send("agent", &["1".into(), "2".into(), "3".into()]);
+        assert_eq!(store.read()["messages"][0]["state"], "http_send_attempt");
+        assert_eq!(store.read()["messages"][1]["state"], "http_send_attempt");
+        assert_eq!(store.read()["messages"][2]["state"], "cancelled");
+        assert!(store.read()["messages"][0]["accepted_to_http_send_attempt_ms"].is_number());
+    }
+}

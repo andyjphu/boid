@@ -355,3 +355,46 @@ async fn actual_worker_message_dispatch_benchmark() {
     // Baseline deliberately records the blocked path without asserting new policy.
     held_scan_case().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_timing_opt_in_follows_actual_worker_and_mock_send_only() {
+    let fixture = Fixture::new(1, 0).await;
+    let id = &fixture.ids[0];
+    assert_eq!(fixture.hub.input_timing()["messages"], json!([])); // warm-up was opt-out
+    let started = Instant::now();
+    let (message, _) = fixture
+        .hub
+        .message_observed_timed(id, "dispatch fixture observed".into());
+    let message = message.unwrap();
+    fixture.probe.finished(id, started).await;
+    let records = fixture.hub.input_timing();
+    let record = records["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["message_id"] == message)
+        .unwrap();
+    assert_eq!(record["state"], "http_send_attempt");
+    assert!(record["accepted_to_consumed_ms"].is_number());
+    assert!(
+        record["accepted_to_http_send_attempt_ms"].as_f64().unwrap()
+            >= record["accepted_to_consumed_ms"].as_f64().unwrap()
+    );
+    let started = Instant::now();
+    fixture
+        .hub
+        .message_timed(id, "dispatch fixture opt out".into())
+        .0
+        .unwrap();
+    fixture.probe.finished(id, started).await;
+    assert_eq!(
+        fixture.hub.input_timing()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture.hub.clear_input_timing();
+    assert_eq!(fixture.hub.input_timing()["messages"], json!([]));
+    fixture.hub.shutdown().await;
+}

@@ -192,6 +192,20 @@ impl Client {
         model: &str,
         instructions: &str,
         profile: &Value,
+        on_event: impl FnMut(&Value) + Send,
+    ) -> Result<Vec<Value>> {
+        self.respond_with_observed(input, tools, model, instructions, profile, || {}, on_event)
+            .await
+    }
+
+    pub async fn respond_with_observed<I: Serialize + Sync + ?Sized>(
+        &self,
+        input: &I,
+        tools: Value,
+        model: &str,
+        instructions: &str,
+        profile: &Value,
+        mut on_send: impl FnMut() + Send,
         mut on_event: impl FnMut(&Value) + Send,
     ) -> Result<Vec<Value>> {
         let endpoint = "https://api.openai.com/v1/responses";
@@ -278,12 +292,12 @@ impl Client {
             http_attempt += 1;
             #[cfg(test)]
             self.test_handoff_mark("http_send");
-            let sent = request
+            let attempt = request
                 .try_clone()
                 .expect("In-memory JSON request body can be cloned")
-                .bearer_auth(&credential)
-                .send()
-                .await;
+                .bearer_auth(&credential);
+            on_send();
+            let sent = attempt.send().await;
             let response = match sent {
                 Ok(response) => response,
                 Err(error) => {
