@@ -279,6 +279,7 @@ impl Client {
                     })
             };
             http_attempt += 1;
+            on_event(&json!({"type":"boid.request_start","http_attempt":http_attempt}));
             #[cfg(test)]
             self.test_handoff_mark("http_send");
             let sent = request
@@ -476,9 +477,10 @@ impl Client {
             match result {
                 Ok(output) => return Ok(output),
                 Err(error) => {
-                    let delay = (retryable_stream && local_events_only && (!output_started || replay_safe))
-                        .then(|| retry_delay(http_attempt, waited, stream_advised))
-                        .flatten();
+                    let delay =
+                        (retryable_stream && local_events_only && (!output_started || replay_safe))
+                            .then(|| retry_delay(http_attempt, waited, stream_advised))
+                            .flatten();
                     // Only a final failure is delivered as the terminal provider event.
                     // A successful replacement owns this model turn.
                     if delay.is_none() {
@@ -679,7 +681,7 @@ impl Client {
 }
 
 const MAX_HTTP_ATTEMPTS: u32 = 4;
-const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 
 fn error_code(value: &Value) -> Option<&str> {
     value
@@ -750,32 +752,48 @@ fn retryable_stream_error(error: &Value) -> bool {
         ))
 }
 fn only_local_tools(tools: &Value) -> bool {
-    tools.as_array().is_some_and(|tools| tools.iter().all(|tool| {
-        match tool["type"].as_str() {
+    tools.as_array().is_some_and(|tools| {
+        tools.iter().all(|tool| match tool["type"].as_str() {
             Some("function") => true,
             Some("namespace") => only_local_tools(&tool["tools"]),
             _ => false,
-        }
-    }))
+        })
+    })
 }
 fn local_stream_event(event: &Value) -> bool {
-    let local_item = |item: &Value| matches!(item["type"].as_str(),
-        Some("message" | "reasoning" | "function_call"));
+    let local_item = |item: &Value| {
+        matches!(
+            item["type"].as_str(),
+            Some("message" | "reasoning" | "function_call")
+        )
+    };
     match event["type"].as_str().unwrap_or("") {
-        "response.created" | "response.in_progress" | "response.queued"
-        | "response.completed" | "response.failed" | "response.incomplete" | "error" => {
-            event.pointer("/response/output").and_then(Value::as_array)
-                .is_none_or(|items| items.iter().all(local_item))
-        }
+        "response.created"
+        | "response.in_progress"
+        | "response.queued"
+        | "response.completed"
+        | "response.failed"
+        | "response.incomplete"
+        | "error" => event
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+            .is_none_or(|items| items.iter().all(local_item)),
         "response.output_item.added" | "response.output_item.done" => local_item(&event["item"]),
-        "response.content_part.added" | "response.content_part.done"
-        | "response.output_text.delta" | "response.output_text.done"
+        "response.content_part.added"
+        | "response.content_part.done"
+        | "response.output_text.delta"
+        | "response.output_text.done"
         | "response.output_text.annotation.added"
-        | "response.refusal.delta" | "response.refusal.done"
-        | "response.reasoning_summary_part.added" | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_text.delta" | "response.reasoning_summary_text.done"
-        | "response.reasoning_text.delta" | "response.reasoning_text.done"
-        | "response.function_call_arguments.delta" | "response.function_call_arguments.done" => true,
+        | "response.refusal.delta"
+        | "response.refusal.done"
+        | "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_text.delta"
+        | "response.reasoning_text.done"
+        | "response.function_call_arguments.delta"
+        | "response.function_call_arguments.done" => true,
         _ => false,
     }
 }
@@ -783,16 +801,25 @@ fn local_stream_event(event: &Value) -> bool {
 fn event_retry_after(event: &Value) -> Option<Duration> {
     let mut delay = None;
     for path in ["/error/headers", "/response/error/headers", "/headers"] {
-        let Some(headers) = event.pointer(path).and_then(Value::as_object) else { continue };
+        let Some(headers) = event.pointer(path).and_then(Value::as_object) else {
+            continue;
+        };
         for (key, value) in headers {
-            let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
             let parsed = if key.eq_ignore_ascii_case("retry-after-ms") {
                 value.parse::<u64>().ok().map(Duration::from_millis)
             } else if key.eq_ignore_ascii_case("retry-after") {
                 let mut headers = reqwest::header::HeaderMap::new();
-                if let Ok(value) = value.parse() { headers.insert(reqwest::header::RETRY_AFTER, value); }
+                if let Ok(value) = value.parse() {
+                    headers.insert(reqwest::header::RETRY_AFTER, value);
+                }
                 retry_after(&headers, SystemTime::now())
-            } else { None };
+            } else {
+                None
+            };
             delay = delay.max(parsed);
         }
     }
@@ -892,20 +919,29 @@ fn finish(event: &Value, completed: BTreeMap<usize, Value>) -> Result<Vec<Value>
     let complete_stream = !completed.is_empty()
         && completed.keys().copied().eq(0..completed.len())
         && final_output.iter().all(|item| {
-            item["id"].as_str().is_some_and(|id| stream_ids.contains_key(id))
+            item["id"]
+                .as_str()
+                .is_some_and(|id| stream_ids.contains_key(id))
         });
     let output = if complete_stream {
-        completed.values().map(|item| {
-            let id = item["id"].as_str().context("Completed stream item has no stable ID.")?;
-            match final_ids.get(id) {
-                Some(index) => merge_completed_item(&final_output[*index], item),
-                None => Ok(item.clone()),
-            }
-        }).collect::<Result<Vec<_>>>()?
+        completed
+            .values()
+            .map(|item| {
+                let id = item["id"]
+                    .as_str()
+                    .context("Completed stream item has no stable ID.")?;
+                match final_ids.get(id) {
+                    Some(index) => merge_completed_item(&final_output[*index], item),
+                    None => Ok(item.clone()),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?
     } else {
         let mut output = final_output.clone();
         for (index, item) in completed {
-            let id = item["id"].as_str().context("Completed stream item has no stable ID.")?;
+            let id = item["id"]
+                .as_str()
+                .context("Completed stream item has no stable ID.")?;
             if final_ids.get(id) != Some(&index) {
                 bail!("Completed output cannot be reconciled without ambiguous ordering.");
             }
@@ -924,7 +960,9 @@ fn output_ids<'a>(items: impl Iterator<Item = &'a Value>) -> Result<BTreeMap<Str
             bail!("Completed output contains an invalid item.");
         }
         if let Some(id) = item.get("id") {
-            let id = id.as_str().filter(|id| !id.is_empty())
+            let id = id
+                .as_str()
+                .filter(|id| !id.is_empty())
                 .context("Completed output contains an invalid item ID.")?;
             if ids.insert(id.to_owned(), index).is_some() {
                 bail!("Completed output contains duplicate item IDs.");
@@ -949,22 +987,33 @@ fn merge_completed_item(final_item: &Value, done: &Value) -> Result<Value> {
     }
     // Keep final-only fields, but output_item.done owns finalized content,
     // particularly encrypted reasoning needed for the next model request.
-    let mut merged = final_item.as_object().context("Invalid final output item.")?.clone();
-    merged.extend(done.as_object().context("Invalid completed stream item.")?.clone());
+    let mut merged = final_item
+        .as_object()
+        .context("Invalid final output item.")?
+        .clone();
+    merged.extend(
+        done.as_object()
+            .context("Invalid completed stream item.")?
+            .clone(),
+    );
     Ok(Value::Object(merged))
 }
 
 fn validate_completed_calls(output: &[Value]) -> Result<()> {
     let mut calls = std::collections::BTreeSet::new();
     for item in output.iter().filter(|item| item["type"] == "function_call") {
-        let call_id = item["call_id"].as_str().filter(|id| !id.is_empty())
+        let call_id = item["call_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
             .context("Completed function call has no call ID.")?;
         if !calls.insert(call_id) {
             bail!("Completed output contains duplicate function call IDs.");
         }
         if item["name"].as_str().is_none_or(str::is_empty)
             || !item["arguments"].is_string()
-            || item.get("status").is_some_and(|status| status != "completed")
+            || item
+                .get("status")
+                .is_some_and(|status| status != "completed")
         {
             bail!("Completed function call has invalid fields or unfinished status.");
         }
@@ -1150,21 +1199,38 @@ mod tests {
         let reasoning = json!({"id":"r", "type":"reasoning", "encrypted_content":"final-opaque"});
         let call = json!({"id":"f", "type":"function_call", "call_id":"c", "name":"read_file", "arguments":"{}"});
         let done = BTreeMap::from([(0, reasoning.clone()), (1, call.clone())]);
-        for final_items in [json!([]), json!([call.clone()]), json!([call.clone(), {"id":"r", "type":"reasoning"}])] {
-            assert_eq!(finish(&json!({"response":{"output":final_items}}), done.clone()).unwrap(),
-                vec![reasoning.clone(), call.clone()]);
+        for final_items in [
+            json!([]),
+            json!([call.clone()]),
+            json!([call.clone(), {"id":"r", "type":"reasoning"}]),
+        ] {
+            assert_eq!(
+                finish(&json!({"response":{"output":final_items}}), done.clone()).unwrap(),
+                vec![reasoning.clone(), call.clone()]
+            );
         }
     }
 
     #[test]
     fn aligned_partial_stream_preserves_final_only_items_and_fields() {
         let message = json!({"id":"m", "type":"message", "content":[]});
-        let final_reasoning = json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"old"});
+        let final_reasoning =
+            json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"old"});
         let done_reasoning = json!({"id":"r", "type":"reasoning", "encrypted_content":"final"});
         let call = json!({"id":"f", "type":"function_call", "call_id":"c", "name":"read_file", "arguments":"{}"});
-        let output = finish(&json!({"response":{"output":[message.clone(), final_reasoning, call.clone()]}}),
-            BTreeMap::from([(1, done_reasoning)])).unwrap();
-        assert_eq!(output, vec![message, json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"final"}), call]);
+        let output = finish(
+            &json!({"response":{"output":[message.clone(), final_reasoning, call.clone()]}}),
+            BTreeMap::from([(1, done_reasoning)]),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            vec![
+                message,
+                json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"final"}),
+                call
+            ]
+        );
     }
 
     #[test]
@@ -1176,12 +1242,24 @@ mod tests {
             (json!([b.clone()]), BTreeMap::from([(1, b.clone())])),
             (json!([]), BTreeMap::from([(usize::MAX, b.clone())])),
             // Partial stream evidence cannot reorder a final-only item safely.
-            (json!([b.clone(), a.clone()]), BTreeMap::from([(0, a.clone())])),
+            (
+                json!([b.clone(), a.clone()]),
+                BTreeMap::from([(0, a.clone())]),
+            ),
             (json!([a.clone()]), BTreeMap::from([(0, b.clone())])),
             (json!([a.clone(), a.clone()]), BTreeMap::new()),
-            (json!([a.clone()]), BTreeMap::from([(0, a.clone()), (1, a.clone())])),
-            (json!([a.clone()]), BTreeMap::from([(0, json!({"id":"a", "type":"reasoning"}))])),
-            (json!([a.clone()]), BTreeMap::from([(0, json!({"type":"message"}))])),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, a.clone()), (1, a.clone())]),
+            ),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, json!({"id":"a", "type":"reasoning"}))]),
+            ),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, json!({"type":"message"}))]),
+            ),
             (json!([null]), BTreeMap::new()),
         ] {
             assert!(finish(&json!({"response":{"output":final_items}}), done).is_err());
@@ -1196,19 +1274,47 @@ mod tests {
             invalid.as_object_mut().unwrap().remove(field);
             assert!(finish(&json!({"response":{"output":[invalid]}}), BTreeMap::new()).is_err());
         }
-        for (field, value) in [("arguments", json!({})), ("name", json!("")), ("call_id", json!("")), ("status", json!("in_progress"))] {
-            let mut invalid = call.clone(); invalid[field] = value;
+        for (field, value) in [
+            ("arguments", json!({})),
+            ("name", json!("")),
+            ("call_id", json!("")),
+            ("status", json!("in_progress")),
+        ] {
+            let mut invalid = call.clone();
+            invalid[field] = value;
             assert!(finish(&json!({"response":{"output":[invalid]}}), BTreeMap::new()).is_err());
         }
-        let mut duplicate = call.clone(); duplicate["id"] = json!("other-item");
-        assert!(finish(&json!({"response":{"output":[call.clone(), duplicate]}}), BTreeMap::new()).is_err());
+        let mut duplicate = call.clone();
+        duplicate["id"] = json!("other-item");
+        assert!(
+            finish(
+                &json!({"response":{"output":[call.clone(), duplicate]}}),
+                BTreeMap::new()
+            )
+            .is_err()
+        );
         for field in ["call_id", "name", "arguments"] {
-            let mut conflict = call.clone(); conflict[field] = json!("different");
-            assert!(finish(&json!({"response":{"output":[conflict]}}), BTreeMap::from([(0, call.clone())])).is_err());
+            let mut conflict = call.clone();
+            conflict[field] = json!("different");
+            assert!(
+                finish(
+                    &json!({"response":{"output":[conflict]}}),
+                    BTreeMap::from([(0, call.clone())])
+                )
+                .is_err()
+            );
         }
         // Existing nonstreamed function fixtures need no synthetic item ID.
-        let mut no_item_id = call.clone(); no_item_id.as_object_mut().unwrap().remove("id");
-        assert_eq!(finish(&json!({"response":{"output":[no_item_id.clone()]}}), BTreeMap::new()).unwrap(), vec![no_item_id]);
+        let mut no_item_id = call.clone();
+        no_item_id.as_object_mut().unwrap().remove("id");
+        assert_eq!(
+            finish(
+                &json!({"response":{"output":[no_item_id.clone()]}}),
+                BTreeMap::new()
+            )
+            .unwrap(),
+            vec![no_item_id]
+        );
     }
 
     #[test]

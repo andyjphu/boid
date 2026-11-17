@@ -23,6 +23,8 @@ use archive::ArchivedReceipt;
 #[cfg(test)]
 mod handoff_tests;
 #[cfg(test)]
+mod response_retry_tests;
+#[cfg(test)]
 mod incremental_benchmark;
 mod journal;
 #[cfg(test)]
@@ -1228,8 +1230,7 @@ impl Hub {
             // feedback visible in memory without restoring other startup notices.
             next.view.entries.retain(|entry| {
                 !matches!(entry.kind.as_str(), "notice" | "context")
-                    || (entry.kind == "notice"
-                        && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
+                    || (entry.kind == "notice" && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
             });
             if activating {
                 if next.view.name == handle.record.view.name {
@@ -1441,11 +1442,14 @@ impl Hub {
     pub fn abandon_response_attempt(&self, id: &str, next: u64, maximum: u64) {
         if let Err(error) = self.update(id, |record| {
             record.engine.partial_text.clear();
-            record.view.entries.push(Self::make_entry("notice", if next > 0 {
-                format!("Request interrupted; retrying ({next}/{maximum}).")
-            } else {
-                "Response rejected; partial output was not committed.".into()
-            }));
+            record.view.entries.push(Self::make_entry(
+                "notice",
+                if next > 0 {
+                    format!("Request interrupted; retrying ({next}/{maximum}).")
+                } else {
+                    "Response rejected; partial output was not committed.".into()
+                },
+            ));
             Ok(())
         }) {
             self.fault(id, error);
@@ -1763,10 +1767,10 @@ impl Hub {
                 record.view.profile = profile.clone();
                 if enabled {
                     // Transcript feedback only; never add this to model history.
-                    record.view.entries.push(Self::make_entry(
-                        "notice",
-                        FAST_MODE_ENABLED_NOTICE.into(),
-                    ));
+                    record
+                        .view
+                        .entries
+                        .push(Self::make_entry("notice", FAST_MODE_ENABLED_NOTICE.into()));
                 }
                 Ok(())
             })?;
