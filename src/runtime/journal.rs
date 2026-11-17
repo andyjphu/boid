@@ -267,6 +267,7 @@ mod tests {
             view: View {
                 id: Uuid::new_v4().to_string(),
                 name: "journal-fixture".into(),
+                tab_color: None,
                 cwd: "/tmp".into(),
                 status: "idle".into(),
                 archived: false,

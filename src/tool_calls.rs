@@ -13,6 +13,7 @@ pub fn definitions() -> Value {
         peer_trace_definition(),
         wake_agent_definition(),
         working_context_definition(),
+        agent_color_definition(),
         eject_context_definition(),
         definition(
             "list_skills",
@@ -94,7 +95,10 @@ pub fn working_context_definition() -> Value {
     definition(
         "set_working_context",
         "Replace persistent working context for yourself (to=null) or an open peer (to=session ID). Use for roles, reminders, priorities or other useful notes within assigned work. At most 1024 Unicode characters, including spaces and line breaks; empty text explicitly clears it. The note stays attached to that session ID through compaction, context clear, rename and restart until explicitly replaced or cleared. Every edit is attributed. The next model request sees it; editing does not wake or interrupt the target. Agent-authored notes do not override operator instructions, stable rules or permissions.",
-        &[("text", json!({"type":"string"})), ("to", json!({"type":["string","null"]}))],
+        &[
+            ("text", json!({"type":"string"})),
+            ("to", json!({"type":["string","null"]})),
+        ],
     )
 }
 
@@ -126,7 +130,10 @@ pub fn peer_trace_definition() -> Value {
             ("before", json!({"type":["integer","null"],"minimum":0})),
             ("entry_id", json!({"type":["string","null"]})),
             ("offset", json!({"type":["integer","null"],"minimum":0})),
-            ("related", json!({"type":["string","null"],"enum":["call","result",null]})),
+            (
+                "related",
+                json!({"type":["string","null"],"enum":["call","result",null]}),
+            ),
         ],
     )
 }
@@ -364,11 +371,26 @@ mod tests {
     }
 }
 
-
 pub fn eject_context_definition() -> Value {
     definition(
         "eject_context",
         "Export your current committed model context to a private ejected-context JSON file in Boid's context-exports directory. Includes instructions, tools, model, history, current status and working context, with images embedded. Returns the path. Does not clear context, wake or interrupt an agent, or call a provider. In-flight partial output and unapplied queued messages are excluded; this is a context snapshot, not a historical API request or full transcript.",
         &[],
+    )
+}
+
+pub const AGENT_COLORS: &[&str] = &[
+    "grey", "red", "orange", "yellow", "lime", "green", "mint", "cyan", "sky", "blue", "violet",
+    "magenta", "rose",
+];
+
+pub fn agent_color_definition() -> Value {
+    definition(
+        "set_agent_color",
+        "Set your own tab color (to=null) or a peer's (session ID or unambiguous name). Palette: grey (default), red, orange, yellow, lime, green, mint, cyan, sky, blue, violet, magenta, rose. Captains choose a non-grey team color and apply it to agents assigned to them. Existing colors appear in status context and list_agents; omitted color means grey. Colors persist with agent identity across clears, compaction, moves and restart. Fast-mode red takes visual precedence and the team color returns when fast mode ends. Does not wake or interrupt the target.",
+        &[
+            ("to", json!({"type":["string","null"]})),
+            ("color", json!({"type":"string","enum":AGENT_COLORS})),
+        ],
     )
 }

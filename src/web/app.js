@@ -410,6 +410,8 @@ let events;
 
 let paneOrder = [];
 let orderKey = "";
+let orderBase = "";
+let pendingPaneAppends = new Set();
 let catalogReady = false;
 let reconcilingCatalog = false;
 let launchCwd = "";
@@ -852,14 +854,15 @@ function renderScreens() {
         event.preventDefault(); switchScreen(number);
       });
       link.addEventListener("dragover", event => {
-        if (!event.dataTransfer.types.includes("application/x-boid-pane")) return;
+        if (!event.dataTransfer.types.includes("application/x-boid-pane") || paneDrag?.screen === number) return;
         event.preventDefault(); event.dataTransfer.dropEffect = "move"; link.classList.add("drop-target");
       });
       link.addEventListener("dragleave", () => link.classList.remove("drop-target"));
       link.addEventListener("drop", async event => {
-        event.preventDefault(); link.classList.remove("drop-target");
+        event.preventDefault(); event.stopPropagation();
         const pane = event.dataTransfer.getData("application/x-boid-pane");
-        if (!pane) return;
+        finishPaneDrag();
+        if (!pane || paneScreen(pane) === number) return;
         try {
           const result = await request("/api/screens/move", "POST", { pane, screen: number });
           receiveScreens(result); if (result.pane_groups) receivePaneGroups(result.pane_groups);
@@ -879,6 +882,21 @@ function receiveScreens(value, reconcile = true) {
   if (!Number.isInteger(value?.count) || value.count < 1 || !value.panes || Array.isArray(value.panes)) return;
   if ((value.revision || 0) < (screenCatalog.revision || 0)) return;
   const previous = screenCatalog;
+  // A reconnect may skip the move event. Recover incoming moves from the catalog too.
+  const incoming = new Set(catalogReady ? Object.keys(value.panes).filter(key =>
+    (previous.panes[key] || 1) !== (value.panes[key] || 1)) : []);
+  if (value.moved_pane && (value.revision || 0) > (previous.revision || 0)) incoming.add(value.moved_pane);
+  for (const moved of incoming) {
+    const destination = value.panes[moved];
+    const group = (value.pane_groups || serverPaneGroups)?.groups.find(group => group.tabs.includes(moved));
+    const key = group?.id || moved;
+    const storage = `${orderBase}${destination === 1 ? "" : `:screen:${destination}`}:append`;
+    try {
+      const pending = new Set(JSON.parse(sessionStorage.getItem(storage) || "[]"));
+      pending.delete(key); pending.add(key); sessionStorage.setItem(storage, JSON.stringify([...pending]));
+    } catch {}
+    if (destination === activeScreen) { pendingPaneAppends.delete(key); pendingPaneAppends.add(key); }
+  }
   screenCatalog = value;
   renderScreens();
   if (reconcile && !screenExists(activeScreen)) {
@@ -1003,11 +1021,13 @@ window.addEventListener("pagehide", () => {
 });
 
 function loadPaneOrder(cwd) {
-  const key = `boid:pane-order:v1:${location.origin}:${cwd || ""}${activeScreen === 1 ? "" : `:screen:${activeScreen}`}`;
+  orderBase = `boid:pane-order:v1:${location.origin}:${cwd || ""}`;
+  const key = `${orderBase}${activeScreen === 1 ? "" : `:screen:${activeScreen}`}`;
   if (key === orderKey) return;
   orderKey = key;
   try {
     const saved = JSON.parse(sessionStorage.getItem(key) || "null");
+    pendingPaneAppends = new Set(JSON.parse(sessionStorage.getItem(`${key}:append`) || "[]"));
     paneLayout = saved?.layout || null;
     agentScreenState = { ...(saved?.agents || {}), ...agentScreenState };
     const valid = key => typeof key === "string" && /^(agent|terminal|group):.+/.test(key);
@@ -1027,6 +1047,13 @@ function rememberPaneOrder() {
   const panes = new Map([...workspace.querySelectorAll(".pane")].map(pane => [pane.dataset.paneKey, pane]));
   paneOrder = paneOrder.filter(key => panes.has(key));
   for (const key of panes.keys()) if (!paneOrder.includes(key)) paneOrder.push(key);
+  const arrived = [...pendingPaneAppends].filter(key => panes.has(key));
+  if (arrived.length) {
+    paneOrder = paneOrder.filter(key => !arrived.includes(key)).concat(arrived);
+    paneLayout = null;
+    for (const key of arrived) pendingPaneAppends.delete(key);
+    try { sessionStorage.setItem(`${orderKey}:append`, JSON.stringify([...pendingPaneAppends])); } catch {}
+  }
   for (let i = 0; i < paneOrder.length; i++) {
     const pane = panes.get(paneOrder[i]);
     const current = workspace.querySelectorAll(".pane")[i];
@@ -1050,6 +1077,7 @@ function rememberPaneOrder() {
 }
 
 function clearPaneDropTarget() {
+  for (const link of screensNav.querySelectorAll('.drop-target')) link.classList.remove('drop-target');
   for (const pane of workspace.querySelectorAll("[data-pane-drop]")) delete pane.dataset.paneDrop;
   for (const tab of workspace.querySelectorAll("[data-tab-drop]")) delete tab.dataset.tabDrop;
 }
@@ -1719,6 +1747,22 @@ function closeModelPicker(ui) {
   ui.input.focus({ preventScroll: true });
 }
 
+const agentTabColors = {
+  red: '#f27171', orange: '#f2b171', yellow: '#f2f271', lime: '#b1f271',
+  green: '#71f271', mint: '#71f2b1', cyan: '#71f2f2', sky: '#71b1f2',
+  blue: '#7171f2', violet: '#b171f2', magenta: '#f271f2', rose: '#f271b1',
+};
+function updateAgentColor(ui, color) {
+  ui.view.tab_color = color || null;
+  if (Object.hasOwn(agentTabColors, color)) {
+    ui.tab.dataset.teamColor = color;
+    ui.tab.style.setProperty('--team-color', agentTabColors[color]);
+  } else {
+    delete ui.tab.dataset.teamColor;
+    ui.tab.style.removeProperty('--team-color');
+  }
+}
+
 function updateProfile(ui, profile, contextWindow = ui.view.context_window) {
   ui.view.profile = profile; ui.view.context_window = contextWindow;
   ui.tab.toggleAttribute("data-fast", profile?.service_tier === "priority");
@@ -1977,6 +2021,7 @@ function addSession(view) {
   const savedState = agentScreenState[id];
   const ui = makePane(view.name || id, view.cwd, "agent", id);
   ui.view = view;
+  updateAgentColor(ui, view.tab_color);
   ui.orderKey = orderKey;
   ui.history = view.history ? { ...view.history } : null;
   ui.historyGeneration = 0;
@@ -3084,6 +3129,7 @@ function snapshot(views, terminalViews = [], catalog = views.map(view => String(
     // Reconcile after a reconnect even if the interrupt's status event was lost.
     if (!ui.interrupting) ui.interruptRequested = false;
     ui.view = view;
+    updateAgentColor(ui, view.tab_color);
     setQuestions(ui, view.questions || []);
     if (view.history) {
       if (selectedWithin(ui.trace)) ui.follow = false;
@@ -3231,6 +3277,7 @@ function startEvents() {
       }
       if (!ui) return;
       if (message.type === "questions") { setQuestions(ui, message.questions); return; }
+      if (message.type === "tab_color") { updateAgentColor(ui, message.tab_color); return; }
       if (message.type === "name") { ui.setName(message.name); return; }
       if (message.type === "profile") { updateProfile(ui, message.profile, message.context_window); return; }
       if (message.type === "context_usage") {

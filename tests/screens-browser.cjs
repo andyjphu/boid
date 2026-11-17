@@ -40,7 +40,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
       }
       if (url.pathname === '/api/screens/move') {
         const { pane, screen } = route.request().postDataJSON(); screens.panes[pane] = screen; screens.revision++;
-        await emit({ type: 'screens', screens }); return route.fulfill({ json: screens });
+        await emit({ type: 'screens', screens: {...screens,moved_pane:pane} }); return route.fulfill({ json: {...screens,moved_pane:pane} });
       }
       if (url.pathname.endsWith('/messages') && method === 'POST') {
         await new Promise(resolve => { releaseMessage = resolve; });
@@ -131,15 +131,29 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     assert.deepEqual(await keys(page), ['agent:second', 'terminal:second-terminal']);
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
     assert.equal(await page.locator('.setup-form').count(), 0);
+    const destinationAgent = view('z-existing'); agents.push(destinationAgent); screens.panes['agent:z-existing'] = 3; screens.revision++;
+    await emit({type:'session',screens_revision:screens.revision,session:{...destinationAgent,screen:3}});
+    await other.waitForFunction(()=>sessions.has('z-existing'));
     await page.locator('[data-pane-key="agent:b"] .composer textarea').fill('Unsent while moving');
+    await page.evaluate(() => {
+      const transfer = new DataTransfer(); transfer.setData('application/x-boid-pane','agent:b');
+      const link = document.querySelector('#screens [data-screen="3"]');
+      link.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      if (!link.classList.contains('drop-target')) throw new Error('Drop target must highlight');
+      if (getComputedStyle(link).backgroundColor !== 'rgb(139, 175, 208)') throw new Error('Drop highlight must be distinct');
+      link.dispatchEvent(new DragEvent('dragleave',{bubbles:true,dataTransfer:transfer}));
+      if (link.classList.contains('drop-target')) throw new Error('Drop highlight must clear');
+    });
     await page.locator('[data-pane-key="agent:b"] .pane-tab').dragTo(page.locator('#screens [data-screen="3"]'));
     await page.waitForFunction(() => !sessions.has('b'));
     await other.waitForFunction(() => sessions.has('b'));
     assert.equal(await page.evaluate(() => activeScreen), 1);
     assert.equal(await other.evaluate(() => activeScreen), 3);
     assert.equal(screens.panes['agent:b'], 3);
+    assert.deepEqual(await other.locator('#workspace > .pane').evaluateAll(nodes=>nodes.map(n=>n.dataset.paneKey)), ['agent:z-existing','agent:b'], 'drop appends after the destination’s existing pane');
     await page.locator('#screens [data-screen="3"]').click(); await ready(page, 3);
     assert.equal(await page.locator('[data-pane-key="agent:b"] .composer textarea').inputValue(), 'Unsent while moving');
+    assert.deepEqual(await page.locator('#workspace > .pane').evaluateAll(nodes=>nodes.map(n=>n.dataset.paneKey)), ['agent:z-existing','agent:b'], 'opening destination retains append placement');
     await page.locator('#screens [data-screen="1"]').click(); await ready(page, 1);
     const peer = { id: 'b-0', sender_id: 'a', recipient_id: 'b', sender_name: 'a', recipient_name: 'b', sender_entry: 'a-0', text: 'Cross-screen message', state: 'delivered' };
     agents[0].communications = [peer]; agents[1].communications = [peer];
@@ -150,7 +164,7 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     await page.setViewportSize({ width: 390, height: 700 }); await frames(page);
     const overlap = await page.evaluate(() => document.querySelector('#screens').getBoundingClientRect().right > document.querySelector('.workspace-actions').getBoundingClientRect().left);
     assert.equal(overlap, false, 'screen strip does not cover existing controls');
-    assert.ok(mutations.every(m => !m.path.endsWith('/messages') && m.method !== 'DELETE'), 'switching/moving sends no input or lifecycle operations');
+    assert.ok(mutations.every(m => !m.path.endsWith('/messages') && (m.method !== 'DELETE' || /^\/api\/screens\/\d+$/.test(m.path))), 'switching/moving sends no input or agent/terminal lifecycle operations; empty-screen pruning is allowed');
     await page.setViewportSize({ width: 1200, height: 900 });
     // An accepted message must clear the remounted composer, but preserve newer edits.
     for (const edit of [false, true]) {

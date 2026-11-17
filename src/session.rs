@@ -281,6 +281,7 @@ impl Session {
                 tool_calls::peer_trace_definition(),
                 tool_calls::wake_agent_definition(),
                 tool_calls::working_context_definition(),
+                tool_calls::agent_color_definition(),
                 tool_calls::eject_context_definition(),
             ] {
                 if let Some(tool) = tools
@@ -865,10 +866,14 @@ impl Session {
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
             "eject_context" => match serde_json::from_str::<Value>(&call.arguments) {
-                Ok(value) if value == json!({}) => hub.eject_context(id)
+                Ok(value) if value == json!({}) => hub
+                    .eject_context(id)
                     .unwrap_or_else(|error| json!({"error":error.to_string()})),
                 _ => json!({"error":"eject_context expects an empty JSON object."}),
             },
+            "set_agent_color" => hub
+                .set_agent_color(id, &call.arguments)
+                .unwrap_or_else(|error| json!({"error":error.to_string()})),
             "set_working_context" => hub
                 .set_working_context(id, &call.arguments)
                 .unwrap_or_else(|error| json!({"error":error.to_string()})),

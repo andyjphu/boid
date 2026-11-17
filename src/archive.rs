@@ -42,6 +42,7 @@ fn metadata_view(source: &View) -> View {
     View {
         id: source.id.clone(),
         name: source.name.clone(),
+        tab_color: source.tab_color.clone(),
         cwd: source.cwd.clone(),
         status: source.status.clone(),
         archived: source.archived,
@@ -98,6 +99,8 @@ impl<'de> Deserialize<'de> for SourceReceipt {
 struct ProbeView {
     id: String,
     name: String,
+    #[serde(default)]
+    tab_color: Option<String>,
     cwd: String,
     status: String,
     #[serde(default)]
@@ -121,6 +124,7 @@ impl ArchiveProbe {
             view: View {
                 id: self.view.id,
                 name: self.view.name,
+                tab_color: self.view.tab_color,
                 cwd: self.view.cwd,
                 status: self.view.status,
                 profile: self.view.profile,

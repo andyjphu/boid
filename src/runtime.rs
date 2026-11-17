@@ -20,6 +20,7 @@ pub use pane_groups::GroupRevisionConflict;
 #[path = "archive.rs"]
 mod archive;
 use archive::ArchivedReceipt;
+mod agent_colors;
 mod context_export;
 #[cfg(test)]
 mod context_tests;
@@ -86,6 +87,8 @@ pub struct View {
     pub communications: Vec<Communication>,
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<String>,
     #[serde(default)]
     pub profile: Value,
     pub cwd: String,
@@ -485,6 +488,7 @@ fn peer_roster(data: &Data, compact: bool) -> Value {
             "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error",
             "wakeable":h.storage_error.is_none() && !h.archiving && (!h.record.paused || h.record.peer_restartable.unwrap_or(false))});
         if !compact { row["cwd"] = json!(v.cwd); }
+        if let Some(color) = &v.tab_color { row["color"] = json!(color); }
         row
     }).collect::<Vec<_>>())
 }
@@ -867,6 +871,7 @@ impl Hub {
             communications: vec![],
             id: source.id.clone(),
             name: source.name.clone(),
+            tab_color: source.tab_color.clone(),
             profile: Self::effective_profile(data, &source.id, &source.profile),
             cwd: source.cwd.clone(),
             status: source.status.clone(),
@@ -1031,6 +1036,7 @@ impl Hub {
             data.screens = next;
             let mut result = json!(data.screens);
             result["pane_groups"] = self.groups_changed(&mut data);
+            result["moved_pane"] = json!(key);
             self.emit(&mut data, json!({"type":"screens", "screens":result}));
             Ok(result)
         })
@@ -1290,7 +1296,8 @@ impl Hub {
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
         let activating = handle.draft.is_some()
-            && (!next.working_context.is_empty()
+            && (next.view.tab_color.is_some()
+                || !next.working_context.is_empty()
                 || !next.inputs.is_empty()
                 || !next.inbox.is_empty()
                 || next
@@ -1305,7 +1312,8 @@ impl Hub {
                 !matches!(entry.kind.as_str(), "notice" | "context")
                     || (entry.kind == "notice"
                         && (entry.text.as_str() == FAST_MODE_ENABLED_NOTICE
-                            || entry.text.starts_with("Working context updated by ")))
+                            || entry.text.starts_with("Working context updated by ")
+                            || entry.text.starts_with("Tab color updated by ")))
             });
             if activating {
                 if next.view.name == handle.record.view.name {
@@ -1392,6 +1400,11 @@ impl Hub {
             events.push(
                 json!({"type":"profile","session_id":id,"profile":current.view.profile,
                 "context_window":crate::api::context_window(&current.engine.model)}),
+            );
+        }
+        if current.view.tab_color != previous.view.tab_color {
+            events.push(
+                json!({"type":"tab_color","session_id":id,"tab_color":current.view.tab_color}),
             );
         }
         if current.view.name != previous.view.name {
@@ -1754,6 +1767,7 @@ impl Hub {
                 communications: vec![],
                 id: id.clone(),
                 name,
+                tab_color: None,
                 profile: engine.profile.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 status: "idle".into(),
@@ -2053,7 +2067,10 @@ impl Hub {
             }
             if images.is_empty() && text.trim() == "/eject-context" {
                 let exported = self.eject_context(id)?;
-                return Ok(exported["message_id"].as_str().context("Missing export receipt")?.into());
+                return Ok(exported["message_id"]
+                    .as_str()
+                    .context("Missing export receipt")?
+                    .into());
             }
             let waiting = Instant::now();
             let mut data = self.0.data.lock().unwrap();
@@ -2418,7 +2435,7 @@ impl Hub {
                 .record;
             let view = &record.view;
             Ok(
-                json!({"self":{"id":view.id,"name":view.name,"cwd":view.cwd},
+                json!({"self":{"id":view.id,"name":view.name,"cwd":view.cwd,"color":view.tab_color.as_deref().unwrap_or("grey")},
                 "peers":peer_roster(&data, true),
                 "working_context":{"text":record.working_context,"editor":record.working_context_editor}}),
             )
@@ -2488,7 +2505,9 @@ impl Hub {
                 record.view.entries.push(notice);
                 Ok(())
             })?;
-            Ok(json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}))
+            Ok(
+                json!({"to":to,"text":text,"characters":characters,"max_characters":1024,"editor":editor}),
+            )
         })
     }
     #[cfg(test)]
