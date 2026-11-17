@@ -1438,6 +1438,19 @@ impl Hub {
         }
         entry.id
     }
+    pub fn abandon_response_attempt(&self, id: &str, next: u64, maximum: u64) {
+        if let Err(error) = self.update(id, |record| {
+            record.engine.partial_text.clear();
+            record.view.entries.push(Self::make_entry("notice", if next > 0 {
+                format!("Request interrupted; retrying ({next}/{maximum}).")
+            } else {
+                "Response rejected; partial output was not committed.".into()
+            }));
+            Ok(())
+        }) {
+            self.fault(id, error);
+        }
+    }
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
             let result = (|| -> Result<()> {
