@@ -173,38 +173,75 @@ mod tests {
         session.ensure_peer_trace_tool();
         session.ensure_peer_trace_tool();
         let tools = session.tools.as_array().unwrap();
-        assert_eq!(tools.iter().filter(|tool| tool["name"] == "wake_agent").count(), 1);
-        assert_eq!(tools.iter().find(|tool| tool["name"] == "wake_agent").unwrap(), &tool_calls::wake_agent_definition());
-        assert_eq!(tools.iter().filter(|tool| tool["name"] == "read_peer_trace").count(), 1);
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] == "wake_agent")
+                .count(),
+            1
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool["name"] == "wake_agent")
+                .unwrap(),
+            &tool_calls::wake_agent_definition()
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] == "read_peer_trace")
+                .count(),
+            1
+        );
         assert!(tools.contains(&retained));
         let initial = tool_calls::definitions();
-        assert_eq!(initial.as_array().unwrap().iter().filter(|tool| tool["name"] == "wake_agent").count(), 1);
+        assert_eq!(
+            initial
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tool| tool["name"] == "wake_agent")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn interrupted_wake_recovers_its_existing_receipt_without_replaying() {
         let mut session = Session::default();
         session.running = Some(Call {
-            id: "wake-call".into(), name: "wake_agent".into(),
+            id: "wake-call".into(),
+            name: "wake_agent".into(),
             arguments: json!({"to":"recipient", "text":"Continue the assigned work"}).to_string(),
             argument_entry: None,
         });
         assert_eq!(session.recovering_send_call(), Some("wake-call"));
         assert!(session.recover_sends("sender", &BTreeMap::new()).is_empty());
-        assert!(session.running.is_some(), "missing receipt must not fabricate success");
+        assert!(
+            session.running.is_some(),
+            "missing receipt must not fabricate success"
+        );
         let message: crate::runtime::Communication = serde_json::from_value(json!({
             "id":"message-id", "sender_id":"sender", "recipient_id":"recipient",
             "sender_name":"canary", "recipient_name":"swift", "call_id":"wake-call",
             "sender_entry":"entry-id", "text":"Continue the assigned work", "urgency":"regular",
             "state":"queued", "applied_batch":null, "blocked":false, "persisted":true, "wake":true
-        })).unwrap();
+        }))
+        .unwrap();
         let receipt = message.receipt();
         assert_eq!(receipt["wake_requested"], true);
         let mut plain_send = serde_json::to_value(&message).unwrap();
         plain_send["wake"] = json!(false);
-        let wrong_kind = BTreeMap::from([(("sender".into(), "wake-call".into()), serde_json::from_value(plain_send).unwrap())]);
+        let wrong_kind = BTreeMap::from([(
+            ("sender".into(), "wake-call".into()),
+            serde_json::from_value(plain_send).unwrap(),
+        )]);
         assert!(session.recover_sends("sender", &wrong_kind).is_empty());
-        assert!(session.running.is_some(), "a send receipt must not satisfy a wake call");
+        assert!(
+            session.running.is_some(),
+            "a send receipt must not satisfy a wake call"
+        );
         let messages = BTreeMap::from([(("sender".into(), "wake-call".into()), message)]);
         let entries = session.recover_sends("sender", &messages);
         assert!(session.running.is_none());
@@ -212,7 +249,10 @@ mod tests {
         assert!(entries[0].1.starts_with("wake_agent (wake-call)\n"));
         assert_eq!(session.history.len(), 1);
         assert_eq!(session.history[0]["call_id"], "wake-call");
-        assert_eq!(serde_json::from_str::<Value>(session.history[0]["output"].as_str().unwrap()).unwrap(), receipt);
+        assert_eq!(
+            serde_json::from_str::<Value>(session.history[0]["output"].as_str().unwrap()).unwrap(),
+            receipt
+        );
         assert!(session.recover_sends("sender", &messages).is_empty());
         assert!(session.recover().is_empty());
     }
@@ -237,8 +277,14 @@ impl Session {
     }
     pub fn ensure_peer_trace_tool(&mut self) {
         if let Some(tools) = self.tools.as_array_mut() {
-            for definition in [tool_calls::peer_trace_definition(), tool_calls::wake_agent_definition()] {
-                if let Some(tool) = tools.iter_mut().find(|tool| tool["name"] == definition["name"]) {
+            for definition in [
+                tool_calls::peer_trace_definition(),
+                tool_calls::wake_agent_definition(),
+            ] {
+                if let Some(tool) = tools
+                    .iter_mut()
+                    .find(|tool| tool["name"] == definition["name"])
+                {
                     *tool = definition;
                 } else {
                     tools.push(definition);

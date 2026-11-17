@@ -33,3 +33,20 @@ Tests use loopback HTTP streams and isolated session storage. They cover parser
 reconciliation, identical-request recovery, terminal errors, retry budgets,
 Retry-After, cancellation, model-history isolation and local tool effects. They
 do not establish the frequency or exact upstream payload of production errors.
+
+## Peer recovery
+
+`wake_agent(to, text)` sends an attributed peer request. It wakes an idle agent
+or resumes a model-error hold while keeping the existing history. A busy agent
+receives it after its current response and tool batch. `list_agents` reports
+`wakeable`; delivery is not task acceptance. Ordinary `send_message` does not
+clear a hold.
+
+An explicit operator Stop, archived session, storage failure or uncertain crash
+recovery cannot be overridden by this tool. Stop revokes peer recovery permission
+and the distinction persists across server restart. Known model errors from
+older saved sessions migrate only when their last recorded boundary and clean
+execution state support that classification. The wake and message are admitted
+atomically; repeated tool-call IDs reuse the receipt without waking again. The
+request remains peer input, never an operator message. Admission does not wait
+for a persistence-capacity reservation or a durable write.

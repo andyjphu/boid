@@ -566,15 +566,32 @@ impl Hub {
                 // Older releases did not persist why peer listening was held.
                 if record.peer_restartable.is_none() {
                     let stopped = record.order > 0 && record.order == record.stop_through;
-                    let last_boundary = record.view.entries.iter().rev().find(|entry|
+                    let last_boundary = record.view.entries.iter().rev().find(|entry| {
                         matches!(entry.kind.as_str(), "error" | "user" | "assistant")
-                        || (entry.kind == "context" && entry.text.as_str() == "Stop the current task. Wait for new user direction."));
-                    record.peer_restartable = Some(!stopped && record.paused && last_boundary.is_some_and(|entry|
-                        entry.kind == "error" && ["OpenAI response stopped:", "Cannot reach the OpenAI API:",
-                            "Completed output index is outside the response.", "API stream ended", "Invalid JSON in the API stream."]
-                            .iter().any(|prefix| entry.text.starts_with(prefix))));
+                            || (entry.kind == "context"
+                                && entry.text.as_str()
+                                    == "Stop the current task. Wait for new user direction.")
+                    });
+                    record.peer_restartable = Some(
+                        !stopped
+                            && record.paused
+                            && last_boundary.is_some_and(|entry| {
+                                entry.kind == "error"
+                                    && [
+                                        "OpenAI response stopped:",
+                                        "Cannot reach the OpenAI API:",
+                                        "Completed output index is outside the response.",
+                                        "API stream ended",
+                                        "Invalid JSON in the API stream.",
+                                    ]
+                                    .iter()
+                                    .any(|prefix| entry.text.starts_with(prefix))
+                            }),
+                    );
                 }
-                if unclean || unfinished { record.peer_restartable = Some(false); }
+                if unclean || unfinished {
+                    record.peer_restartable = Some(false);
+                }
                 if let Some(call) = record.engine.recovering_send_call() {
                     let key = (record.view.id.clone(), call.to_owned());
                     if !recovery_messages.contains_key(&key) {
@@ -604,7 +621,9 @@ impl Hub {
                 };
                 let listen =
                     recovery.is_empty() && !(unclean && unfinished) && record.restart_listening();
-                if !recovery.is_empty() { record.peer_restartable = Some(false); }
+                if !recovery.is_empty() {
+                    record.peer_restartable = Some(false);
+                }
                 for (kind, text) in recovery {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
@@ -2382,11 +2401,34 @@ impl Hub {
     ) -> Result<Value> {
         self.send_communication_inner(from, to, text, urgency, call_id, sender_entry, false)
     }
-    pub fn wake_peer(&self, from: &str, to: &str, text: &str, call_id: &str, sender_entry: &str) -> Result<Value> {
-        self.send_communication_inner(from, to, text, Urgency::Regular, call_id, sender_entry, true)
+    pub fn wake_peer(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        call_id: &str,
+        sender_entry: &str,
+    ) -> Result<Value> {
+        self.send_communication_inner(
+            from,
+            to,
+            text,
+            Urgency::Regular,
+            call_id,
+            sender_entry,
+            true,
+        )
     }
-    fn send_communication_inner(&self, from: &str, to: &str, text: &str, urgency: Urgency,
-        call_id: &str, sender_entry: &str, wake: bool) -> Result<Value> {
+    fn send_communication_inner(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        urgency: Urgency,
+        call_id: &str,
+        sender_entry: &str,
+        wake: bool,
+    ) -> Result<Value> {
         crate::blocking::run(|| {
             if from == to {
                 bail!("Address another session.");
@@ -2436,7 +2478,7 @@ impl Hub {
                     checked_generation = Some(generation);
                     continue;
                 }
-                if permit.is_some() {
+                if wake || permit.is_some() {
                     break data;
                 }
                 drop(data);
@@ -2916,7 +2958,7 @@ impl Hub {
                         r.engine = session.clone();
                         r.paused = true;
                         r.listen_on_restart = Some(false);
-                r.peer_restartable = Some(peer_restartable);
+                        r.peer_restartable = Some(peer_restartable);
                         Ok(())
                     });
                     self.entry(&id, "error", format!("{error:#}"));

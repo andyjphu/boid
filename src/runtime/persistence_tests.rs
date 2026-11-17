@@ -918,7 +918,7 @@ fn communication_index_preserves_equality_with_duplicate_ids() {
         sender_entry: "entry".into(),
         text: "first".to_owned().into(),
         urgency: Urgency::Regular,
-                wake: false,
+        wake: false,
         state: "queued".into(),
         applied_batch: None,
         blocked: false,
