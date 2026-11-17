@@ -1450,23 +1450,23 @@ impl Hub {
     }
     pub fn abandon_response_attempt(&self, id: &str, next: u64, maximum: u64) {
         crate::blocking::run(|| {
-        let mut data = self.0.data.lock().unwrap();
-        let result = self.update_locked(&mut data, id, None, |record| {
-            record.engine.partial_text.clear();
-            record.view.entries.push(Self::make_entry(
-                "notice",
-                if next > 0 {
-                    format!("Request interrupted; retrying ({next}/{maximum}).")
-                } else {
-                    "Response rejected; partial output was not committed.".into()
-                },
-            ));
-            Ok(())
-        });
-        drop(data);
-        if let Err(error) = result {
-            self.fault(id, error);
-        }
+            let mut data = self.0.data.lock().unwrap();
+            let result = self.update_locked(&mut data, id, None, |record| {
+                record.engine.partial_text.clear();
+                record.view.entries.push(Self::make_entry(
+                    "notice",
+                    if next > 0 {
+                        format!("Request interrupted; retrying ({next}/{maximum}).")
+                    } else {
+                        "Response rejected; partial output was not committed.".into()
+                    },
+                ));
+                Ok(())
+            });
+            drop(data);
+            if let Err(error) = result {
+                self.fault(id, error);
+            }
         });
     }
     pub fn retry_wait(&self, id: &str, delay_ms: Option<u64>) {
