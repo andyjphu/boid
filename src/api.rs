@@ -49,6 +49,8 @@ pub struct Client {
     endpoint: Option<String>,
     #[cfg(test)]
     handoff_probe: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    #[cfg(test)]
+    worker_probe: Option<Arc<dyn Fn(&str, &'static str) + Send + Sync>>,
 }
 
 impl Client {
@@ -97,6 +99,8 @@ impl Client {
             endpoint: None,
             #[cfg(test)]
             handoff_probe: None,
+            #[cfg(test)]
+            worker_probe: None,
         })
     }
 
@@ -203,6 +207,13 @@ impl Client {
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"summary": "auto"}
         });
+        if let Some(tier) = profile["service_tier"].as_str() {
+            // Subscription sharing uses the account's ordinary tier when off.
+            // Its endpoint can reject an explicit default override.
+            if profile["billing_route"] != "chatgpt" || tier != "default" {
+                request["service_tier"] = json!(tier);
+            }
+        }
         if let Some(effort) = profile["reasoning_effort"].as_str() {
             request["reasoning"]["effort"] = json!(effort);
         }
@@ -581,6 +592,7 @@ impl Client {
             cyber_access_program: None,
             endpoint: Some("http://127.0.0.1:1".into()),
             handoff_probe: None,
+            worker_probe: None,
         }
     }
 
@@ -603,6 +615,21 @@ impl Client {
     pub(crate) fn test_handoff_mark(&self, stage: &'static str) {
         if let Some(probe) = &self.handoff_probe {
             probe(stage);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_worker_probe(
+        &mut self,
+        probe: Arc<dyn Fn(&str, &'static str) + Send + Sync>,
+    ) {
+        self.worker_probe = Some(probe);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_worker_mark(&self, id: &str, stage: &'static str) {
+        if let Some(probe) = &self.worker_probe {
+            probe(id, stage);
         }
     }
 }

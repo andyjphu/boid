@@ -145,7 +145,7 @@ fn scan_inner(roots: &[PathBuf], config_path: &Path, cancelled: &AtomicBool) -> 
             snapshot.warnings.push("Each skill rule must specify exactly one id or name. Skills unavailable until configuration is repaired.".into());
             break;
         }
-        for (id, skill) in &mut snapshot.skills {
+        for (id, skill) in snapshot.skills.iter_mut() {
             if rule.id.as_ref() == Some(id) || rule.name.as_ref() == Some(&skill.name) {
                 if let Some(enabled) = rule.enabled {
                     skill.enabled = enabled;
@@ -273,4 +273,50 @@ fn load(path: &Path) -> Result<Skill> {
         implicit: metadata.policy.allow_implicit_invocation.unwrap_or(true),
         warnings,
     })
+}
+
+/// Metadata-only detection uses discovery's traversal bounds and package boundaries.
+#[derive(PartialEq)]
+pub(super) struct Fingerprint(Vec<(PathBuf, Option<FileStamp>)>);
+#[derive(PartialEq)]
+struct FileStamp {
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+    directory: bool,
+    #[cfg(unix)]
+    unix: (u64, i64, i64, u32),
+}
+pub(super) fn fingerprint(cwd: &Path, cancelled: &AtomicBool) -> Option<Fingerprint> {
+    let roots = roots(cwd);
+    let mut visited = BTreeSet::new();
+    let mut files = BTreeSet::new();
+    for root in &roots {
+        walk(root, 0, &mut visited, &mut files, &mut vec![], cancelled);
+    }
+    let mut paths = visited;
+    paths.extend(roots);
+    paths.insert(cwd.join(".boid/skills.json"));
+    for file in files {
+        paths.insert(file.parent()?.join("agents/openai.yaml"));
+        paths.insert(file);
+    }
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in paths {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        let stamp = fs::metadata(&path).ok().map(|meta| {
+            #[cfg(unix)]
+            use std::os::unix::fs::MetadataExt;
+            FileStamp {
+                length: meta.len(),
+                modified: meta.modified().ok(),
+                directory: meta.is_dir(),
+                #[cfg(unix)]
+                unix: (meta.ino(), meta.ctime(), meta.ctime_nsec(), meta.mode()),
+            }
+        });
+        stamps.push((path, stamp));
+    }
+    Some(Fingerprint(stamps))
 }

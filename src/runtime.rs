@@ -23,6 +23,8 @@ mod handoff_tests;
 #[cfg(test)]
 mod incremental_benchmark;
 mod journal;
+#[cfg(test)]
+mod message_dispatch_tests;
 mod persistence;
 mod recovery;
 mod screen_lifecycle;
@@ -31,6 +33,8 @@ use persistence::{Lane, Operation, Permit, Receipt};
 mod diagnostics_suspension_tests;
 #[cfg(test)]
 mod draft_tests;
+#[cfg(test)]
+mod fast_tests;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
@@ -102,7 +106,7 @@ pub struct Communication {
     pub recipient_name: String,
     pub call_id: String,
     pub sender_entry: String,
-    pub text: String,
+    pub text: Arc<String>,
     pub urgency: Urgency,
     pub state: String,
     pub applied_batch: Option<u64>,
@@ -302,9 +306,10 @@ struct Inner {
     run_marker: recovery::RunMarker,
     compactions: Arc<journal::Compactions>,
     images: Arc<crate::images::ImageStore>,
+    skill_cache: crate::skills::cache::Cache,
     pub cwd: PathBuf,
     #[cfg(test)]
-    skill_scan_gate: Mutex<Option<Arc<SkillScanGate>>>,
+    skill_scan_gate: Arc<Mutex<Option<Arc<SkillScanGate>>>>,
     #[cfg(test)]
     archive_receipt_gate:
         Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
@@ -381,6 +386,7 @@ struct Handle {
     // New empty sessions exist only in memory until real work is accepted.
     // Restored records are committed, including historical context-only records.
     draft: Option<Draft>,
+    skill_watch: Option<Arc<crate::skills::cache::Watch>>,
     record: Record,
     persistence: Lane,
     cancel: watch::Sender<u64>,
@@ -393,10 +399,7 @@ struct Handle {
 }
 
 #[cfg(test)]
-struct SkillScanGate {
-    started: Notify,
-    release: Mutex<std::sync::mpsc::Receiver<()>>,
-}
+use crate::skills::cache::ScanGate as SkillScanGate;
 
 fn next_agent_name(data: &Data, names: &[String], entropy: u128) -> String {
     let used = data
@@ -492,6 +495,7 @@ impl Hub {
                 .collect();
             let mut recovery_messages = messages.clone();
             let (events, _) = broadcast::channel(512);
+            let skill_cache = crate::skills::cache::Cache::default();
             let hub = Self(Arc::new(Inner {
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
@@ -516,9 +520,10 @@ impl Hub {
                 compactions: Arc::new(journal::Compactions::default()),
                 cwd: std::env::current_dir()?,
                 #[cfg(test)]
-                skill_scan_gate: Mutex::new(None),
+                skill_scan_gate: skill_cache.gate.clone(),
                 #[cfg(test)]
                 archive_receipt_gate: Mutex::new(None),
+                skill_cache,
             }));
             let mut restored_records = Vec::new();
             for mut record in records {
@@ -614,13 +619,22 @@ impl Hub {
                 hub.0
                     .store
                     .prune_events(&record.view.id, record.journal_seq)?;
-                restored_records.push(record);
+                let skill_watch = if record.engine.skill_base.is_some() && !record.view.archived {
+                    Some(
+                        hub.0
+                            .skill_cache
+                            .preload(PathBuf::from(&record.view.cwd).as_path())?,
+                    )
+                } else {
+                    None
+                };
+                restored_records.push((record, skill_watch));
             }
             // Install the complete roster before any restored worker can run.
             {
                 let mut data = hub.0.data.lock().unwrap();
-                for record in restored_records {
-                    hub.install_locked(&mut data, record, false, None)?;
+                for (record, skill_watch) in restored_records {
+                    hub.install_locked(&mut data, record, false, None, skill_watch)?;
                 }
                 hub.prune_absent_agent_groups_locked(&mut data)?;
             }
@@ -672,6 +686,7 @@ impl Hub {
         record: Record,
         emit: bool,
         draft: Option<Draft>,
+        skill_watch: Option<Arc<crate::skills::cache::Watch>>,
     ) -> Result<()> {
         let id = record.view.id.clone();
         let (cancel, _) = watch::channel(record.stop_through);
@@ -688,6 +703,7 @@ impl Hub {
             id.clone(),
             Handle {
                 draft,
+                skill_watch,
                 persistence: Lane::new(Arc::downgrade(&self.0), id.clone(), durable)?,
                 record,
                 cancel,
@@ -797,16 +813,22 @@ impl Hub {
                     .unwrap_or(&handle.record.engine.model),
             );
         }
+        let full = entries.len() == source.entries.len();
+        let selected: std::collections::HashSet<&str> = if full {
+            Default::default()
+        } else {
+            entries.iter().map(|entry| entry.id.as_str()).collect()
+        };
         view.communications = data
             .messages
             .values()
-            .filter(|m| {
-                entries.len() == source.entries.len()
-                    && (m.sender_id == source.id || m.recipient_id == source.id)
-                    || entries.iter().any(|e| {
-                        (m.sender_id == source.id && m.sender_entry == e.id)
-                            || (m.recipient_id == source.id && m.id == e.id)
-                    })
+            .filter(|message| {
+                let sent = message.sender_id == source.id;
+                let received = message.recipient_id == source.id;
+                (sent || received)
+                    && (full
+                        || (sent && selected.contains(message.sender_entry.as_str()))
+                        || (received && selected.contains(message.id.as_str())))
             })
             .cloned()
             .map(|mut m| {
@@ -962,7 +984,13 @@ impl Hub {
         screen: Option<u32>,
     ) -> (Value, broadcast::Receiver<Value>) {
         crate::blocking::run(|| {
+            enum Projection {
+                Recent(history::HistoryPage),
+                Full(View),
+            }
             let data = self.0.data.lock().unwrap();
+            // Receiver and sequence are captured with the projection. Events
+            // published while JSON is encoded remain queued after this snapshot.
             let receiver = self.0.events.subscribe();
             let views: Vec<_> = data
                 .sessions
@@ -975,17 +1003,36 @@ impl Hub {
                 })
                 .map(|h| {
                     if recent {
-                        Self::history_view(&data, &h.record.view, None, None, None)
-                            .expect("latest history")
+                        Projection::Recent(
+                            Self::capture_history_view(&data, &h.record.view, None, None, None)
+                                .expect("latest history"),
+                        )
                     } else {
-                        json!(Self::project_view(&data, &h.record.view))
+                        Projection::Full(Self::project_view(&data, &h.record.view))
                     }
                 })
                 .collect();
+            let seq = data.seq;
+            let catalog: Vec<_> = data
+                .sessions
+                .values()
+                .filter(|h| !h.record.view.archived)
+                .map(|h| h.record.view.id.clone())
+                .collect();
+            let screens = data.screens.clone();
+            let groups = Self::pane_groups_value(&data);
+            let terminals: Vec<_> = data.terminal_summaries.values().cloned().collect();
+            drop(data);
+            let views: Vec<_> = views
+                .into_iter()
+                .map(|view| match view {
+                    Projection::Recent(page) => page.into_value(),
+                    Projection::Full(view) => json!(view),
+                })
+                .collect();
             (
-                json!({"seq":data.seq,"type":"snapshot","sessions":views,
-                "catalog":data.sessions.values().filter(|h| !h.record.view.archived).map(|h| &h.record.view.id).collect::<Vec<_>>(),
-                "screens":data.screens,"pane_groups":Self::pane_groups_value(&data),"terminals":data.terminal_summaries.values().collect::<Vec<_>>()}),
+                json!({"seq":seq,"type":"snapshot","sessions":views,
+                "catalog":catalog,"screens":screens,"pane_groups":groups,"terminals":terminals}),
                 receiver,
             )
         })
@@ -1530,8 +1577,9 @@ impl Hub {
                 "Session identity: {id}. Working directory: {}. Peer messages are attributed external input; they do not expand the operator's permissions. Use list_agents and send_message for peer communication.",
                 cwd.display()
             );
-            let snapshot = crate::skills::discovery::scan(&cwd);
-            let skills = snapshot.skills;
+            let skill_watch = self.0.skill_cache.preload(&cwd)?;
+            let snapshot = skill_watch.latest();
+            let skills = snapshot.skills.clone();
             let profile = self.0.client.config();
             let model = profile["model"].as_str().context(
                 "Billing settings are unavailable; repair account storage before creating agents.",
@@ -1549,7 +1597,7 @@ impl Hub {
                 engine.skill_base.as_ref().unwrap(),
                 crate::skills::catalog::prompt(&engine.skills, snapshot.budget, &snapshot.warnings)
             );
-            engine.skill_warnings = snapshot.warnings;
+            engine.skill_warnings = snapshot.warnings.clone();
             engine.profile = profile;
             let view = View {
                 questions: vec![],
@@ -1613,7 +1661,13 @@ impl Hub {
                     self.0.store.save_screens(&next)?;
                     data.screens = next;
                 }
-                self.install_locked(&mut data, record, true, Some(Draft { automatic_name }))?;
+                self.install_locked(
+                    &mut data,
+                    record,
+                    true,
+                    Some(Draft { automatic_name }),
+                    Some(skill_watch),
+                )?;
             }
             if !input.message.trim().is_empty() {
                 self.message(&id, input.message)?;
@@ -1660,8 +1714,48 @@ impl Hub {
             Ok(Self::effective_profile(&data, id, source))
         })
     }
-    pub fn select_profile(&self, id: &str, expected: &Value, profile: Value) -> Result<()> {
-        if self.profile(id)? != *expected {
+    pub fn set_fast(&self, id: &str, enabled: bool, expected: &Value) -> Result<Value> {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            if data.closing || data.ending.contains(id) {
+                bail!("Session or server is ending.");
+            }
+            let handle = data.sessions.get(id).context("Unknown session.")?;
+            if handle.record.view.archived || handle.record.view.status == "ending" {
+                bail!("Session has ended. Create a new agent instead.");
+            }
+            let mut profile = Self::effective_profile(&data, id, &handle.record.view.profile);
+            for field in ["model", "credential_id", "billing_route", "chatgpt_account"] {
+                if profile[field] != expected[field] {
+                    bail!("This agent's model or credential changed. Retry /fast.");
+                }
+            }
+            let tier = if enabled { "priority" } else { "default" };
+            if profile["service_tier"] == tier {
+                return Ok(profile);
+            }
+            profile["service_tier"] = json!(tier);
+            self.update_locked(&mut data, id, None, |record| {
+                // The worker's profile belongs to its current request. Only the
+                // authoritative next-request preference changes here.
+                record.view.profile = profile.clone();
+                Ok(())
+            })?;
+            Ok(profile)
+        })
+    }
+    pub fn select_profile(&self, id: &str, expected: &Value, mut profile: Value) -> Result<()> {
+        let mut current = self.profile(id)?;
+        let mut expected_connection = expected.clone();
+        // /fast is independent of an in-progress model chooser. A later model
+        // selection must retain the latest speed preference.
+        if let Some(value) = current.as_object_mut() {
+            value.remove("service_tier");
+        }
+        if let Some(value) = expected_connection.as_object_mut() {
+            value.remove("service_tier");
+        }
+        if current != expected_connection {
             bail!("This agent's connection changed. Reopen the chooser and try again.");
         }
         if profile["credential_id"] != expected["credential_id"]
@@ -1679,6 +1773,12 @@ impl Hub {
                 || record.engine.has_pending_tools() || !record.inputs.is_empty()
                 || (!record.paused && !record.inbox.is_empty()) {
                 bail!("Wait for this agent to finish, or interrupt it before changing its connection or model.");
+            }
+            let selected = profile.as_object_mut().context("Invalid model profile.")?;
+            if let Some(tier) = record.view.profile.get("service_tier") {
+                selected.insert("service_tier".into(), tier.clone());
+            } else {
+                selected.remove("service_tier");
             }
             record.view.profile = profile;
             Ok(())
@@ -1700,24 +1800,23 @@ impl Hub {
     }
     pub fn skill_catalog(&self, id: &str) -> Result<Value> {
         crate::blocking::run(|| {
-            let (cwd, saved, warnings, refresh) = {
+            let (watch, saved, warnings) = {
                 let data = self.0.data.lock().unwrap();
-                let record = &data
+                let handle = data
                     .sessions
                     .get(id)
                     .filter(|h| !h.record.view.archived)
-                    .context("Unknown or archived session")?
-                    .record;
+                    .context("Unknown or archived session")?;
                 (
-                    record.view.cwd.clone(),
-                    record.engine.skills.clone(),
-                    record.engine.skill_warnings.clone(),
-                    record.engine.skill_base.is_some(),
+                    handle.skill_watch.clone(),
+                    handle.record.engine.skills.clone(),
+                    handle.record.engine.skill_warnings.clone(),
                 )
             };
-            let (skills, warnings) = if refresh {
-                let snapshot = crate::skills::discovery::scan(std::path::Path::new(&cwd));
-                (snapshot.skills, snapshot.warnings)
+            let refresh = watch.is_some();
+            let (skills, warnings) = if let Some(watch) = watch {
+                let snapshot = watch.latest();
+                (snapshot.skills.clone(), snapshot.warnings.clone())
             } else {
                 (saved, warnings)
             };
@@ -1989,6 +2088,7 @@ impl Hub {
             h.task.take()
         });
         Self::wait_task(task).await;
+        self.release_skill_watch(id);
         let finished = self.update(id, |r| {
             for (kind, text) in r.engine.recover() {
                 r.view.entries.push(Self::make_entry(&kind, text));
@@ -2050,6 +2150,7 @@ impl Hub {
             Ok((h.task.take(), cancelled, users, peers))
         })?;
         Self::wait_task(task).await;
+        self.release_skill_watch(id);
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
             let h = data.sessions.get_mut(id).unwrap();
@@ -2098,6 +2199,21 @@ impl Hub {
             );
             Ok(false)
         })
+    }
+
+    fn release_skill_watch(&self, id: &str) {
+        let watch = crate::blocking::run(|| {
+            self.0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .get_mut(id)
+                .and_then(|handle| handle.skill_watch.take())
+        });
+        // The retained recovery record has its own immutable skill snapshot.
+        // An ended agent must not keep background filesystem discovery alive.
+        drop(watch);
     }
 
     pub fn reopen(&self, _id: &str) -> Result<View> {
@@ -2168,7 +2284,7 @@ impl Hub {
                 let data = self.0.data.lock().unwrap();
                 if let Some(message) = data.messages.get(&(from.into(), call_id.into())) {
                     if message.recipient_id != to
-                        || message.text != text
+                        || message.text.as_str() != text
                         || message.urgency != urgency
                     {
                         bail!("A send operation cannot change its recipient, text or urgency.");
@@ -2241,7 +2357,7 @@ impl Hub {
                 recipient_name: recipient,
                 call_id: call_id.into(),
                 sender_entry: sender_entry.into(),
-                text: text.into(),
+                text: text.to_owned().into(),
                 urgency,
                 state: "queued".into(),
                 applied_batch: None,
@@ -2476,10 +2592,17 @@ impl Hub {
         mut halt: watch::Receiver<()>,
         wake: Arc<Notify>,
     ) {
-        let (mut session, cwd) = crate::blocking::run(|| {
+        #[cfg(test)]
+        self.0.client.test_worker_mark(&id, "worker_start");
+        let (mut session, cwd, skill_watch) = crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
-            let r = &data.sessions[&id].record;
-            (r.engine.clone(), r.view.cwd.clone())
+            let handle = &data.sessions[&id];
+            let r = &handle.record;
+            (
+                r.engine.clone(),
+                r.view.cwd.clone(),
+                handle.skill_watch.clone(),
+            )
         });
         let tools = match Tools::new(&cwd) {
             Ok(t) => t,
@@ -2494,15 +2617,9 @@ impl Hub {
             }
         };
         let mut active = false;
-        let mut scan: Option<crate::skills::refresh::Scan> = None;
+        let mut applied_skills: Option<Arc<crate::skills::discovery::Snapshot>> = None;
         let mut urgent_turn = false;
         loop {
-            if scan
-                .as_ref()
-                .is_some_and(|s| s.cancelled() && s.is_finished())
-            {
-                let _ = scan.take().unwrap().finish().await;
-            }
             enum Next {
                 Emergency,
                 Interrupt,
@@ -2510,12 +2627,6 @@ impl Hub {
                 Halt,
                 Wake,
                 Finished(Result<bool>),
-                Scanned(
-                    std::result::Result<
-                        Option<crate::skills::discovery::Snapshot>,
-                        tokio::task::JoinError,
-                    >,
-                ),
             }
             let next = if halt.has_changed().unwrap_or(false) {
                 halt.borrow_and_update();
@@ -2546,50 +2657,31 @@ impl Hub {
                                 input.order > record.stop_through && !input.compact && !input.clear
                             })
                         });
-                        if needs_refresh && session.skill_base.is_some() {
-                            if scan.is_none() {
-                                let skill_cwd = PathBuf::from(&cwd);
-                                #[cfg(test)]
-                                let gate = self.0.skill_scan_gate.lock().unwrap().take();
-                                scan =
-                                    Some(crate::skills::refresh::Scan::start(move |cancelled| {
-                                        #[cfg(test)]
-                                        if let Some(gate) = gate {
-                                            gate.started.notify_one();
-                                            let _ = gate.release.lock().unwrap().recv();
-                                        }
-                                        crate::skills::discovery::scan_cancellable(
-                                            &skill_cwd, cancelled,
-                                        )
-                                    }));
-                            }
-                        } else {
-                            match self.next_input(&id, &mut session, active) {
-                                Ok(applied) => {
-                                    if let Some(continue_work) = applied {
-                                        active = continue_work || self.peers_ready(&id);
-                                        self.status(&id, if active { "working" } else { "idle" });
-                                    }
+                        if needs_refresh {
+                            if let Some(watch) = &skill_watch {
+                                let snapshot = watch.latest();
+                                if !applied_skills
+                                    .as_ref()
+                                    .is_some_and(|prior| Arc::ptr_eq(prior, &snapshot))
+                                {
+                                    session.refresh_skills((*snapshot).clone());
+                                    applied_skills = Some(snapshot);
                                 }
-                                Err(error) => self.fault(&id, error),
                             }
-                            continue;
                         }
+                        match self.next_input(&id, &mut session, active) {
+                            Ok(applied) => {
+                                if let Some(continue_work) = applied {
+                                    active = continue_work || self.peers_ready(&id);
+                                    self.status(&id, if active { "working" } else { "idle" });
+                                }
+                            }
+                            Err(error) => self.fault(&id, error),
+                        }
+                        continue;
                     }
                 }
-                if scan
-                    .as_ref()
-                    .is_some_and(|pending| !pending.cancelled() || !active)
-                {
-                    let pending = scan.as_mut().unwrap();
-                    tokio::select! {biased;
-                        _=halt.changed()=>Next::Halt,
-                        _=cancel.changed()=>Next::Stop,
-                        _=interrupt.changed()=>Next::Interrupt,
-                        _=emergency.changed()=>Next::Emergency,
-                        result=pending.finish()=>Next::Scanned(result),
-                    }
-                } else if active {
+                if active {
                     tokio::select! {biased;
                         _=halt.changed()=>Next::Halt,
                         _=cancel.changed()=>Next::Stop,
@@ -2605,14 +2697,6 @@ impl Hub {
             if matches!(next, Next::Emergency) && !self.urgent_ready(&id) {
                 continue;
             }
-            if matches!(
-                next,
-                Next::Halt | Next::Stop | Next::Interrupt | Next::Emergency
-            ) {
-                if let Some(pending) = &scan {
-                    pending.cancel();
-                }
-            }
             match next {
                 Next::Emergency => {
                     // A notification can outlive the message it announced.
@@ -2624,28 +2708,6 @@ impl Hub {
                     active = urgent_turn;
                     if active {
                         self.status(&id, "working");
-                    }
-                }
-                Next::Scanned(result) => {
-                    let pending = scan.take().expect("finished skill scan");
-                    if pending.cancelled() {
-                        continue;
-                    }
-                    match result {
-                        Ok(Some(snapshot)) => {
-                            session.refresh_skills(snapshot);
-                            match self.next_input(&id, &mut session, active) {
-                                Ok(applied) => {
-                                    if let Some(continue_work) = applied {
-                                        active = continue_work || self.peers_ready(&id);
-                                        self.status(&id, if active { "working" } else { "idle" });
-                                    }
-                                }
-                                Err(error) => self.fault(&id, error),
-                            }
-                        }
-                        Ok(None) => (),
-                        Err(error) => self.fault(&id, error.into()),
                     }
                 }
                 Next::Halt => {
@@ -2712,6 +2774,8 @@ impl Hub {
                     self.status(&id, "stopped");
                 }
                 Next::Finished(Ok(more)) => {
+                    #[cfg(test)]
+                    self.0.client.test_worker_mark(&id, "step_finished");
                     urgent_turn = false;
                     active = more || self.peers_ready(&id);
                     if !active {
@@ -2755,6 +2819,7 @@ impl Hub {
         }
     }
     pub async fn shutdown(&self) {
+        self.0.skill_cache.shutdown();
         let ids = crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
             data.closing = true;
@@ -3047,17 +3112,28 @@ mod tests {
                 .create(Create {
                     name: action.into(),
                     cwd: work.path().to_string_lossy().into_owned(),
-                    message: String::new(),
+                    message: "/clear".into(),
                 })
                 .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !hub.view(&view.id).unwrap().pending.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             let (release, wait) = std::sync::mpsc::channel();
             let gate = Arc::new(SkillScanGate {
                 started: Notify::new(),
                 release: Mutex::new(wait),
             });
             *hub.0.skill_scan_gate.lock().unwrap() = Some(gate.clone());
-            hub.message(&view.id, "This input waits for discovery".into())
-                .unwrap();
+            std::fs::create_dir_all(work.path().join(".boid")).unwrap();
+            std::fs::write(
+                work.path().join(".boid/skills.json"),
+                format!("{{\"catalog_characters\":{}}}", action.len()),
+            )
+            .unwrap();
             tokio::time::timeout(Duration::from_secs(2), gate.started.notified())
                 .await
                 .unwrap();
@@ -3095,7 +3171,7 @@ mod tests {
                     .unwrap();
             }
             let ended = serde_json::to_value(hub.ended_record(&view.id)).unwrap();
-            release.send(()).unwrap();
+            let _ = release.send(());
             // The worker has ended while the filesystem task was still blocked.
             // A late result has no session owner to which it can commit.
             assert!(!hub.0.data.lock().unwrap().sessions.contains_key(&view.id));
@@ -3295,6 +3371,22 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), async {
             while hub.view(&view.id).unwrap().status != "idle" {
                 tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // This message consumes a completed background refresh, never a scan
+        // launched by message admission. The prior tool continuation stayed frozen.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let watch = hub.0.data.lock().unwrap().sessions[&view.id]
+                    .skill_watch
+                    .clone()
+                    .unwrap();
+                if watch.latest().skills[&skill_id].text == changed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await

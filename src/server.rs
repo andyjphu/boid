@@ -155,6 +155,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .route("/api/sessions/{id}/skills", get(skill_catalog))
         .route("/api/sessions/{id}/models", get(session_models))
         .route("/api/sessions/{id}/model", post(session_model))
+        .route("/api/sessions/{id}/fast", post(session_fast))
         .route("/api/sessions/{id}/stop", post(stop))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/events", get(events))
@@ -741,6 +742,40 @@ async fn session_models(State(app): State<App>, Path(id): Path<String>) -> ApiRe
     ))
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FastSelection {
+    enabled: bool,
+}
+async fn session_fast(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<FastSelection>,
+) -> ApiResult<Json<Value>> {
+    let current = app.hub.profile(&id).map_err(invalid)?;
+    if input.enabled
+        && current["billing_route"] == "chatgpt"
+        && current["service_tier"] != "priority"
+    {
+        let account = current["chatgpt_account"]
+            .as_str()
+            .ok_or_else(|| invalid("Choose a ChatGPT account."))?;
+        let model = current["model"]
+            .as_str()
+            .ok_or_else(|| invalid("Choose an agent model."))?;
+        app.auth
+            .as_ref()
+            .ok_or_else(|| invalid("ChatGPT authentication is unavailable."))?
+            .require_fast(account, model)
+            .await
+            .map_err(invalid)?;
+    }
+    let profile = app
+        .hub
+        .set_fast(&id, input.enabled, &current)
+        .map_err(invalid)?;
+    Ok(Json(json!({"profile":profile})))
+}
+#[derive(Deserialize)]
 struct ModelSelection {
     model: String,
 }
@@ -757,8 +792,9 @@ async fn session_model(
     let mut profile = current.clone();
     profile["model"] = json!(input.model);
     app.hub
-        .select_profile(&id, &current, profile.clone())
+        .select_profile(&id, &current, profile)
         .map_err(invalid)?;
+    let profile = app.hub.profile(&id).map_err(invalid)?;
     Ok(Json(
         json!({"profile":profile,"context_window":crate::api::context_window(&input.model)}),
     ))

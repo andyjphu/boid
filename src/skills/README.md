@@ -56,22 +56,24 @@ skill text is never silently truncated.
 
 ## Refresh and evidence
 
-At each operator-message boundary, Boid scans on a blocking worker and captures
-the current SKILL.md text, policy and catalog for that turn. Tool continuations
-and peer messages use the same snapshot. Editing a skill affects the next
-operator message, including after restart, without requiring a server restart.
-The browser picker scans for the next message and does not mutate active work.
-Files can change between selection and sending; the turn uses the send-time
-snapshot. Missing or disabled selections produce a trace entry and model-visible
-error. Earlier explicit selections and tool loads remain unchanged in history.
-Skill loads and catalog changes have compact disclosures with the exact saved
-body. Selection failures and discovery warnings stay visible. Opening or closing
-the picker preserves the elapsed working footer and Escape semantics; inserting
-a skill participates in the accepted prompt-clearance behavior. This is boundary refresh,
-not a filesystem watcher. A session keeps at most one discovery scan in flight.
-Stop, Escape and End remain available while it runs. Cancellation prevents its
-result from being applied; the blocking filesystem work checks cancellation
-between reads and may finish an already-started read before exiting.
+Boid preloads one skill snapshot per working directory at agent/server
+initialization. Agents with that working directory share an immutable snapshot
+and one background watcher. The watcher checks bounded filesystem metadata every
+500 ms and rescans skill contents only when that metadata changes. Configuration,
+SKILL.md bodies, and `agents/openai.yaml` policy changes are included.
+
+Each operator-message boundary captures the latest completed snapshot from
+memory. Message dispatch and the browser picker perform no filesystem scan and
+do not wait for a refresh. A recently edited skill can therefore take one watcher
+interval plus scan time to appear. Tool continuations and peer messages retain
+the operator-message snapshot. Earlier loaded text stays unchanged in history;
+missing or disabled explicit selections produce the existing visible error.
+
+Stop, Escape and End never wait for skill discovery. The final agent lease or
+server shutdown cancels the watcher. Cancellation is checked between reads; an
+already-started filesystem read may finish before its background thread exits.
+Session/checkpoint clones share skill bodies; saved snapshots retain their exact
+plain-map JSON representation and content-addressed identity.
 
 Supporting files remain live filesystem content. They are not captured or
 versioned with SKILL.md; reads and commands retain their normal tool traces and
@@ -110,7 +112,7 @@ state backup for a binary rollback; do not point an older binary at v2 records.
 - `catalog.rs` and `instructions.md`: metadata presentation, context budget and
   model guidance. Guidance is compiled into the binary; rebuild to change it.
 - `selection.rs`: operator mentions and source disambiguation.
-- `refresh.rs`: cancellable scan ownership; `session_store.rs`: immutable snapshot
+- `cache.rs`: shared snapshots and cancellable background refresh; `session_store.rs`: immutable snapshot
   storage and integrity checks alongside durable session checkpoints.
 - `skills.rs`: shared saved representation, bundle and complete-text loading.
 - `Session::operator`, `Session::refresh_skills` and the runtime worker: selection,

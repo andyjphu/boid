@@ -134,8 +134,8 @@ Separate 16 MiB history-sharing measurements reported two history copies/drop
 proves all history-dependent costs are gone or predicts production latency.
 
 Choose focused regressions for the changed boundary: no-op behavior with a
-blocked writer, unchanged payloads, FIFO replay, failed checkpoints preventing
-effects, and shutdown draining. Run the relevant suite once; broaden after new
+blocked writer, unchanged payloads, FIFO replay, uncertain-effect recovery after
+recording failure, and shutdown draining. Run the relevant suite once; broaden after new
 failures or changes. Validate the exact built binary and embedded assets in an
 isolated server without provider calls. Only post-deployment measurements of
 actual use can establish the live improvement. Retain unresolved limits and
@@ -154,8 +154,7 @@ waits. Input acceptance remains asynchronous and real.
 A single background compactor writes full snapshots. The FIFO writer rotates
 its active journal into a closed segment before handing the compactor an
 immutable record. New events go to a new active segment. Only closed segments
-covered by a successfully published durable snapshot can be pruned. A full
-snapshot must not be inserted ahead of tool/inference barriers. Archival and
+covered by a successfully published durable snapshot can be pruned. Snapshot publication must preserve journal rotation ordering. Archival and
 shutdown must account for the compactor before moving or releasing state.
 
 Version 7 session state consists of the base `<id>.json` plus
@@ -222,3 +221,53 @@ implementation reached the next request before writer release. A separate
 regression completes eight actual model/tool cycles under one held writer,
 exceeding the former queue capacity. These are native local mock-provider
 measurements, not production response-time or worst-case guarantees.
+
+
+## Message dispatch and shared state (v1.1.40)
+
+Skill discovery is preloaded once per canonical working directory. A background
+watcher checks filesystem metadata every 500 ms and rescans when it changes.
+Each operator-input boundary uses the latest completed snapshot without waiting
+for filesystem work. Tool continuations retain their existing snapshot. Edits,
+renames, deletions, and configuration changes become available after detection
+and scan completion; 500 ms is the polling interval, not a freshness guarantee.
+Invalid configuration publishes the same disabled catalog and warnings as before.
+Sessions in the same directory share the watcher; the last lease or server
+shutdown cancels it. Cold initialization still waits for its initial scan.
+
+Skill maps and peer-message text share immutable allocations. Copy-on-write
+preserves prior snapshots, and stored JSON remains unchanged. History and SSE
+snapshots capture entries, sequence and receiver together under the session
+mutex, then preview and serialize outside it. This reduces contention without
+replacing the atomic admission and peer-ordering boundary with per-agent locks.
+Remaining lock work includes record metadata, entry projections and event
+publication; do not claim the shared mutex or all harness latency is gone.
+
+The ignored `actual_worker_message_dispatch_benchmark` measures admission through
+actual Hub workers and loopback HTTP, with 256 fixture skill files, one or eight
+concurrent agents, the production two-thread Tokio scheduler, and zero or 4 MiB
+model history per agent. It reports admission
+lock wait/mutation, request encoding, HTTP send, and the first actual assistant
+text delta observed through the Hub broadcast. A held background scan must not
+prevent a distinct new message from reaching and receiving a mock response.
+Run the same fixture on the baseline and candidate using the native commands
+above. These timings include local scheduling and exclude browser rendering and
+real provider inference. They complement the response-to-tool fixture, which
+does not cover a newly submitted message's skill refresh.
+
+Native matched comparison against v1.1.39 (three warm rounds; 24 observations
+for each eight-agent case). Median message-admission entry to HTTP-send time:
+
+| Agents | Model history per agent | v1.1.39 | v1.1.40 dispatch change |
+| --- | --- | --- | --- |
+| 1 | Minimal | 11.652 ms | 0.216 ms |
+| 1 | 4 MiB | 13.710 ms | 2.874 ms |
+| 8 | Minimal | 47.100 ms | 2.201 ms |
+| 8 | 4 MiB | 56.701 ms | 13.451 ms |
+
+Large cases also have 4,096 transcript entries per agent. The held-scan case
+blocked progress on the baseline and allowed the proof message to complete on
+the candidate. These results isolate the dispatch changes before adding `/fast`;
+provider priority processing was never involved. Remaining request encoding,
+shared-state work and scheduling are measurable, particularly with large
+concurrent histories. This does not establish provider-only production latency.

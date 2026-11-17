@@ -24,6 +24,14 @@ connected account's catalog. Credential changes preserve each agent's model;
 a provider rejection remains an explicit error rather than selecting another
 model or billing route automatically.
 
+`/fast` changes the processing tier for one agent, independently of the pane's
+shared credential. Enabling it checks the selected subscription's model catalog
+for an advertised Fast tier. Turning it off restores the route's normal serving
+behavior. The model and reasoning effort stay unchanged. An existing request
+finishes with its captured setting; the next request uses the new setting.
+Provider rejection stays visible, with no silent billing fallback. API-key Fast
+mode uses premium [priority processing](https://developers.openai.com/api/docs/guides/fast-mode).
+
 Credential changes apply at the next model request. An already-started request
 continues with its captured account or API key, including retries. Deletion
 removes the local credential and leaves affected panes unassigned. It does not

@@ -7,6 +7,7 @@ const login = document.querySelector("#login");
 const sessions = new Map();
 // Requests outlive pane DOM when switching screens.
 const questionSubmissions = new Map();
+const fastControls = new Map();
 const messageSubmissions = new Map();
 const newDraftRevision = () => Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
 const imageTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -210,6 +211,52 @@ function clearAcknowledgedDraft(id, item) {
   if (!acknowledgedDrafts.has(id)) acknowledgedDrafts.set(id, new Set());
   acknowledgedDrafts.get(id).add(item.revision);
   scheduleMessageRecovery();
+}
+function showFastControlError(id) {
+  const ui = sessions.get(id), control = fastControls.get(id);
+  if (!ui || !control?.error) return;
+  showError(ui.error, control.error);
+  ui.error.dataset.fastControlError = "true";
+  const retry = element("button", "", "Retry fast mode");
+  retry.type = "button";
+  retry.addEventListener("click", () => runFastControl(id, control));
+  ui.error.append(retry);
+}
+function runFastControl(id, control) {
+  if (fastControls.get(id) !== control) return;
+  if (control.promise) return control.promise;
+  control.error = null;
+  const ui = sessions.get(id);
+  if (ui?.error.dataset.fastControlError) { ui.error.hidden = true; delete ui.error.dataset.fastControlError; }
+  control.promise = (async () => {
+    try {
+      const result = await request(`/api/sessions/${encodeURIComponent(id)}/fast`, "POST", { enabled: control.enabled });
+      if (!result.profile || typeof result.profile !== "object") throw new Error("Fast mode response was incomplete. Retry to confirm the setting.");
+      const current = sessions.get(id);
+      if (current) updateProfile(current, result.profile);
+      clearAcknowledgedDraft(id, control);
+      fastControls.delete(id);
+    } catch (error) {
+      control.error = error.message;
+      showFastControlError(id);
+    } finally {
+      control.promise = null;
+      sessions.get(id)?.resizeInput?.();
+    }
+  })();
+  return control.promise;
+}
+function submitFastControl(ui, explicit) {
+  const pending = fastControls.get(ui.id);
+  if (pending?.promise) return;
+  // Retrying a failed toggle repeats its intended boolean, even if a profile
+  // event arrived after an uncertain HTTP response. It never toggles back.
+  const control = pending?.error && explicit == null ? pending : {
+    enabled: explicit ?? (ui.view.profile?.service_tier !== "priority"),
+    revision: ui.messageState.revision, promise: null, error: null,
+  };
+  fastControls.set(ui.id, control);
+  runFastControl(ui.id, control);
 }
 function runMessageSubmissions(id) {
   const state = messageSubmissions.get(id);
@@ -1081,6 +1128,7 @@ function element(tag, className, text) {
 
 function showError(node, error) {
   delete node.dataset.submissionError;
+  delete node.dataset.fastControlError;
   node.textContent = error instanceof Error ? error.message : String(error);
   node.hidden = false;
 }
@@ -1671,6 +1719,7 @@ function closeModelPicker(ui) {
 function updateProfile(ui, profile, contextWindow = ui.view.context_window) {
   ui.view.profile = profile; ui.view.context_window = contextWindow;
   updateContextUsage(ui);
+  ui.resizeInput?.();
 }
 async function openModelPicker(ui) {
   ui.slashSuggestion.hidden = true; ui.composer.hidden = true; ui.modelPicker.hidden = false;
@@ -2126,6 +2175,7 @@ function addSession(view) {
     const commands = {
       "/login": "/login  Choose credentials",
       "/model": "/model  Select model and effort",
+      "/fast": `/fast  Turn fast mode ${ui.view.profile?.service_tier === "priority" ? "off" : "on"}`,
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
       "/clear": "/clear  Start fresh model context",
@@ -2217,6 +2267,11 @@ function addSession(view) {
     const submittedAt = inputTiming.startedAt();
     const text = ui.input.value;
     activatePromptSpace(ui);
+    const fast = text.trim().match(/^\/fast(?:\s+(on|off))?$/i);
+    if (!ui.messageState.images.length && (fast || (!ui.slashSuggestion.hidden && ui.slashCommand === "/fast"))) {
+      submitFastControl(ui, fast?.[1] ? fast[1].toLowerCase() === "on" : null);
+      return;
+    }
     if (!ui.messageState.images.length && (text.trim() === "/login" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/login"))) {
       ui.input.value = "";
       historyIndex = null;
@@ -2269,6 +2324,7 @@ function addSession(view) {
     ui.restoringDraft = true; resizeInput(); ui.restoringDraft = false;
   }
   showMessageSubmission(id);
+  showFastControlError(id);
   return ui;
 }
 

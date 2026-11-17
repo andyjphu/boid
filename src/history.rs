@@ -22,16 +22,95 @@ fn preview(value: &mut Value) {
     value["text_bytes"] = json!(bytes);
 }
 
+// Capture only shared entry payloads and matching metadata while the roster is
+// locked. Preview copying and JSON encoding use this owned snapshot afterwards.
+pub(super) struct HistoryPage {
+    view: View,
+    start: usize,
+    end: usize,
+    total: usize,
+    seq: u64,
+    superseded: Vec<bool>,
+}
+impl HistoryPage {
+    pub(super) fn into_value(mut self) -> Value {
+        let lengths: Vec<_> = self
+            .view
+            .entries
+            .iter_mut()
+            .map(|entry| {
+                let bytes = entry.text.len();
+                if bytes <= PREVIEW_BYTES {
+                    return None;
+                }
+                let mut end = PREVIEW_BYTES;
+                while !entry.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                entry.text = entry.text[..end].to_owned().into();
+                Some(bytes)
+            })
+            .collect();
+        // Bound peer text before serializing it, preserving the same preview
+        // metadata without first copying an entire large communication.
+        let peer_lengths: Vec<_> = self
+            .view
+            .communications
+            .iter_mut()
+            .map(|message| {
+                let bytes = message.text.len();
+                if bytes <= PREVIEW_BYTES {
+                    return None;
+                }
+                let mut end = PREVIEW_BYTES;
+                while !message.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                message.text = message.text[..end].to_owned().into();
+                Some(bytes)
+            })
+            .collect();
+        let mut value = json!(self.view);
+        for ((entry, bytes), superseded) in value["entries"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(lengths)
+            .zip(self.superseded)
+        {
+            if let Some(bytes) = bytes {
+                entry["text_complete"] = json!(false);
+                entry["text_bytes"] = json!(bytes);
+            }
+            entry["superseded"] = json!(superseded);
+        }
+        for (message, bytes) in value["communications"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .zip(peer_lengths)
+        {
+            if let Some(bytes) = bytes {
+                message["text_complete"] = json!(false);
+                message["text_bytes"] = json!(bytes);
+            }
+        }
+        value["history"] =
+            json!({"start":self.start,"end":self.end,"total":self.total,"seq":self.seq});
+        value
+    }
+}
+
 impl Hub {
     // Positions are stable: context clearing retains the visible transcript.
     // Whole entries remain intact, including a single entry larger than the byte budget.
-    pub(super) fn history_view(
+    pub(super) fn capture_history_view(
         data: &Data,
         source: &View,
         before: Option<usize>,
         after: Option<usize>,
         around: Option<&str>,
-    ) -> Result<Value> {
+    ) -> Result<HistoryPage> {
         if [before.is_some(), after.is_some(), around.is_some()]
             .into_iter()
             .filter(|v| *v)
@@ -99,53 +178,27 @@ impl Hub {
             }
             (start, end)
         };
-        let mut projected = Self::project_entries(data, source, &source.entries[start..end]);
-        // Bound text before materializing JSON, rather than copying a complete
-        // large tool result only to discard all but its preview immediately.
-        let lengths: Vec<_> = projected
-            .entries
-            .iter_mut()
-            .map(|entry| {
-                let bytes = entry.text.len();
-                if bytes <= PREVIEW_BYTES {
-                    return None;
-                }
-                let mut end = PREVIEW_BYTES;
-                while !entry.text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                entry.text = entry.text[..end].to_owned().into();
-                Some(bytes)
-            })
-            .collect();
-        let mut view = json!(projected);
-        let superseded: std::collections::HashSet<&str> = source
+        let view = Self::project_entries(data, source, &source.entries[start..end]);
+        let replaced: std::collections::HashSet<&str> = source
             .entries
             .iter()
-            .filter_map(|e| e.replaces.as_deref())
+            .filter_map(|entry| entry.replaces.as_deref())
             .collect();
-        for (entry, bytes) in view["entries"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .zip(lengths)
-        {
-            if let Some(bytes) = bytes {
-                entry["text_complete"] = json!(false);
-                entry["text_bytes"] = json!(bytes);
-            }
-            entry["superseded"] = json!(
-                entry["id"]
-                    .as_str()
-                    .is_some_and(|id| superseded.contains(id))
-            );
-        }
-        for message in view["communications"].as_array_mut().into_iter().flatten() {
-            preview(message);
-        }
-        view["history"] = json!({"start":start,"end":end,"total":total,"seq":data.seq});
-        Ok(view)
+        let superseded = view
+            .entries
+            .iter()
+            .map(|entry| replaced.contains(entry.id.as_str()))
+            .collect();
+        Ok(HistoryPage {
+            view,
+            start,
+            end,
+            total,
+            seq: data.seq,
+            superseded,
+        })
     }
+
     pub fn history(
         &self,
         id: &str,
@@ -162,7 +215,9 @@ impl Hub {
                 .context("Unknown or archived session.")?
                 .record
                 .view;
-            Self::history_view(&data, source, before, after, around)
+            let page = Self::capture_history_view(&data, source, before, after, around)?;
+            drop(data);
+            Ok(page.into_value())
         })
     }
     pub fn history_list(&self, archived: bool) -> Vec<Value> {
@@ -171,14 +226,17 @@ impl Hub {
         }
         crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
-            data.sessions
+            let pages: Vec<_> = data
+                .sessions
                 .values()
                 .filter(|h| h.record.view.archived == archived)
                 .map(|h| {
-                    Self::history_view(&data, &h.record.view, None, None, None)
+                    Self::capture_history_view(&data, &h.record.view, None, None, None)
                         .expect("latest history")
                 })
-                .collect()
+                .collect();
+            drop(data);
+            pages.into_iter().map(HistoryPage::into_value).collect()
         })
     }
     pub fn history_entry(&self, id: &str, entry: &str) -> Result<Value> {
@@ -196,13 +254,12 @@ impl Hub {
                 .iter()
                 .position(|e| e.id == entry)
                 .context("History entry is unavailable.")?;
-            let mut view = json!(Self::project_entries(
-                &data,
-                source,
-                &source.entries[index..index + 1]
-            ));
-            view["history"] =
-                json!({"start":index,"end":index+1,"total":source.entries.len(),"seq":data.seq});
+            let projection =
+                Self::project_entries(&data, source, &source.entries[index..index + 1]);
+            let (total, seq) = (source.entries.len(), data.seq);
+            drop(data);
+            let mut view = json!(projection);
+            view["history"] = json!({"start":index,"end":index+1,"total":total,"seq":seq});
             Ok(view)
         })
     }
@@ -260,6 +317,74 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn captured_history_allows_admission_before_encoding_and_retains_its_boundary() {
+        let work = tempfile::tempdir().unwrap();
+        let hub = Hub::new(Client::test_client()).unwrap();
+        let view = hub
+            .create(Create {
+                name: "snapshot-reader".into(),
+                cwd: work.path().to_string_lossy().into_owned(),
+                message: String::new(),
+            })
+            .unwrap();
+        // Persisted-like fixture, with no worker/provider dispatch.
+        hub.entry(&view.id, "assistant", "existing transcript");
+        let task = hub
+            .0
+            .data
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(&view.id)
+            .unwrap()
+            .task
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        let (page, seq) = {
+            let data = hub.0.data.lock().unwrap();
+            (
+                Hub::capture_history_view(
+                    &data,
+                    &data.sessions[&view.id].record.view,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+                data.seq,
+            )
+        };
+        let prior_count = page.view.entries.len();
+        // Intentionally hold the unencoded snapshot while another request is
+        // admitted. No Data guard or borrow is retained by the captured page.
+        let writer = hub.clone();
+        let id = view.id.clone();
+        let accepted = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || writer.message(&id, "new input".into())),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let encoded = page.into_value();
+        assert_eq!(encoded["history"]["seq"], seq);
+        assert_eq!(encoded["entries"].as_array().unwrap().len(), prior_count);
+        assert!(
+            !encoded["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == accepted)
+        );
+        assert!(hub.view(&view.id).unwrap().pending.contains(&accepted));
+        hub.shutdown().await;
+    }
+
     #[tokio::test]
     async fn recent_history_pages_preserve_records_and_sequence_boundaries() {
         let state = tempfile::tempdir().unwrap();

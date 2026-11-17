@@ -13,7 +13,8 @@ Read relevant supporting files as needed; run scripts only when the task calls
 for them. Dependencies are not installed automatically. Report missing resources
 or tools rather than claiming the skill ran successfully.
 
-Skills refresh at the start of each new operator message. Earlier loaded text
-remains historical evidence; use the current snapshot for new work. Supporting
+Skills refresh in the background. Each new operator message uses the latest
+completed snapshot; tool continuations retain that message's snapshot. Earlier
+loaded text remains historical evidence. Supporting
 files are live filesystem content. Skills marked explicit-only must only be
 applied when the operator selects them.

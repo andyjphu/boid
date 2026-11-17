@@ -120,7 +120,10 @@ Questions survive reconnects and server restarts. Restarts preserve the usual
 paused recovery behavior; they do not restart a question's timer or agent work.
 
 `/login` opens the shared credential view. `/model` selects a model
-from the connected account's catalog.
+from the connected account's catalog. `/fast` toggles Fast mode for that agent;
+`/fast on` and `/fast off` set it explicitly. The setting applies to the next
+model request and preserves model and reasoning effort. Subscription access is
+checked against that account's model catalog; API keys use priority processing.
 `/clear` remains available; `/oai-compact` currently requires the API-key route.
 
 ### Measuring message admission

@@ -212,7 +212,7 @@ mod tests {
             recipient_name: "recipient".into(),
             call_id: "old-call".into(),
             sender_entry: "old-call-entry".into(),
-            text: "old peer work".into(),
+            text: "old peer work".to_owned().into(),
             urgency: Urgency::Regular,
             state: "queued".into(),
             applied_batch: None,
