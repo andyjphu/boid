@@ -102,7 +102,7 @@ async fn image_queue_restart_and_old_text_json_remain_faithful() {
         restored.0.data.lock().unwrap().sessions[&target.id]
             .record
             .version,
-        7
+        8
     );
     assert_eq!(
         restored

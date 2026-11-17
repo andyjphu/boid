@@ -70,6 +70,12 @@ async fn idle(hub: &Hub, id: &str, status: &str) {
     .await
     .unwrap();
 }
+fn flush_recording(hub: &Hub, id: &str) -> Result<Option<Record>> {
+    let capacity = hub.0.data.lock().unwrap().sessions[id]
+        .persistence
+        .capacity();
+    capacity.durable_record()
+}
 fn engine(hub: &Hub, id: &str) -> Value {
     serde_json::to_value(&hub.0.data.lock().unwrap().sessions[id].record.engine).unwrap()
 }
@@ -135,6 +141,7 @@ async fn clear_waits_for_tools_preserves_transcript_and_starts_fresh_after_resta
             .iter()
             .any(|e| e.text.starts_with("Context cleared."))
     );
+    flush_recording(&hub, &view.id).unwrap();
     let archive: Value = serde_json::from_slice(
         &std::fs::read(
             state
@@ -178,7 +185,7 @@ async fn clear_waits_for_tools_preserves_transcript_and_starts_fresh_after_resta
 }
 
 #[tokio::test]
-async fn clear_archive_failure_keeps_context_and_queued_input() {
+async fn clear_archive_failure_retains_original_capture_and_reports_the_fault() {
     let mut mock = Mock::new().await;
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -194,17 +201,29 @@ async fn clear_archive_failure_keeps_context_and_queued_input() {
         "block archive directory",
     )
     .unwrap();
-    hub.message(&view.id, "/clear".into()).unwrap();
-    hub.message(&view.id, "New queued task".into()).unwrap();
+    let clear = hub.message(&view.id, "/clear".into()).unwrap();
+    let fresh = hub.message(&view.id, "New queued task".into()).unwrap();
     release.send((StatusCode::OK, json!([]))).unwrap();
     idle(&hub, &view.id, "error").await;
-    assert!(
-        engine(&hub, &view.id)["history"]
+    assert!(flush_recording(&hub, &view.id).is_err());
+    let retained = hub.0.data.lock().unwrap().sessions[&view.id]
+        .persistence
+        .retained_archive_records();
+    assert!(retained.iter().any(|record| {
+        serde_json::to_value(&record.engine).unwrap()["history"]
             .to_string()
             .contains("Original context")
+    }));
+    let visible = hub.view(&view.id).unwrap();
+    for id in [clear, fresh] {
+        assert!(visible.entries.iter().any(|entry| entry.id == id));
+    }
+    // Work can advance before an asynchronous failure is observed. Once known,
+    // the failure rejects new work while keeping all captured input/context.
+    assert!(
+        hub.message(&view.id, "cannot continue after recording failure".into())
+            .is_err()
     );
-    assert_eq!(hub.view(&view.id).unwrap().pending.len(), 2);
-    assert!(mock.requests.try_recv().is_err());
     hub.shutdown().await;
 }
 
@@ -236,10 +255,8 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     idle(&hub, &view.id, "idle").await;
     assert_eq!(engine(&hub, &view.id)["history"], window());
     assert!(mock.requests.try_recv().is_err()); // Direct compaction does not start inference.
-    assert_eq!(
-        hub.view(&view.id).unwrap().entries[0].text,
-        initial_context
-    );
+    assert_eq!(hub.view(&view.id).unwrap().entries[0].text, initial_context);
+    flush_recording(&hub, &view.id).unwrap();
     let archive: Value = serde_json::from_slice(
         &std::fs::read(
             state
@@ -250,7 +267,13 @@ async fn direct_compaction_preserves_canonical_window_archive_and_restart() {
     )
     .unwrap();
     assert_eq!(archive["engine"]["history"], before["history"]);
-    assert!(hub.0.data.lock().unwrap().sessions[&view.id].record.usage.records.is_empty());
+    assert!(
+        hub.0.data.lock().unwrap().sessions[&view.id]
+            .record
+            .usage
+            .records
+            .is_empty()
+    );
     hub.shutdown().await;
     drop(hub);
     let hub = Hub::open(
@@ -383,7 +406,7 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
 }
 
 #[tokio::test]
-async fn archive_failure_prevents_compaction_request() {
+async fn archive_failure_preserves_capture_and_stops_subsequent_requests() {
     let mut mock = Mock::new().await;
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -401,8 +424,26 @@ async fn archive_failure_prevents_compaction_request() {
     .unwrap();
     hub.message(&view.id, "/oai-compact".into()).unwrap();
     idle(&hub, &view.id, "error").await;
+    assert!(flush_recording(&hub, &view.id).is_err());
+    let retained = hub.0.data.lock().unwrap().sessions[&view.id]
+        .persistence
+        .retained_archive_records();
+    assert!(
+        retained
+            .iter()
+            .any(|record| serde_json::to_value(&record.engine).unwrap()["history"] == before)
+    );
+    // The provider request is allowed to start before the recorder reports its
+    // failure. No response was released, so model context remains unchanged.
     assert_eq!(engine(&hub, &view.id)["history"], before);
-    assert!(mock.requests.try_recv().is_err());
+    if let Ok((path, request, _release)) = mock.requests.try_recv() {
+        assert_eq!(path, "/compact");
+        assert_eq!(request["input"], before);
+    }
+    assert!(
+        hub.message(&view.id, "cannot continue after recording failure".into())
+            .is_err()
+    );
     hub.shutdown().await;
 }
 

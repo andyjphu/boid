@@ -206,6 +206,14 @@ async fn escape_storage_failure_stays_stopped_and_controls_follow_lifecycle() {
     assert!(hub.interrupt("missing").is_err());
     let target = agent(&hub, work.path(), "interrupt-failure", "Start");
     let (_, _release) = next(&mut rx).await;
+    // Inference no longer waits for disk. Establish the intended saved crash
+    // baseline before replacing the storage directory with a fault fixture.
+    let lane = hub.0.data.lock().unwrap().sessions[&target.id]
+        .persistence
+        .capacity();
+    let saved = lane.durable_record().unwrap().unwrap();
+    assert!(saved.engine.request_in_flight());
+    hub.0.compactions.wait(Some(&target.id));
     let sessions = state.path().join("sessions");
     let backup = state.path().join("saved-sessions");
     std::fs::rename(&sessions, &backup).unwrap();
@@ -689,6 +697,21 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
         task.abort();
         let _ = task.await;
     }
+    // Preserve this specific crash window, then release writer ownership without
+    // graceful recovery or removing the unclean-process marker.
+    let lanes: Vec<_> = hub
+        .0
+        .data
+        .lock()
+        .unwrap()
+        .sessions
+        .values()
+        .map(|handle| handle.persistence.capacity())
+        .collect();
+    for lane in lanes {
+        lane.durable_record().unwrap();
+    }
+    hub.0.compactions.wait(None);
     drop(hub);
     server.abort();
     let (restored, mut rx, server) = fixture(Some(state.path().into())).await;
@@ -706,7 +729,7 @@ async fn durable_peer_receipt_recovery_retry_and_end() {
     assert!(restored.close(&target.id).await.unwrap());
     assert_eq!(
         restored.ended_record(&target.id).messages[0].state,
-        "cancelled"
+        "interrupted" // Crash quarantine already removed dispatch eligibility.
     );
     assert!(restored.reopen(&target.id).is_err());
     assert!(restored.ended_record(&target.id).inbox.is_empty());

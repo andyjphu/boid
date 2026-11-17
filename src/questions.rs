@@ -205,7 +205,7 @@ impl Hub {
             if data.closing {
                 bail!("Server is shutting down.");
             }
-            let (message_id, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
+            let (message_id, _) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 if r.view.archived || r.view.status == "ending" {
                     bail!("Session has ended. Create a new agent instead.");
                 }
@@ -231,7 +231,6 @@ impl Hub {
                 Ok(message_id)
             })?;
             drop(data);
-            receipt.wait()?;
             if let Some(handle) = self
                 .0
                 .data

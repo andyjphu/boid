@@ -103,14 +103,12 @@ the same stored and provider JSON values; stored text remains byte-for-byte
 unchanged, while HTTP object-field order can differ. Mutable streamed text
 needs copy-on-write.
 
-Bounded asynchronous streaming and consecutive journal batches avoid waiting for
-one disk sync per chunk. Preserve FIFO ordering, bounded admission/backpressure,
-error propagation, and durable completed-response, tool, peer, stop, and shutdown
-barriers. Do not move waits into the global mutex or grow an unbounded queue.
-Input dispatch must not wait for a full session save: server memory acceptance
-is real, then ordered saving proceeds independently. The accepted crash tradeoff
-allows a small recent input window and unfinished stream tail to be lost; it
-does not authorize losing completed durable work or replaying tool side effects.
+The original streaming repair preserved blocking completed-response and tool
+claim checkpoints. Andy explicitly superseded that execution contract on
+2026-11-16: saving must proceed independently of model/tool transitions. See
+v1.1.39 below. Keep real server acceptance, bounded recording memory, ordered
+archives and graceful-shutdown draining. Do not restore disk waits to ordinary
+execution under the name of durability or backpressure.
 
 ## Reproduce and verify proportionately
 
@@ -149,8 +147,9 @@ Session checkpoints use an ordered event journal. A checkpoint stores current
 metadata, a model-history suffix, and changed/new transcript entries. Unchanged
 model items and transcript text are not serialized again. Streaming text and
 checkpoint events share a persistent journal sequence; the stream sequence
-remains separate. Durable tool claims and completed-work barriers still wait
-for the small journal commit. Input acceptance remains asynchronous and real.
+remains separate. In v1.1.36, tool claims and completed-work barriers still
+waited for the small journal commit. The v1.1.39 contract below supersedes those
+waits. Input acceptance remains asynchronous and real.
 
 A single background compactor writes full snapshots. The FIFO writer rotates
 its active journal into a closed segment before handing the compactor an
@@ -180,3 +179,46 @@ On mm-west-2, the 16-pair native fixture measured median checkpoint time
 (v1.1.35 -> v1.1.36 candidate). Initial post-change iterations overlapped the
 seed snapshot compaction and reached about 9 ms. These are synthetic durable
 commit measurements, not a claim about inference latency or every live session.
+
+## Nonblocking execution (v1.1.39)
+
+Ordinary execution updates actual server state, queues recording, and proceeds.
+Model-response checkpoints, tool-call claims and results, peer delivery, input
+consumption and stream updates do not wait for disk receipts or queue capacity.
+The recorder coalesces queued ordinary updates into the latest complete state
+when needed; it does not discard transcript content or accumulate an unbounded
+queue of full records. Context/clear archives retain their ordering and content.
+End and graceful shutdown drain pending recording and compaction.
+
+A crash can lose unsaved input, response, tool-result and receipt state. Because a
+tool may already have acted after the last saved checkpoint, unclean recovery
+must not automatically replay old calls or queued requests. Keep their recorded
+text and identify uncertain outcomes. Fresh user input remains usable. A durable
+startup marker distinguishes unclean shutdown; only successful graceful shutdown
+clears it. Version 8 prevents older binaries from interpreting this state under
+the former durability assumptions.
+
+Measure the actual handoffs: completed response observed by the API client to
+tool dispatch, and tool return to the next HTTP send. The latter includes request
+preparation and serialization; report encoding separately. A local mock endpoint
+excludes provider inference but is not a live production latency result. Per-client
+clock hooks exist only in test builds. Keep a writer deliberately stalled during
+repeated complete cycles to prove execution does not depend on disk progress;
+then release it and verify the recorded transcript and model history.
+
+Native mm-west-2 comparison (three trials per size, same fixture):
+
+| Synthetic workload | Completed response → tool dispatch | Tool return → next HTTP send |
+| --- | --- | --- |
+| Minimal history, v1.1.38 | 15.013 ms | 8.411 ms |
+| Minimal history, v1.1.39 | 0.302 ms | 0.273 ms |
+| 4 MiB model history + 4,096 transcript entries, v1.1.38 | 11.918 ms | 9.222 ms |
+| Same large fixture, v1.1.39 | 1.468 ms | 2.151 ms |
+
+The large fixture includes 8 MiB of transcript text. Its next-request encoding
+alone took 1.273 ms in the new implementation. With the writer held for a
+500 ms observation window, the baseline made no handoff progress; the new
+implementation reached the next request before writer release. A separate
+regression completes eight actual model/tool cycles under one held writer,
+exceeding the former queue capacity. These are native local mock-provider
+measurements, not production response-time or worst-case guarantees.

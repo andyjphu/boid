@@ -19,9 +19,12 @@ pub use pane_groups::GroupRevisionConflict;
 mod archive;
 use archive::ArchivedReceipt;
 #[cfg(test)]
+mod handoff_tests;
+#[cfg(test)]
 mod incremental_benchmark;
 mod journal;
 mod persistence;
+mod recovery;
 mod screen_lifecycle;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -296,6 +299,7 @@ struct Inner {
     events: broadcast::Sender<Value>,
     client: Client,
     store: SessionStore,
+    run_marker: recovery::RunMarker,
     compactions: Arc<journal::Compactions>,
     images: Arc<crate::images::ImageStore>,
     pub cwd: PathBuf,
@@ -472,11 +476,15 @@ impl Hub {
             for name in &agent_names {
                 validate_agent_name(name)?;
             }
+            let (run_marker, unclean) = recovery::RunMarker::start(&store)?;
             let mut screens: Screens = store.load_screens()?;
             screens.validate_catalog()?;
             Self::validate_groups(&mut screens, client.auth.as_deref())?;
             store.save_screens(&screens)?;
-            let records = Self::load_catalog(&store)?;
+            let mut records = Self::load_catalog(&store)?;
+            if unclean {
+                recovery::quarantine(&mut records)?;
+            }
             let messages: BTreeMap<_, _> = records
                 .iter()
                 .flat_map(|r| r.messages.iter())
@@ -504,6 +512,7 @@ impl Hub {
                 client,
                 images: Arc::new(crate::images::ImageStore::new(store.image_directory())),
                 store,
+                run_marker,
                 compactions: Arc::new(journal::Compactions::default()),
                 cwd: std::env::current_dir()?,
                 #[cfg(test)]
@@ -518,7 +527,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -538,6 +547,7 @@ impl Hub {
                     }
                     record.stream_seq = delta.seq;
                 }
+                let unfinished = record.engine.has_unfinished_execution();
                 if let Some(call) = record.engine.recovering_send_call() {
                     let key = (record.view.id.clone(), call.to_owned());
                     if !recovery_messages.contains_key(&key) {
@@ -560,10 +570,21 @@ impl Hub {
                     record.view.entries.push(Self::make_entry(&kind, text));
                 }
                 // Completed API items survive; unresolved side effects must not replay.
-                let recovery = record.engine.recover();
-                let listen = recovery.is_empty() && record.restart_listening();
+                let recovery = if unclean {
+                    record.engine.recover_uncertain()
+                } else {
+                    record.engine.recover()
+                };
+                let listen =
+                    recovery.is_empty() && !(unclean && unfinished) && record.restart_listening();
                 for (kind, text) in recovery {
                     record.view.entries.push(Self::make_entry(&kind, text));
+                }
+                if unclean {
+                    record.engine.user("Runtime recovery notice: the prior process ended without a clean persistence flush. Recent tool or peer effects may already have happened despite missing saved results. Old queued input was quarantined, not dispatched. Inspect relevant external state before retrying uncertain actions; this notice does not request new work.".into());
+                    if unfinished {
+                        record.view.entries.push(Self::make_entry("notice", "Execution paused after crash recovery. Send new operator direction to continue; inspect uncertain prior actions before retrying.".into()));
+                    }
                 }
                 if !record.view.profile.is_object() {
                     record.view.profile = record.engine.profile.clone();
@@ -1017,7 +1038,7 @@ impl Hub {
         })
     }
     fn prepare_record(&self, record: &mut Record) -> Result<()> {
-        record.version = record.version.max(7);
+        record.version = record.version.max(8);
         if record.engine.has_image_refs() {
             // Older binaries must refuse these records instead of dropping images.
             record.version = record.version.max(5);
@@ -1106,9 +1127,8 @@ impl Hub {
         crate::blocking::run(|| {
             let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
-            let (result, receipt) = self.update_locked(&mut data, id, Some(&mut permit), change)?;
+            let (result, _) = self.update_locked(&mut data, id, Some(&mut permit), change)?;
             drop(data);
-            receipt.wait()?;
             Ok(result)
         })
     }
@@ -1365,16 +1385,6 @@ impl Hub {
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
             let result = (|| -> Result<()> {
-                let bytes = persistence::delta_bytes(entry, text);
-                let capacity = {
-                    let data = self.0.data.lock().unwrap();
-                    data.sessions
-                        .get(session)
-                        .context("Unknown session")?
-                        .persistence
-                        .capacity()
-                };
-                let mut permit = capacity.reserve_delta(bytes)?;
                 let mut data = self.0.data.lock().unwrap();
                 let handle = data.sessions.get_mut(session).context("Unknown session")?;
                 if handle.storage_error.is_some() {
@@ -1385,11 +1395,7 @@ impl Hub {
                     entry: entry.into(),
                     text: text.into(),
                 };
-                let seq = delta.seq;
-                let receipt = handle
-                    .persistence
-                    .enqueue_reserved(Operation::Delta(delta), &mut permit)?;
-                handle.record.stream_seq = seq;
+                handle.record.stream_seq = delta.seq;
                 if let Some(item) = handle
                     .record
                     .view
@@ -1403,18 +1409,22 @@ impl Hub {
                         handle.record.engine.partial_text.push_str(text);
                     }
                 }
+                let operation = if handle
+                    .persistence
+                    .delta_needs_snapshot(persistence::delta_bytes(entry, text))
+                {
+                    Operation::Snapshot(Box::new(handle.record.clone()))
+                } else {
+                    Operation::Delta(delta)
+                };
+                handle.persistence.enqueue(operation)?;
                 self.emit(
                     &mut data,
                     json!({"type":"delta","session_id":session,"entry_id":entry,"text":text}),
                 );
                 drop(data);
-                // Completed responses and side effects retain their FIFO
-                // checkpoint fences. An unfinished stream can lose this tail
-                // on a crash. Oversized chunks exclude other deltas and
-                // wait here rather than building an unbounded queue.
-                if bytes > persistence::DELTA_BYTES {
-                    receipt.wait()?;
-                }
+                // Memory state and the real event are immediate. A bounded
+                // recorder retains this delta or a complete replacement state.
                 Ok(())
             })();
             if let Err(error) = result {
@@ -1433,12 +1443,12 @@ impl Hub {
             let mut permit = self.reserve_persistence(id, 1)?;
             let mut data = self.0.data.lock().unwrap();
             let handle = data.sessions.get_mut(id).context("Unknown session.")?;
-            let receipt = handle.persistence.enqueue_reserved(
+            handle.persistence.enqueue_reserved(
                 Operation::Context(attempt, Box::new(handle.record.clone())),
                 &mut permit,
             )?;
             drop(data);
-            receipt.wait()
+            Ok(())
         })
     }
     pub fn checkpoint_entries(
@@ -1557,7 +1567,7 @@ impl Hub {
                 archived: false,
             };
             let mut record = Record {
-                version: 7,
+                version: 8,
                 view,
                 engine,
                 usage: crate::usage::Ledger::default(),
@@ -1800,12 +1810,7 @@ impl Hub {
                     replaces: None,
                     input_batch: None,
                 };
-                data.sessions
-                    .get_mut(id)
-                    .context("Unknown session.")?
-                    .persistence
-                    .check_input_capacity()?;
-                let (_, receipt) = self.update_locked(&mut data, id, None, |r| {
+                self.update_locked(&mut data, id, None, |r| {
                     if r.view.archived {
                         bail!("Session has ended. Create a new agent instead.");
                     }
@@ -1831,7 +1836,6 @@ impl Hub {
                     Ok(())
                 })?;
                 let handle = data.sessions.get_mut(id).unwrap();
-                handle.persistence.track_input(receipt);
                 handle.wake.notify_one();
                 Ok(message_id)
             })();
@@ -1996,7 +2000,23 @@ impl Hub {
             self.fault(id, error);
             return self.close_without_storage(id, true).await;
         }
-        self.archive_finished(id)?;
+        if let Err(error) = self.archive_finished(id) {
+            // Recording is asynchronous: an admitted End can discover its
+            // storage failure only at this final drain, after both mutations.
+            let recording_failed = crate::blocking::run(|| {
+                self.0
+                    .data
+                    .lock()
+                    .unwrap()
+                    .sessions
+                    .get(id)
+                    .is_some_and(|handle| handle.storage_error.is_some())
+            });
+            if recording_failed {
+                return self.close_without_storage(id, true).await;
+            }
+            return Err(error);
+        }
         Ok(true)
     }
     async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<bool> {
@@ -2156,14 +2176,7 @@ impl Hub {
                     let mut message = message.clone();
                     message.blocked = message.state == "queued"
                         && data.sessions.get(to).is_some_and(|h| h.record.paused);
-                    let receipt = data
-                        .message_receipts
-                        .get(&(from.into(), call_id.into()))
-                        .cloned();
                     drop(data);
-                    if let Some(receipt) = receipt {
-                        receipt.wait()?;
-                    }
                     return Ok(message.receipt());
                 }
                 if checked_generation != Some(data.archive_generation) {
@@ -2233,7 +2246,7 @@ impl Hub {
                 state: "queued".into(),
                 applied_batch: None,
                 blocked: false,
-                persisted: true,
+                persisted: false,
             };
             let (_, receipt) = self.update_locked(&mut data, to, permit.as_mut(), |r| {
                 if r.view.archived {
@@ -2264,7 +2277,6 @@ impl Hub {
             data.message_receipts
                 .insert((from.into(), call_id.into()), receipt.clone());
             drop(data);
-            receipt.wait()?;
             let data = self.0.data.lock().unwrap();
             if let Some(recipient) = data.sessions.get(to).filter(|h| !h.record.view.archived) {
                 if urgency == Urgency::Emergency && !recipient.record.paused {
@@ -2308,13 +2320,13 @@ impl Hub {
             {
                 return Ok(false);
             }
-            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
+            self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 r.engine = session.clone();
                 Ok(())
             })?;
             drop(data);
-            receipt.wait()?;
-            // Stop or emergency may have arrived while the checkpoint saved.
+            // Recheck actual memory after admission. Recording does not gate
+            // execution; Stop/emergency still wins before dispatch.
             let data = self.0.data.lock().unwrap();
             let record = &data.sessions[id].record;
             Ok(!record.paused
@@ -2354,7 +2366,7 @@ impl Hub {
                 return Ok(true);
             }
             let mut staged = session.clone();
-            let (_, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
+            self.update_locked(&mut data, id, Some(&mut permit), |r| {
                 let urgent = r
                     .messages
                     .iter()
@@ -2392,7 +2404,6 @@ impl Hub {
                 Ok(())
             })?;
             drop(data);
-            receipt.wait()?;
             *session = staged;
             Ok(true)
         })
@@ -2412,15 +2423,12 @@ impl Hub {
             if let Some(input) = handle.record.inputs.front().filter(|i| {
                 i.clear && !handle.record.paused && i.order > handle.record.stop_through
             }) {
-                let receipt = handle.persistence.enqueue_reserved(
+                handle.persistence.enqueue_reserved(
                     Operation::Clear(input.id.clone(), Box::new(handle.record.clone())),
                     &mut permit,
                 )?;
-                drop(data);
-                receipt.wait()?;
-                data = self.0.data.lock().unwrap();
             }
-            let (event, receipt) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
+            let (event, _) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
             let Some(input) = r.inputs.front() else {
                 return Ok(None);
             };
@@ -2456,7 +2464,6 @@ impl Hub {
             Ok((!cancelled).then_some(!input.clear))
         })?;
             drop(data);
-            receipt.wait()?;
             Ok(event)
         })
     }
@@ -2826,10 +2833,27 @@ impl Hub {
                 .values()
                 .map(|handle| handle.persistence.capacity())
                 .collect();
+            let mut clean = true;
             for lane in lanes {
-                let _ = lane.durable_record();
+                if let Err(error) = lane.durable_record() {
+                    clean = false;
+                    eprintln!("Cannot finish session persistence during shutdown: {error}");
+                }
             }
             self.0.compactions.wait(None);
+            clean &= self
+                .0
+                .data
+                .lock()
+                .unwrap()
+                .sessions
+                .values()
+                .all(|handle| handle.storage_error.is_none());
+            if clean {
+                if let Err(error) = self.0.run_marker.finish() {
+                    eprintln!("Cannot mark Boid shutdown clean: {error}");
+                }
+            }
         });
     }
 }
@@ -3352,7 +3376,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(saved["version"], 7);
+        assert_eq!(saved["version"], 8);
         assert!(saved["engine"].get("skills").is_none());
         let snapshot_id = record.engine.skill_snapshot.as_ref().unwrap();
         assert_eq!(saved["engine"]["skill_snapshot"], snapshot_id.as_str());
@@ -3713,6 +3737,7 @@ mod tests {
         use std::time::Duration;
         use tokio::sync::mpsc;
         let state = tempfile::tempdir().unwrap();
+        let crash_state = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let (sent, mut received) = mpsc::channel::<Value>(8);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3755,9 +3780,6 @@ mod tests {
         .unwrap();
         assert!(hub.view(&view.id).unwrap().working_since_ms.is_some());
         let queued = hub.message(&view.id, "Queued before crash".into()).unwrap();
-        // This fixture asserts retention of this specific input. New messages
-        // normally acknowledge before disk; fence this one before simulating a crash.
-        hub.update(&view.id, |_| Ok(())).unwrap();
         // Abort without graceful shutdown or interruption accounting: the
         // persisted intent must reconcile an already-started side effect.
         let task = hub
@@ -3773,6 +3795,32 @@ mod tests {
             .unwrap();
         task.abort();
         let _ = task.await;
+        // Establish the exact durable prefix this test recovers. Acknowledged
+        // input normally need not be durable yet. Copy before graceful cleanup
+        // so the crash fixture retains the unclean-process marker and running call.
+        let lane = hub.0.data.lock().unwrap().sessions[&view.id]
+            .persistence
+            .capacity();
+        lane.durable_record().unwrap();
+        hub.0.compactions.wait(Some(&view.id));
+        fn copy_crash_state(source: &std::path::Path, destination: &std::path::Path) {
+            std::fs::create_dir_all(destination).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name() == "sessions.lock" {
+                    continue;
+                }
+                let to = destination.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_crash_state(&entry.path(), &to);
+                } else {
+                    std::fs::copy(entry.path(), to).unwrap();
+                }
+            }
+        }
+        copy_crash_state(state.path(), crash_state.path());
+        assert!(crash_state.path().join(recovery::MARKER).exists());
+        hub.shutdown().await;
         drop(hub);
         assert_eq!(
             std::fs::read_to_string(work.path().join("effects")).unwrap(),
@@ -3780,12 +3828,16 @@ mod tests {
         );
         let mut client = Client::test_client_at(endpoint);
         client.model = "changed-server-default".into();
-        let restored = Hub::open(client, state.path().into()).unwrap();
+        let restored = Hub::open(client, crash_state.path().into()).unwrap();
         let recovered = restored.view(&view.id).unwrap();
         assert_eq!(recovered.status, "stopped");
         assert_eq!(recovered.working_since_ms, None);
         assert_eq!(recovered.profile, view.profile);
-        assert_eq!(recovered.pending, vec![queued]);
+        assert!(recovered.pending.is_empty());
+        assert!(recovered.entries.iter().any(|entry| entry.id == queued));
+        assert!(recovered.entries.iter().any(|entry| entry.kind == "notice"
+            && entry.text.contains("quarantined_user_inputs")
+            && entry.text.contains("Queued before crash")));
         assert!(
             tokio::time::timeout(Duration::from_millis(50), received.recv())
                 .await
@@ -3808,16 +3860,24 @@ mod tests {
                 .any(|item| item["encrypted_content"] == "retained-opaque")
         );
         for (call, needle) in [
-            ("started", "partially completed"),
-            ("pending", "Not executed"),
+            ("started", "may have completed fully or partially"),
+            ("pending", "Outcome unknown after unclean shutdown"),
         ] {
             let result = input
                 .iter()
                 .find(|item| item["type"] == "function_call_output" && item["call_id"] == call)
                 .unwrap();
-            assert!(result["output"].as_str().unwrap().contains(needle));
+            assert!(
+                result["output"].as_str().unwrap().contains(needle),
+                "recovery outcome for {call} did not contain {needle:?}: {}",
+                result["output"]
+            );
         }
-        assert_eq!(input[input.len() - 2]["content"], "Queued before crash");
+        assert!(
+            !input
+                .iter()
+                .any(|item| item["content"] == "Queued before crash")
+        );
         assert_eq!(input.last().unwrap()["content"], "Inspect and continue");
         assert_eq!(
             std::fs::read_to_string(work.path().join("effects")).unwrap(),
@@ -3864,7 +3924,7 @@ mod tests {
         assert!(restored.archived_views().is_empty());
         restored.shutdown().await;
         drop(restored);
-        let reopened = Hub::open(Client::test_client(), state.path().into()).unwrap();
+        let reopened = Hub::open(Client::test_client(), crash_state.path().into()).unwrap();
         assert!(reopened.view(&view.id).is_none());
         assert!(reopened.reopen(&view.id).is_err());
         assert!(reopened.history(&view.id, None, None, None).is_err());
@@ -3969,6 +4029,16 @@ mod tests {
             .unwrap();
         hub.send_peer(&sender.id, &target.id, "Retain this peer input")
             .unwrap();
+        // The failure concerns an existing saved record. Execution admission is
+        // asynchronous, so explicitly finish fixture writes before replacing its
+        // directory and taking the byte-for-byte preservation baseline.
+        for id in [&target.id, &sender.id, &first_failure_on_end.id] {
+            let lane = hub.0.data.lock().unwrap().sessions[id]
+                .persistence
+                .capacity();
+            lane.durable_record().unwrap();
+        }
+        hub.0.compactions.wait(None);
         let stored = state.path().join("sessions");
         let backup = state.path().join("sessions-before-failure");
         std::fs::rename(&stored, &backup).unwrap();
@@ -3976,9 +4046,6 @@ mod tests {
         let original = std::fs::read(backup.join(format!("{}.json", target.id))).unwrap();
         let (_, mut events) = hub.subscribe();
         hub.entry(&target.id, "notice", "This save must fail");
-        let first_error = hub.0.data.lock().unwrap().sessions[&target.id]
-            .storage_error
-            .clone();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if hub.0.data.lock().unwrap().sessions[&target.id]
@@ -3994,6 +4061,10 @@ mod tests {
         })
         .await
         .unwrap();
+        let first_error = hub.0.data.lock().unwrap().sessions[&target.id]
+            .storage_error
+            .clone();
+        assert!(first_error.is_some());
         let errors = hub
             .view(&target.id)
             .unwrap()

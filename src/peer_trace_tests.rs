@@ -22,6 +22,11 @@ async fn trace_reads_live_text_without_disk_access_peer_changes_or_events() {
     let reader = create(&hub, "reader", "");
     let peer = create(&hub, "peer", "");
     let entry = hub.entry(&peer.id, "assistant", "");
+    // Establish the empty saved fixture before adding the live-only delta.
+    let capacity = hub.0.data.lock().unwrap().sessions[&peer.id]
+        .persistence
+        .capacity();
+    capacity.durable_record().unwrap();
     hub.delta(&peer.id, &entry, "The newest received text 🐦");
     let path = state
         .path()

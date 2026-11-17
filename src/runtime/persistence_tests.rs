@@ -114,12 +114,18 @@ async fn accepted_messages_are_real_server_state_while_storage_is_blocked() {
             "accepted input lacked its server event"
         );
     }
-    assert!(hub.message(&target.id, "fourth must wait".into()).is_err());
+    hub.message(&target.id, "fourth is accepted while recording lags".into())
+        .unwrap();
     {
         let data = hub.0.data.lock().unwrap();
         let record = &data.sessions[&target.id].record;
-        assert_eq!(record.order, order);
-        assert_eq!(serde_json::to_value(record).unwrap(), before);
+        assert_eq!(record.order, order + 1);
+        assert_eq!(
+            &serde_json::to_value(record).unwrap()["view"]["entries"]
+                .as_array()
+                .unwrap()[..before["view"]["entries"].as_array().unwrap().len()],
+            before["view"]["entries"].as_array().unwrap()
+        );
     }
 
     let independent_hub = hub.clone();
@@ -250,48 +256,55 @@ async fn newer_stream_delta_survives_an_earlier_queued_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tool_claim_waits_until_running_call_is_durable() {
+async fn tool_claim_proceeds_while_recording_is_held() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
-    let target = idle_agent(&hub, work.path(), "claim-fence").await;
-    let mut serialized = {
-        let data = hub.0.data.lock().unwrap();
-        serde_json::to_value(&data.sessions[&target.id].record.engine).unwrap()
-    };
-    serialized["running"] = json!({
-        "id":"durable-before-effect", "name":"write_file",
-        "arguments":"{}", "argument_entry":null
-    });
-    let session: Session = serde_json::from_value(serialized).unwrap();
+    let target = idle_agent(&hub, work.path(), "claim-without-disk").await;
+    let mut encoded = serde_json::to_value(
+        &hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .engine,
+    )
+    .unwrap();
+    encoded["running"] =
+        json!({"id":"accepted-effect","name":"write_file","arguments":"{}","argument_entry":null});
+    let session: Session = serde_json::from_value(encoded).unwrap();
     let gate = hold_writer(&hub, &target.id).await;
-    let claiming = hub.clone();
+    let claimant = hub.clone();
     let id = target.id.clone();
-    let mut claim = tokio::task::spawn_blocking(move || claiming.claim_tool(&id, &session));
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut claim)
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || claimant.claim_tool(&id, &session))
+        )
+        .await
+        .expect("tool dispatch waited for disk")
+        .unwrap()
+        .unwrap()
+    );
+    hub.stop(&target.id).unwrap();
+    let session = hub.0.data.lock().unwrap().sessions[&target.id]
+        .record
+        .engine
+        .clone();
+    assert!(
+        !hub.claim_tool(&target.id, &session).unwrap(),
+        "Stop must still gate real dispatch"
     );
     gate.release();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), claim)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-    );
-    let saved: Value = serde_json::to_value(persisted(&hub, &target.id)).unwrap();
-    assert_eq!(saved["engine"]["running"]["id"], "durable-before-effect");
+    let saved = serde_json::to_value(persisted(&hub, &target.id)).unwrap();
+    assert_eq!(saved["engine"]["running"]["id"], "accepted-effect");
     hub.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn failed_checkpoint_prevents_a_pending_tool_side_effect() {
+async fn known_recording_failure_prevents_a_new_tool_side_effect() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
     let target = idle_agent(&hub, work.path(), "storage-failure").await;
+    persisted(&hub, &target.id); // Ensure the first base exists before failing an append.
     let mut serialized = {
         let data = hub.0.data.lock().unwrap();
         serde_json::to_value(&data.sessions[&target.id].record.engine).unwrap()
@@ -317,6 +330,9 @@ async fn failed_checkpoint_prevents_a_pending_tool_side_effect() {
         Vec::new()
     };
     std::fs::create_dir(&checkpoint).unwrap();
+    hub.rename(&target.id, "recording failure probe".into())
+        .unwrap();
+    wait_for_recording_error(&hub, &target.id).await;
     let tools = Tools::new(work.path()).unwrap();
     let result = session.step(&hub.0.client, &tools, &hub, &target.id).await;
     // entry_replacing reports a storage fault through the Hub. The subsequent
@@ -400,90 +416,70 @@ async fn graceful_shutdown_drains_accepted_inputs_before_returning() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn saturated_storage_waits_without_faulting_or_blocking_the_roster() {
+async fn saturated_storage_coalesces_latest_state_without_blocking_execution() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
-    let target = idle_agent(&hub, work.path(), "saturated").await;
-    let other = idle_agent(&hub, work.path(), "unblocked").await;
-    let entry = hub.entry(&target.id, "assistant", "");
+    let target = idle_agent(&hub, work.path(), "coalesced").await;
     let gate = hold_writer(&hub, &target.id).await;
-    {
-        let mut data = hub.0.data.lock().unwrap();
-        let handle = data.sessions.get_mut(&target.id).unwrap();
-        // One active gate plus fifteen queued snapshots exhaust the bound.
-        for _ in 0..15 {
-            handle
-                .persistence
-                .enqueue(Operation::Snapshot(Box::new(handle.record.clone())))
-                .unwrap();
-        }
-    }
-    let before =
-        serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&target.id].record).unwrap();
-    assert!(
-        hub.message(&target.id, "retry without accepting".into())
-            .is_err()
-    );
-    assert_eq!(
-        serde_json::to_value(&hub.0.data.lock().unwrap().sessions[&target.id].record).unwrap(),
-        before
-    );
-
-    let writing = hub.clone();
+    let active = hub.clone();
     let id = target.id.clone();
-    let entry_id = entry.clone();
-    let (started, ready) = tokio::sync::oneshot::channel();
-    let mut delta = tokio::task::spawn_blocking(move || {
-        started.send(()).unwrap();
-        writing.delta(&id, &entry_id, "retained after backpressure");
-    });
-    ready.await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut delta)
-            .await
-            .is_err(),
-        "a strict write must wait for capacity, not escalate saturation to a fault"
-    );
-    assert!(
-        hub.0.data.lock().unwrap().sessions[&target.id]
-            .storage_error
-            .is_none()
-    );
-    let independent = hub.clone();
-    let other_id = other.id.clone();
     tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(3),
         tokio::task::spawn_blocking(move || {
-            independent.rename(&other_id, "still-unblocked".into())
+            for i in 0..200 {
+                let entry = active.entry(&id, "assistant", &format!("cycle-{i}"));
+                active.delta(&id, &entry, " retained-stream");
+                active.entry(&id, "tool_result", &format!("result-{i}"));
+            }
         }),
     )
     .await
-    .unwrap()
-    .unwrap()
+    .expect("repeated execution transitions waited for recording")
     .unwrap();
-    gate.release();
-    tokio::time::timeout(Duration::from_secs(3), delta)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        hub.0.data.lock().unwrap().sessions[&target.id]
-            .storage_error
-            .is_none()
-    );
+    let (queued, bytes) = hub.0.data.lock().unwrap().sessions[&target.id]
+        .persistence
+        .queued_recording();
     assert_eq!(
-        hub.view(&target.id)
-            .unwrap()
-            .entries
-            .iter()
-            .find(|e| e.id == entry)
-            .unwrap()
-            .text
-            .as_str(),
-        "retained after backpressure"
+        queued, 1,
+        "normal states should coalesce even after hundreds of transitions"
+    );
+    assert_eq!(bytes, 0);
+    let visible = hub.view(&target.id).unwrap();
+    for i in 0..200 {
+        assert!(
+            visible
+                .entries
+                .iter()
+                .any(|e| e.text.as_str() == format!("cycle-{i} retained-stream"))
+        );
+        assert!(
+            visible
+                .entries
+                .iter()
+                .any(|e| e.text.as_str() == format!("result-{i}"))
+        );
+    }
+    gate.release();
+    let saved = persisted(&hub, &target.id);
+    assert_eq!(
+        serde_json::to_value(&saved.view.entries).unwrap(),
+        serde_json::to_value(&visible.entries).unwrap()
     );
     hub.shutdown().await;
+}
+
+async fn wait_for_recording_error(hub: &Hub, id: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hub.0.data.lock().unwrap().sessions[id]
+            .storage_error
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("recording failure was not reported");
 }
 
 async fn wait_for_writer_exit(hub: &Hub, id: &str) {
@@ -604,85 +600,45 @@ async fn admission_timings_separate_roster_wait_from_locked_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn admitted_stream_bytes_backpressure_before_mutation_and_fence_tools() {
+async fn stream_backlog_coalesces_without_delaying_a_tool_claim() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
-    let target = idle_agent(&hub, work.path(), "delta-byte-bound").await;
+    let target = idle_agent(&hub, work.path(), "delta-bound").await;
     let entry = hub.entry(&target.id, "assistant", "");
     let gate = hold_writer(&hub, &target.id).await;
-    let h = hub.clone();
+    let active = hub.clone();
     let id = target.id.clone();
     let e = entry.clone();
     tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(2),
         tokio::task::spawn_blocking(move || {
-            h.delta(&id, &e, &"x".repeat(5000));
-            h.delta(&id, &e, &"y".repeat(5000));
+            for _ in 0..80 {
+                active.delta(&id, &e, &"z".repeat(5000));
+            }
+            let session = active.0.data.lock().unwrap().sessions[&id]
+                .record
+                .engine
+                .clone();
+            active.claim_tool(&id, &session).unwrap()
         }),
     )
     .await
-    .expect("admitted deltas waited for disk")
+    .expect("stream saturation blocked tool dispatch")
     .unwrap();
+    let (queued, bytes) = hub.0.data.lock().unwrap().sessions[&target.id]
+        .persistence
+        .queued_recording();
+    assert!(queued <= 16 && bytes <= persistence::DELTA_BYTES);
     assert_eq!(
         hub.0.data.lock().unwrap().sessions[&target.id]
             .record
             .stream_seq,
-        2
-    );
-    let h = hub.clone();
-    let id = target.id.clone();
-    let e = entry.clone();
-    let mut third = tokio::task::spawn_blocking(move || h.delta(&id, &e, &"z".repeat(5000)));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut third)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        hub.0.data.lock().unwrap().sessions[&target.id]
-            .record
-            .stream_seq,
-        2
-    );
-    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
-    let mut serialized = serde_json::to_value(
-        &hub.0.data.lock().unwrap().sessions[&target.id]
-            .record
-            .engine,
-    )
-    .unwrap();
-    serialized["running"] =
-        json!({"id":"fenced", "name":"write_file", "arguments":"{}", "argument_entry":null});
-    let session: Session = serde_json::from_value(serialized).unwrap();
-    let h = hub.clone();
-    let id = target.id.clone();
-    let mut claim = tokio::task::spawn_blocking(move || h.claim_tool(&id, &session));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut claim)
-            .await
-            .is_err()
+        80
     );
     gate.release();
-    tokio::time::timeout(Duration::from_secs(3), third)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), claim)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-    );
-    // The third delta can be ordered after the tool claim; fence it separately.
-    let session = hub.0.data.lock().unwrap().sessions[&target.id]
-        .record
-        .engine
-        .clone();
-    hub.checkpoint(&target.id, &session).unwrap();
-    let saved: Record = persisted(&hub, &target.id);
-    assert_eq!(saved.stream_seq, 3);
+    let saved = persisted(&hub, &target.id);
+    assert_eq!(saved.stream_seq, 80);
     assert_eq!(
         saved
             .view
@@ -692,13 +648,13 @@ async fn admitted_stream_bytes_backpressure_before_mutation_and_fence_tools() {
             .unwrap()
             .text
             .len(),
-        15000
+        400_000
     );
     hub.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
+async fn reported_delta_failure_stops_subsequent_tool_claims() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
@@ -722,7 +678,10 @@ async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
         .join("sessions")
         .join(format!("{}.journal", target.id))
         .join("active.jsonl");
-    std::fs::remove_file(&stream).unwrap();
+    std::fs::create_dir_all(stream.parent().unwrap()).unwrap();
+    if stream.exists() {
+        std::fs::remove_file(&stream).unwrap();
+    }
     std::fs::create_dir(&stream).unwrap();
     let mut serialized = serde_json::to_value(
         &hub.0.data.lock().unwrap().sessions[&target.id]
@@ -734,8 +693,9 @@ async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
     let session: Session = serde_json::from_value(serialized).unwrap();
     let h = hub.clone();
     let id = target.id.clone();
-    let claim = tokio::task::spawn_blocking(move || h.claim_tool(&id, &session));
     gate.release();
+    wait_for_recording_error(&hub, &target.id).await;
+    let claim = tokio::task::spawn_blocking(move || h.claim_tool(&id, &session));
     assert!(!matches!(
         tokio::time::timeout(Duration::from_secs(3), claim)
             .await
@@ -749,33 +709,30 @@ async fn admitted_delta_failure_prevents_tool_claim_and_releases_waiters() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn oversized_delta_waits_for_exclusive_capacity_and_durable_receipt() {
+async fn oversized_delta_uses_complete_state_without_waiting_for_disk() {
     let state = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
     let target = idle_agent(&hub, work.path(), "large-delta").await;
     let entry = hub.entry(&target.id, "assistant", "");
     let gate = hold_writer(&hub, &target.id).await;
-    let h = hub.clone();
+    let active = hub.clone();
     let id = target.id.clone();
     let e = entry.clone();
-    let mut writing = tokio::task::spawn_blocking(move || h.delta(&id, &e, &"x".repeat(70000)));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut writing)
-            .await
-            .is_err()
-    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || active.delta(&id, &e, &"x".repeat(70000))),
+    )
+    .await
+    .expect("large stream chunk waited for disk")
+    .unwrap();
     assert_eq!(
         hub.0.data.lock().unwrap().sessions[&target.id]
             .record
             .stream_seq,
-        0
+        1
     );
     gate.release();
-    tokio::time::timeout(Duration::from_secs(3), writing)
-        .await
-        .unwrap()
-        .unwrap();
     let saved = persisted(&hub, &target.id);
     assert_eq!(saved.stream_seq, 1);
     assert_eq!(
@@ -783,7 +740,7 @@ async fn oversized_delta_waits_for_exclusive_capacity_and_durable_receipt() {
             .view
             .entries
             .iter()
-            .find(|item| item.id == entry)
+            .find(|e| e.id == entry)
             .unwrap()
             .text
             .len(),
@@ -792,8 +749,6 @@ async fn oversized_delta_waits_for_exclusive_capacity_and_durable_receipt() {
     hub.shutdown().await;
 }
 
-// Isolated filesystem fixture. No provider or agent requests. Include the final
-// durability fence so async admission cannot hide an unpaid persistence cost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn stream_persistence_fixture() {
@@ -976,4 +931,172 @@ fn communication_index_preserves_equality_with_duplicate_ids() {
     let mut absent = first;
     absent.text = "not present".into();
     assert!(!contains_communication(&index, &absent));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_context_archives_preserve_order_with_bounded_fail_fast_admission() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "context-recording").await;
+    let gate = hold_writer(&hub, &target.id).await;
+    let active = hub.clone();
+    let id = target.id.clone();
+    let accepted = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || {
+            let mut accepted = 0;
+            for n in 1..=32 {
+                active.entry(&id, "assistant", &format!("context-{n}"));
+                if active.archive_context(&id, n).is_err() {
+                    break;
+                }
+                accepted = n;
+            }
+            active.entry(&id, "tool_result", "continues after archive quota");
+            accepted
+        }),
+    )
+    .await
+    .expect("context archive admission waited for disk")
+    .unwrap();
+    assert!((1..16).contains(&accepted));
+    assert!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .storage_error
+            .is_none()
+    );
+    gate.release();
+    let saved = persisted(&hub, &target.id);
+    assert!(
+        saved
+            .view
+            .entries
+            .iter()
+            .any(|e| e.text.as_str() == "continues after archive quota")
+    );
+    for n in 1..=accepted {
+        let path = state
+            .path()
+            .join("sessions/compactions")
+            .join(format!("{}-{n}.json", target.id));
+        let archived: Record = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(
+            archived
+                .view
+                .entries
+                .iter()
+                .any(|e| e.text.as_str() == format!("context-{n}"))
+        );
+        assert!(
+            !archived
+                .view
+                .entries
+                .iter()
+                .any(|e| e.text.as_str() == format!("context-{}", n + 1))
+        );
+    }
+    hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recording_fault_retains_failed_and_queued_original_contexts_in_memory() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "archive-retention").await;
+    let gate = hold_writer(&hub, &target.id).await;
+    let mut engine = hub.0.data.lock().unwrap().sessions[&target.id]
+        .record
+        .engine
+        .clone();
+    engine.user("first original context".into());
+    hub.checkpoint(&target.id, &engine).unwrap();
+    hub.archive_context(&target.id, 1).unwrap();
+    engine.user("second original context".into());
+    hub.checkpoint(&target.id, &engine).unwrap();
+    hub.archive_context(&target.id, 2).unwrap();
+    std::fs::write(
+        state.path().join("sessions/compactions"),
+        "archive failure fixture",
+    )
+    .unwrap();
+    gate.release();
+    wait_for_recording_error(&hub, &target.id).await;
+    let capacity = hub.0.data.lock().unwrap().sessions[&target.id]
+        .persistence
+        .capacity();
+    assert!(capacity.durable_record().is_err());
+    let retained = hub.0.data.lock().unwrap().sessions[&target.id]
+        .persistence
+        .retained_archive_records();
+    assert_eq!(retained.len(), 2);
+    let first = serde_json::to_value(&retained[0].engine).unwrap()["history"].to_string();
+    let second = serde_json::to_value(&retained[1].engine).unwrap()["history"].to_string();
+    assert!(first.contains("first original context"));
+    assert!(!first.contains("second original context"));
+    assert!(
+        second.contains("first original context") && second.contains("second original context")
+    );
+    assert!(hub.archive_context(&target.id, 3).is_err());
+    hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_retains_transcript_when_its_async_final_recording_fails() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+    let target = idle_agent(&hub, work.path(), "end-recording-fault").await;
+    let gate = hold_writer(&hub, &target.id).await;
+    let closing = hub.clone();
+    let id = target.id.clone();
+    let end = tokio::spawn(async move { closing.close(&id).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .view
+            .status
+            != "archived"
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("End admission waited for disk");
+    let active = state
+        .path()
+        .join("sessions")
+        .join(format!("{}.journal", target.id))
+        .join("active.jsonl");
+    std::fs::create_dir_all(active.parent().unwrap()).unwrap();
+    if active.exists() {
+        std::fs::remove_file(&active).unwrap();
+    }
+    std::fs::create_dir(active).unwrap();
+    gate.release();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(3), end)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    let retained = hub.ended_record(&target.id);
+    assert!(retained.view.archived);
+    assert!(
+        retained
+            .view
+            .entries
+            .iter()
+            .any(|entry| entry.text.as_str() == "retained fixture work")
+    );
+    assert!(
+        retained
+            .view
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("not saved"))
+    );
+    hub.shutdown().await;
 }

@@ -111,7 +111,7 @@ impl Event {
             } => {
                 let mut next: Record = serde_json::from_value(metadata)?;
                 if next.view.id != record.view.id
-                    || next.version != 7
+                    || !matches!(next.version, 7 | 8)
                     || next.journal_seq != self.seq
                 {
                     bail!("Checkpoint identity/version/sequence differs; original retained");

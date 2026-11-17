@@ -254,7 +254,20 @@ impl Session {
             format!("{} ({})\n{}", call.name, call.id, result),
         )]
     }
+    pub(crate) fn has_unfinished_execution(&self) -> bool {
+        self.request_in_flight
+            || self.running.is_some()
+            || !self.pending.is_empty()
+            || self.compact_requested
+            || self.compact_in_flight
+    }
     pub fn recover(&mut self) -> Vec<(String, String)> {
+        self.recover_interrupted(false)
+    }
+    pub(crate) fn recover_uncertain(&mut self) -> Vec<(String, String)> {
+        self.recover_interrupted(true)
+    }
+    fn recover_interrupted(&mut self, uncertain: bool) -> Vec<(String, String)> {
         let mut entries = vec![];
         if self.compact_requested || self.compact_in_flight {
             self.compact_requested = false;
@@ -269,12 +282,20 @@ impl Session {
         if self.request_in_flight {
             entries.push((
                 "notice".into(),
-                "The model request was interrupted; no unfinished tool call was executed.".into(),
+                if uncertain {
+                    "The saved model request was interrupted by an unclean shutdown. Later responses and tool effects may have occurred without being saved; inspect external state before retrying."
+                } else {
+                    "The model request was interrupted; no unfinished tool call was executed."
+                }.into(),
             ));
             self.request_in_flight = false;
         }
         if let Some(call) = self.running.take() {
-            let result = json!({"error":"Interrupted. The action may have partially completed; inspect state before retrying."});
+            let result = json!({"error": if uncertain {
+                "Interrupted. The action may have completed fully or partially; inspect state before retrying."
+            } else {
+                "Interrupted. The action may have partially completed; inspect state before retrying."
+            }});
             self.history.push(json!({"type":"function_call_output","call_id":call.id,"output":result.to_string()}));
             entries.push((
                 "tool_result".into(),
@@ -282,7 +303,11 @@ impl Session {
             ));
         }
         while let Some(call) = self.pending.pop_front() {
-            let result = json!({"error":"Not executed because the turn was interrupted."});
+            let result = json!({"error": if uncertain {
+                "Outcome unknown after unclean shutdown. This saved pending action may already have executed; it was not replayed. Inspect external state before retrying."
+            } else {
+                "Not executed because the turn was interrupted."
+            }});
             self.history.push(json!({"type":"function_call_output","call_id":call.id,"output":result.to_string()}));
             entries.push((
                 "tool_result".into(),
@@ -565,6 +590,10 @@ impl Session {
                     &self.profile,
                     |event| {
                         let event_type = event["type"].as_str().unwrap_or("");
+                        #[cfg(test)]
+                        if event_type == "response.completed" {
+                            client.test_handoff_mark("response_observed");
+                        }
                         if matches!(event_type, "response.completed" | "response.incomplete") {
                             *context_usage = ContextUsage::from_event(event);
                         }
@@ -633,6 +662,8 @@ impl Session {
             return Ok(true);
         }
         let call = self.running.as_ref().expect("running call");
+        #[cfg(test)]
+        client.test_handoff_mark("tool_dispatch");
         let result = match call.name.as_str() {
             "oai_compact" => match serde_json::from_str::<Value>(&call.arguments) {
                 Ok(value) if value == json!({}) => {
@@ -682,6 +713,8 @@ impl Session {
             }
             _ => tool_calls::execute(tools, &call.name, &call.arguments).await,
         };
+        #[cfg(test)]
+        client.test_handoff_mark("tool_return");
         let call = self.running.take().expect("running call");
         self.finish(call, result, hub, id)?;
         Ok(true)
