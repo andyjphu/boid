@@ -827,7 +827,7 @@ async fn bounded_runtime_call_benchmark() {
                 recipient_name: "subject".into(),
                 call_id: format!("call-{i}"),
                 sender_entry: format!("entry-{i}"),
-                text: "p".repeat(700),
+                text: "p".repeat(700).into(),
                 urgency: Urgency::Regular,
                 state: "applied".into(),
                 applied_batch: Some(i),
@@ -915,7 +915,7 @@ fn communication_index_preserves_equality_with_duplicate_ids() {
         recipient_name: "b".into(),
         call_id: "call".into(),
         sender_entry: "entry".into(),
-        text: "first".into(),
+        text: "first".to_owned().into(),
         urgency: Urgency::Regular,
         state: "queued".into(),
         applied_batch: None,
@@ -923,13 +923,17 @@ fn communication_index_preserves_equality_with_duplicate_ids() {
         persisted: true,
     };
     let mut second = first.clone();
-    second.text = "second".into();
+    assert!(Arc::ptr_eq(&first.text, &second.text));
+    let roundtrip: Communication =
+        serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(roundtrip, first);
+    second.text = "second".to_owned().into();
     let messages = vec![first.clone(), second.clone()];
     let index = communication_index(&messages);
     assert!(contains_communication(&index, &first));
     assert!(contains_communication(&index, &second));
     let mut absent = first;
-    absent.text = "not present".into();
+    absent.text = "not present".to_owned().into();
     assert!(!contains_communication(&index, &absent));
 }
 

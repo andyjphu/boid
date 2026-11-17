@@ -738,9 +738,33 @@ impl Auth {
             .iter()
             .filter(|m| m["visibility"] == "list")
             .filter_map(|m| {
-                Some(json!({"slug":m["slug"].as_str()?,"display_name":m["display_name"].as_str()?}))
+                let mut model =
+                    json!({"slug":m["slug"].as_str()?,"display_name":m["display_name"].as_str()?});
+                for field in ["service_tiers", "default_service_tier"] {
+                    if let Some(value) = m.get(field) {
+                        model[field] = value.clone();
+                    }
+                }
+                Some(model)
             })
             .collect())
+    }
+    /// Read-only capability check performed when enabling /fast, never between
+    /// ordinary model requests. Missing metadata is not evidence of support.
+    pub async fn require_fast(self: &Arc<Self>, id: &str, model: &str) -> Result<()> {
+        let models = self.models(id).await?;
+        let tiers = models
+            .iter()
+            .find(|m| m["slug"] == model)
+            .and_then(|m| m["service_tiers"].as_array())
+            .context("Fast mode availability was not reported for this ChatGPT model.")?;
+        if !tiers
+            .iter()
+            .any(|tier| matches!(tier["id"].as_str(), Some("priority" | "fast")))
+        {
+            bail!("Fast mode is unavailable for this ChatGPT model.");
+        }
+        Ok(())
     }
     pub async fn logout(&self, id: &str) -> Result<bool> {
         let _lock = self.lock().await?;

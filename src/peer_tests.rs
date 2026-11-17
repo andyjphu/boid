@@ -100,18 +100,25 @@ async fn escape_cancels_running_work_before_storage_lock_and_preserves_followup(
         call("running", "exec_command", json!({"command":"echo $$ > running.pid; while :; do sleep 1; done", "timeout_ms":60000})),
         call("unstarted", "write_file", json!({"path":"must-not-run","content":"bad"}))
     ])).unwrap();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !work.path().join("running.pid").exists() {
+    // The shell creates/truncates the file before echo writes its PID. Wait
+    // for the complete line, rather than treating file existence as readiness.
+    let pid: i32 = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match std::fs::read_to_string(work.path().join("running.pid")) {
+                Ok(text) if text.ends_with('\n') => {
+                    let pid: i32 = text.trim().parse().expect("shell must write a valid PID");
+                    assert!(pid > 0);
+                    break pid;
+                }
+                Ok(_) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => panic!("Cannot read shell PID: {error}"),
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .unwrap();
-    let pid: i32 = std::fs::read_to_string(work.path().join("running.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
     hub.message(&target.id, "Continue with the corrected task".into())
         .unwrap();
 
@@ -549,17 +556,26 @@ async fn peer_boundaries_priority_and_running_tool_cancellation() {
 }
 
 #[tokio::test]
-async fn emergency_bypasses_cancelled_skill_scan_and_respects_stop() {
+async fn emergency_bypasses_background_skill_refresh_and_respects_stop() {
     let work = tempfile::tempdir().unwrap();
     let (hub, mut rx, server) = fixture(None).await;
     let sender = agent(&hub, work.path(), "ursa", "");
-    let target = agent(&hub, work.path(), "aero", "");
+    let target = agent(&hub, work.path(), "aero", "Hold current operation");
+    let (_initial, _initial_release) = next(&mut rx).await;
     let (release_scan, scan_rx) = std::sync::mpsc::channel();
     let gate = Arc::new(SkillScanGate {
         started: Notify::new(),
         release: Mutex::new(scan_rx),
     });
     *hub.0.skill_scan_gate.lock().unwrap() = Some(gate.clone());
+    std::fs::create_dir_all(work.path().join(".boid")).unwrap();
+    std::fs::write(
+        work.path().join(".boid/skills.json"),
+        r#"{"catalog_characters":1234}"#,
+    )
+    .unwrap();
+    // The ordinary follow-up waits behind the held inference request. An
+    // emergency must overtake it even while background refresh is blocked.
     hub.message(&target.id, "operator after refresh".into())
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), gate.started.notified())

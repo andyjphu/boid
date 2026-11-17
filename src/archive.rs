@@ -10,7 +10,7 @@ impl ArchivedReceipt {
     fn new(message: &Communication) -> Self {
         let text_sha256 = format!("{:x}", Sha256::digest(message.text.as_bytes()));
         let mut message = message.clone();
-        message.text = String::new();
+        message.text = String::new().into();
         Self {
             message,
             text_sha256,

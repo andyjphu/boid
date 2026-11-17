@@ -78,7 +78,7 @@ impl Fixture {
             .route("/revoke",post(||async {StatusCode::SERVICE_UNAVAILABLE}))
             .route("/models",get(|headers:HeaderMap|async move {
                 assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer fixture-access"));
-                Json(json!({"models":[{"slug":"first","display_name":"First model","visibility":"list"},{"slug":"hidden","display_name":"Hidden","visibility":"hide"},{"slug":"second","display_name":"Second model","visibility":"list"}]}))
+                Json(json!({"models":[{"slug":"first","display_name":"First model","visibility":"list","service_tiers":[{"id":"priority","name":"Fast","description":"Fixture advertised tier"}],"default_service_tier":null},{"slug":"hidden","display_name":"Hidden","visibility":"hide"},{"slug":"second","display_name":"Second model","visibility":"list"}]}))
             })).with_state(provider.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let mut auth = Auth::open(dir.path().join("auth"), "api_key", "api-model").unwrap();
@@ -702,4 +702,102 @@ async fn subscription_retry_persists_failure_without_changing_billing_or_replayi
         events[0]["failure"]["error_code"],
         "subscription_sharing_usage_limit_exceeded"
     );
+}
+
+#[tokio::test]
+async fn fast_subscription_capability_and_wire_preserve_account_model_and_reasoning() {
+    use crate::{
+        api::Client,
+        runtime::{Create, Hub},
+    };
+    let f = Fixture::new().await;
+    let account = f.login().await;
+    let models = f.auth.models(&account).await.unwrap();
+    assert_eq!(models[0]["service_tiers"][0]["id"], "priority");
+    assert!(models[0].get("default_service_tier").unwrap().is_null());
+    f.auth.require_fast(&account, "first").await.unwrap();
+    assert!(
+        f.auth
+            .require_fast(&account, "second")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("availability was not reported")
+    );
+    let client = || {
+        let mut client = Client::test_client_at(format!("{}/responses", f.provider.origin));
+        client.auth = Some(f.auth.clone());
+        client
+    };
+    let hub = Hub::new(client()).unwrap();
+    let wire_client = client();
+    let work = tempfile::tempdir().unwrap();
+    let view = hub
+        .create(Create {
+            name: "speed-fixture".into(),
+            cwd: work.path().to_string_lossy().into_owned(),
+            message: String::new(),
+        })
+        .unwrap();
+    let original = hub.profile(&view.id).unwrap();
+    let api_credential = original["credential_id"].as_str().unwrap().to_owned();
+    hub.set_fast(&view.id, true, &original).unwrap();
+    let group = original["pane_group_id"].as_str().unwrap();
+    hub.assign_group_credential(
+        group,
+        Some(&account),
+        hub.pane_groups()["revision"].as_u64().unwrap(),
+    )
+    .unwrap();
+    let selected = hub.profile(&view.id).unwrap();
+    assert_eq!(selected["service_tier"], "priority");
+    let mut model = selected.clone();
+    model["model"] = json!("first");
+    hub.select_profile(&view.id, &selected, model).unwrap();
+    for enabled in [true, false] {
+        let profile = hub
+            .set_fast(&view.id, enabled, &hub.profile(&view.id).unwrap())
+            .unwrap();
+        assert_eq!(profile["chatgpt_account"], account);
+        wire_client
+            .respond_with(
+                &[] as &[Value],
+                json!([]),
+                "first",
+                "fixture",
+                &profile,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let requests = f.provider.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        if enabled {
+            assert_eq!(request["service_tier"], "priority");
+        } else {
+            assert!(
+                request.get("service_tier").is_none(),
+                "subscription off omits override"
+            );
+        }
+        assert_eq!(request["model"], "first");
+        assert_eq!(request["reasoning"]["effort"], original["reasoning_effort"]);
+        assert_eq!(request["tools"][0]["type"], "namespace");
+    }
+    hub.assign_group_credential(
+        group,
+        Some(&api_credential),
+        hub.pane_groups()["revision"].as_u64().unwrap(),
+    )
+    .unwrap();
+    let returned = hub.profile(&view.id).unwrap();
+    assert_eq!(returned["service_tier"], "default");
+    assert_eq!(returned["model"], "first");
+    assert_eq!(returned["credential_id"], api_credential);
+    assert_eq!(f.provider.requests.lock().unwrap().len(), 2);
+    assert!(
+        hub.view(&view.id).unwrap().entries.is_empty(),
+        "configuration and wire fixture do not activate draft"
+    );
+    hub.shutdown().await;
 }
