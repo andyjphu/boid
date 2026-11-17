@@ -289,6 +289,7 @@ mod tests {
             stop_through: 0,
             paused: false,
             listen_on_restart: Some(true),
+            peer_restartable: Some(false),
         }
     }
 

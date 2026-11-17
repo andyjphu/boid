@@ -2911,7 +2911,7 @@ function renderEntry(ui, item) {
   if (communication) { renderCommunication(ui, item, communication); return; }
   if (kind === "tool_result") {
     const result = toolEntry(text);
-    if (result.name === "send_message" && communications.has(result.value?.message_id) && !result.value?.error) {
+    if (["send_message", "wake_agent"].includes(result.name) && communications.has(result.value?.message_id) && !result.value?.error) {
       node.hidden = true;
       return;
     }
@@ -3020,7 +3020,7 @@ function putEntry(ui, entry, delta = false) {
         ui.toolPairs.set(tool.heading, pair);
         for (const entry of Object.values(pair)) ui.dirty.add(entry);
       }
-      const messageId = tool.name === "send_message" && tool.value?.message_id;
+      const messageId = ["send_message", "wake_agent"].includes(tool.name) && tool.value?.message_id;
       if (item.kind === "tool_result" && messageId) {
         if (!ui.messageResults.has(messageId)) ui.messageResults.set(messageId, new Set());
         ui.messageResults.get(messageId).add(item);
