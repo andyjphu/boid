@@ -1,7 +1,7 @@
 ## Available skills
 
 Skills provide task guidance. When a listed skill applies, use read_skill with
-its id to read the complete text before the relevant work. Use list_skills to
+its name (or source id for ambiguous names) to read the complete text before the relevant work. Use list_skills to
 inspect availability and source details. Names can be ambiguous; source ids
 distinguish packages. Explicitly selected skill text is supplied with the
 operator message, so it need not be loaded again while it remains in context.

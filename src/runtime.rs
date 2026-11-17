@@ -505,7 +505,9 @@ impl Hub {
                 .collect();
             let mut recovery_messages = messages.clone();
             let (events, _) = broadcast::channel(512);
-            let skill_cache = crate::skills::cache::Cache::default();
+            let skill_cache = crate::skills::cache::Cache::new(
+                store.state_directory().map(|root| root.join("skills")),
+            );
             let hub = Self(Arc::new(Inner {
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
@@ -3382,8 +3384,11 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let state = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
-        let package = work.path().join(".agents/skills/a");
-        let second = work.path().join(".agents/skills/b");
+        let gmcp = state.path().join("skills/gmcpNOW");
+        std::fs::create_dir_all(&gmcp).unwrap();
+        std::fs::write(gmcp.join("SKILL.md"), "---\nname: gmcpNOW\ndescription: Find, read and edit existing Google Docs and Google Sheets\n---\nUse glist and gread.\n").unwrap();
+        let package = state.path().join("skills/a");
+        let second = state.path().join("skills/b");
         std::fs::create_dir_all(package.join("agents")).unwrap();
         std::fs::create_dir_all(&second).unwrap();
         let original = "---\nname: review\ndescription: Review a draft: preserve source claims\n---\nOriginal review guidance. Read reference.txt here.\n";
@@ -3399,7 +3404,7 @@ mod tests {
             "---\nname: review\ndescription: Another review package\n---\nSecond source",
         )
         .unwrap();
-        std::os::unix::fs::symlink(&package, work.path().join(".agents/skills/alias")).unwrap();
+        std::os::unix::fs::symlink(&package, state.path().join("skills/alias")).unwrap();
         let skill_id = package
             .join("SKILL.md")
             .canonicalize()
@@ -3427,6 +3432,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("humanizer (3.1.0)")
+        );
+        assert!(
+            first["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("gmcpNOW (local file): Find, read")
         );
         let skill_text = include_str!("skills/humanizer/SKILL.md");
         assert!(!first["instructions"].as_str().unwrap().contains(skill_text));
@@ -3458,6 +3469,36 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind == "tool_result" && entry.text.contains("humanizer"))
         );
+        release.send(json!([
+            {"type":"function_call","id":"catalog-call","call_id":"catalog-call","name":"list_skills","arguments":"{}"},
+            {"type":"function_call","id":"gmcp-call","call_id":"gmcp-call","name":"read_skill","arguments":"{\"name\":\"gmcpNOW\"}"}
+        ])).unwrap();
+        let (listed, release) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let tool_result = |call_id: &str| -> Value {
+            let item = listed["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+                .unwrap();
+            serde_json::from_str(item["output"].as_str().unwrap()).unwrap()
+        };
+        assert!(
+            tool_result("catalog-call")["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| skill["name"] == "gmcpNOW")
+        );
+        assert!(
+            tool_result("gmcp-call")["text"]
+                .as_str()
+                .unwrap()
+                .contains("Use glist and gread.")
+        );
         release.send(json!([])).unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             while hub.view(&view.id).unwrap().status != "idle" {
@@ -3482,14 +3523,15 @@ mod tests {
                 .unwrap()
                 .contains("Original review guidance")
         );
-        let snapshot = crate::skills::discovery::scan(work.path());
+        let snapshot =
+            crate::skills::discovery::scan(work.path(), Some(&state.path().join("skills")));
         assert!(
             crate::skills::read(&snapshot.skills, "{\"name\":\"review\"}")["error"]
                 .as_str()
                 .unwrap()
                 .contains("ambiguous")
         );
-        assert!(crate::skills::catalog::prompt(&snapshot.skills, 0, &[]).contains("omitted"));
+        assert!(!crate::skills::catalog::prompt(&snapshot.skills, 0, &[]).contains("omitted"));
         assert!(
             crate::skills::catalog::prompt(&snapshot.skills, 500, &[])
                 .contains("humanizer (3.1.0)")
@@ -3594,13 +3636,15 @@ mod tests {
             r#"{"rules":[{"name":"review","enabled":false}]}"#,
         )
         .unwrap();
-        let disabled = crate::skills::discovery::scan(work.path());
+        let disabled =
+            crate::skills::discovery::scan(work.path(), Some(&state.path().join("skills")));
         assert!(
             crate::skills::read(&disabled.skills, &json!({"name":skill_id}).to_string())["error"]
                 .is_string()
         );
         std::fs::write(work.path().join(".boid/skills.json"), "broken").unwrap();
-        let invalid = crate::skills::discovery::scan(work.path());
+        let invalid =
+            crate::skills::discovery::scan(work.path(), Some(&state.path().join("skills")));
         assert!(invalid.skills.is_empty() && !invalid.warnings.is_empty());
         hub.shutdown().await;
         drop(hub);

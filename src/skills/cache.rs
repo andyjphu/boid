@@ -19,6 +19,7 @@ pub(crate) struct ScanGate {
 }
 #[derive(Default)]
 pub struct Cache {
+    root: Option<PathBuf>,
     watches: Mutex<BTreeMap<PathBuf, Arc<Mutex<Weak<Watch>>>>>,
     closed: AtomicBool,
     #[cfg(test)]
@@ -48,6 +49,12 @@ impl Drop for Watch {
     }
 }
 impl Cache {
+    pub fn new(root: Option<PathBuf>) -> Self {
+        let mut cache = Self::default();
+        cache.root = root;
+        cache
+    }
+
     /// Call only during server/agent initialization, outside the roster lock.
     pub fn preload(&self, cwd: &Path) -> Result<Arc<Watch>> {
         let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_owned());
@@ -71,9 +78,10 @@ impl Cache {
             }
         }
         // Fingerprint before reading: edits during a scan trigger another refresh.
+        let root = self.root.clone();
         let signal = AtomicBool::new(false);
-        let mut fingerprint = discovery::fingerprint(&cwd, &signal);
-        let latest = Arc::new(discovery::scan(&cwd));
+        let mut fingerprint = discovery::fingerprint(&cwd, root.as_deref(), &signal);
+        let latest = Arc::new(discovery::scan(&cwd, root.as_deref()));
         let state = Arc::new(State {
             latest: Mutex::new(latest),
             cancelled: AtomicBool::new(false),
@@ -98,7 +106,7 @@ impl Cache {
                     if state.cancelled.load(Ordering::Acquire) {
                         break;
                     }
-                    let next = discovery::fingerprint(&cwd, &state.cancelled);
+                    let next = discovery::fingerprint(&cwd, root.as_deref(), &state.cancelled);
                     if next.is_none() || next == fingerprint {
                         continue;
                     }
@@ -122,7 +130,9 @@ impl Cache {
                             }
                         }
                     }
-                    if let Some(snapshot) = discovery::scan_cancellable(&cwd, &state.cancelled) {
+                    if let Some(snapshot) =
+                        discovery::scan_cancellable(&cwd, root.as_deref(), &state.cancelled)
+                    {
                         let prior = state.latest.lock().unwrap().clone();
                         if !state.cancelled.load(Ordering::Acquire) && *prior != snapshot {
                             *state.latest.lock().unwrap() = Arc::new(snapshot);
@@ -176,7 +186,7 @@ mod tests {
         }
     }
     fn package(cwd: &Path, name: &str, body: &str) -> PathBuf {
-        let path = cwd.join(".agents/skills").join(name);
+        let path = cwd.join("skills").join(name);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(
             path.join("SKILL.md"),
@@ -195,7 +205,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let cache = Cache::default();
+        let cache = Cache::new(Some(work.path().join("skills")));
         let watch = cache.preload(work.path()).unwrap();
         let sibling = cache.preload(work.path()).unwrap();
         assert!(Arc::ptr_eq(&watch, &sibling));
@@ -249,7 +259,7 @@ mod tests {
     #[test]
     fn held_refresh_keeps_latest_available_and_shutdown_cancels_it() {
         let work = tempfile::tempdir().unwrap();
-        let cache = Cache::default();
+        let cache = Cache::new(Some(work.path().join("skills")));
         let watch = cache.preload(work.path()).unwrap();
         let before = watch.latest();
         let (_release, wait) = std::sync::mpsc::channel();

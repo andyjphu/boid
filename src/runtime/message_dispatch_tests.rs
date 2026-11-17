@@ -117,9 +117,7 @@ impl Fixture {
         std::fs::create_dir(work.path().join(".git")).unwrap();
         let local_skills = 256;
         for index in 0..local_skills {
-            let directory = work
-                .path()
-                .join(format!(".agents/skills/dispatch-{index:03}"));
+            let directory = state.path().join(format!("skills/dispatch-{index:03}"));
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join("SKILL.md"), format!(
                 "---\nname: dispatch-{index:03}\ndescription: Synthetic dispatch timing fixture package {index}.\n---\n{}\n",
@@ -285,10 +283,7 @@ async fn held_scan_case() -> bool {
     // Editing triggers candidate background discovery; the trigger message
     // also starts baseline per-message discovery. Send the measured message
     // only after the actual scanner is held, so an earlier request cannot pass.
-    let skill = fixture
-        ._work
-        .path()
-        .join(".agents/skills/dispatch-000/SKILL.md");
+    let skill = fixture._state.path().join("skills/dispatch-000/SKILL.md");
     let mut text = std::fs::read_to_string(&skill).unwrap();
     text.push_str("\nRefresh trigger fixture edit.\n");
     std::fs::write(skill, text).unwrap();

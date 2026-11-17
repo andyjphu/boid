@@ -13,7 +13,8 @@ Python3.10+, Google APIs directly, no MCP server. Run `python3 scripts/install.p
 from the package. On mm-west-2 use `~/.local/bin/python3.12`: the Homebrew Python
 installations failed interpreter/ensurepip checks. The installer uses uv when
 available, otherwise venv/pip. It installs a versioned package under
-`~/.local/share/gmcpNOW/packages`, a skill symlink at `~/.agents/skills/gmcpNOW`,
+`~/.local/share/gmcpNOW/packages`, a skill symlink at `BOID_STATE_DIR/skills/gmcpNOW`
+(default `~/.local/share/boid/skills/gmcpNOW`),
 a venv at `~/.local/share/gmcpNOW/venv`, and wrappers in `~/.local/bin`.
 Wrappers: `gauth`, `glist`, `gread`, `gedit`, plus matching `.py` aliases.
 Boid discovers the skill in `/skills` and at the next operator-message boundary;
