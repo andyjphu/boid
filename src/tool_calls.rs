@@ -112,7 +112,7 @@ pub fn wake_agent_definition() -> Value {
 pub fn peer_trace_definition() -> Value {
     definition(
         "read_peer_trace",
-        "Read a peer's live in-memory visible trace without sending a message, waking it or waiting for a reply. Prefer this for inspecting existing work. to accepts an open session ID or unambiguous name. Ended sessions are archived outside Boid and unavailable to this tool. Null kind reads all visible kinds; kind=assistant and limit=1 reads the latest assistant message, including received streaming text. Null limit defaults to 20 (max 100). Output is chronological with at most 16 KiB of text, favoring the newest tail. Use returned next_before to page older entries. For a truncated entry, set entry_id and offset=0, then use next_offset for more text; before must be null. Other fields may be null. Snapshot freshness ends when the read occurs, not when generation completes. Hidden reasoning and private model context are excluded.",
+        "Read a peer's live visible trace without waking it. to accepts a session ID or unambiguous name. Default: 10 recent mixed entries (limit 1–100), at most 16 KiB of text, oldest first, favoring the newest tail. kind filters entries; assistant with limit=1 reads the latest assistant text, which may still be streaming. Entries retain index, kind, exact text and peer attribution. Peer delivery state is not proof of task completion. Use next_before to page older entries. entry_id accepts an index as a string or a legacy entry UUID; before must be null. For truncated text, read entry_id with offset=0, then follow next_offset (UTF-8 bytes). With entry_id, related=call or result retrieves the matching tool entry by call ID, overriding kind; related_not_found means no counterpart is recorded, not proof of failure. Other fields may be null. Reads are snapshots; hidden reasoning and private model context are excluded. Ended sessions are unavailable.",
         &[
             ("to", json!({"type":"string"})),
             (
@@ -126,6 +126,7 @@ pub fn peer_trace_definition() -> Value {
             ("before", json!({"type":["integer","null"],"minimum":0})),
             ("entry_id", json!({"type":["string","null"]})),
             ("offset", json!({"type":["integer","null"],"minimum":0})),
+            ("related", json!({"type":["string","null"],"enum":["call","result",null]})),
         ],
     )
 }
