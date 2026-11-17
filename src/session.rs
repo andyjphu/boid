@@ -590,6 +590,24 @@ impl Session {
                     &self.profile,
                     |event| {
                         let event_type = event["type"].as_str().unwrap_or("");
+                        if event_type == "boid.request_failure" {
+                            hub.retry_wait(id, event["failure"]["retry_delay_ms"].as_u64());
+                        } else if event_type == "boid.request_start" {
+                            hub.retry_wait(id, None);
+                        }
+                        if event_type == "boid.request_retry" {
+                            // Keep failed display entries as evidence, separated
+                            // from the replacement attempt by a retry notice.
+                            partial.clear();
+                            streams.clear();
+                            argument_entries.clear();
+                            hub.abandon_response_attempt(
+                                id,
+                                event["next_attempt"].as_u64().unwrap_or(0),
+                                event["max_attempts"].as_u64().unwrap_or(0),
+                            );
+                            return;
+                        }
                         #[cfg(test)]
                         if event_type == "response.completed" {
                             client.test_handoff_mark("response_observed");

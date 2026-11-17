@@ -276,6 +276,7 @@ mod tests {
                 context_window: None,
                 communications: vec![],
                 working_since_ms: None,
+                retry_at_ms: None,
                 entries: vec![Hub::make_entry("assistant", "retained result".into())],
                 pending: vec![],
             },
