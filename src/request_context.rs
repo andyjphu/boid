@@ -12,8 +12,11 @@ pub struct Input<'a> {
 }
 impl<'a> Input<'a> {
     pub fn new(history: &'a [Arc<Value>], mut status: Value) -> Self {
-        let working = status.as_object_mut().expect("runtime context object")
-            .remove("working_context").expect("working context");
+        let working = status
+            .as_object_mut()
+            .expect("runtime context object")
+            .remove("working_context")
+            .expect("working context");
         Self {
             history,
             context: json!({"role":"user","content":format!(

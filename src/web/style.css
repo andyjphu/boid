@@ -354,6 +354,7 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 #screens #add-screen { padding-bottom: 4px; } /* The + glyph sits 1px below the digits. */
 #screens a[aria-current="page"] { color: #ddd; background: #292929; }
 #screens a:hover, #screens button:hover, #screens a.drop-target { color: #fff; background: #373737; }
+#screens a.drop-target { color: #101820; background: #8bafd0; box-shadow: inset 0 0 0 2px #d8eaff; }
 #screens a:focus-visible { outline: 1px solid #777; outline-offset: -2px; }
 body.disconnected #screens { opacity: .45; }
 
@@ -363,16 +364,17 @@ body.disconnected #screens { opacity: .45; }
 .pane-tabs .pane-tab { flex: 0 0 auto; max-width: min(42ch, 80vw); position: relative; }
 .pane-tab.inactive { background: #181818; padding: 4px 8px; }
 .pane-tab.inactive .pane-icon, .pane-tab.inactive .pane-close { display: none; }
-.pane-tab.inactive .pane-title { color: #aaa; }
+.pane-tab.inactive:where(:not([data-status="working"])) .pane-title { color: #aaa; }
+.pane-tab[data-team-color] { background-color: var(--team-color); }
 .pane-tab[data-fast] { background-color: #ff453a; }
-.pane-tab[data-fast] .pane-title, .pane-tab[data-fast] .pane-icon svg,
-.pane-tab[data-fast] .pane-close { color: #181818; }
-.pane-tab[data-fast][data-status="working"]:not([data-interrupt-requested]) .pane-title {
+.pane-tab:is([data-fast], [data-team-color]) .pane-title, .pane-tab:is([data-fast], [data-team-color]) .pane-icon svg,
+.pane-tab:is([data-fast], [data-team-color]) .pane-close { color: #181818; }
+.pane-tab:is([data-fast], [data-team-color])[data-status="working"]:not([data-interrupt-requested]) .pane-title {
   color: transparent;
   background-image: linear-gradient(110deg, #181818 35%, #555 50%, #181818 65%);
 }
 @media (prefers-reduced-motion: reduce) {
-  .pane-tab[data-fast][data-status="working"]:not([data-interrupt-requested]) .pane-title { background: none; color: #181818; }
+  .pane-tab:is([data-fast], [data-team-color])[data-status="working"]:not([data-interrupt-requested]) .pane-title { background: none; color: #181818; }
 }
 .subpane-add { display: flex; align-items: center; justify-content: center; line-height: 16px; flex: 0 0 25px; width: 25px; border: 0; border-radius: 0; padding: 0 7px 4px; background: transparent; color: #aaa; }
 .pane-body { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }

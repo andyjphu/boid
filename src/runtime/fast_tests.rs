@@ -91,8 +91,10 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
         seq,
         "idempotent retry emits no new mutation"
     );
-    hub.set_fast(&view.id, false, &hub.profile(&view.id).unwrap()).unwrap();
-    hub.set_fast(&view.id, true, &hub.profile(&view.id).unwrap()).unwrap();
+    hub.set_fast(&view.id, false, &hub.profile(&view.id).unwrap())
+        .unwrap();
+    hub.set_fast(&view.id, true, &hub.profile(&view.id).unwrap())
+        .unwrap();
     let draft_entries = hub.view(&view.id).unwrap().entries;
     assert_eq!(draft_entries.len(), 2);
     // A chooser opened before /fast must preserve that newer preference.
@@ -106,7 +108,10 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
         .unwrap()
         .unwrap();
     assert_eq!(first["service_tier"], "priority");
-    assert!(!first.to_string().contains("Fast mode enabled"), "UI notice must not enter model input");
+    assert!(
+        !first.to_string().contains("Fast mode enabled"),
+        "UI notice must not enter model input"
+    );
     assert_eq!(first["model"], "chosen-model");
     assert_eq!(first["reasoning"]["effort"], before["reasoning_effort"]);
     // The response is held: compare the actual event stream with authoritative
@@ -118,8 +123,15 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
             published.push(event["entry"]["id"].as_str().unwrap().to_owned());
         }
     }
-    let expected: Vec<_> = activated.entries.iter().map(|entry| entry.id.clone()).collect();
-    assert_eq!(published, expected, "live entries must exactly match history order without omissions or duplicates");
+    let expected: Vec<_> = activated
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    assert_eq!(
+        published, expected,
+        "live entries must exactly match history order without omissions or duplicates"
+    );
     assert_eq!(activated.entries[0].id, draft_entries[0].id);
     assert_eq!(activated.entries[1].id, draft_entries[1].id);
     assert_eq!(activated.entries[2].kind, "context");
@@ -170,9 +182,17 @@ async fn fast_setting_is_idempotent_preserves_drafts_and_changes_only_next_reque
         "priority"
     );
     assert_eq!(restored.profile(&view.id).unwrap()["model"], "chosen-model");
-    assert_eq!(restored.view(&view.id).unwrap().entries.iter()
-        .filter(|entry| entry.text.as_str() == "Fast mode enabled").count(), 3,
-        "each enable transition is retained once across retries and restart");
+    assert_eq!(
+        restored
+            .view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| entry.text.as_str() == "Fast mode enabled")
+            .count(),
+        3,
+        "each enable transition is retained once across retries and restart"
+    );
     restored.shutdown().await;
     server.abort();
 }
