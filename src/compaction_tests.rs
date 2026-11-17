@@ -403,12 +403,26 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
                 .any(|v| v["type"] == "function_call_output" && v["call_id"] == id)
         );
     }
-    assert!(!compact["input"].as_array().unwrap().iter().any(|item| item["content"].as_str().is_some_and(|text| text.starts_with("## Status context"))));
+    assert!(!compact["input"].as_array().unwrap().iter().any(|item| {
+        item["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("## Status context"))
+    }));
     release.send((StatusCode::OK, compacted(window()))).unwrap();
     let (path, next, release) = mock.request().await;
     assert_eq!(path, "/");
-    assert_eq!(hub.0.data.lock().unwrap().sessions[&view.id].record.working_context, "Delegate independent work.");
-    assert!(next["input"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("Delegate independent work."));
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&view.id]
+            .record
+            .working_context,
+        "Delegate independent work."
+    );
+    assert!(
+        next["input"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("Delegate independent work.")
+    );
     assert_eq!(
         &next["input"].as_array().unwrap()[..3],
         window().as_array().unwrap()
@@ -551,4 +565,51 @@ async fn live_provider_smoke() {
         "profile":client.config(),"compaction_items":result["output"].as_array().unwrap().len(),
         "compaction_usage":result["usage"],"continuation_usage":usage,"codeword_retained":true})
     );
+}
+
+#[tokio::test]
+async fn clear_first_half_preserves_recent_context_transcript_and_working_note() {
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let view = create(&hub, work.path(), "");
+    let old = "old payload ".repeat(1000);
+    hub.update(&view.id, |record| {
+        record.engine.restore_history(vec![
+            std::sync::Arc::new(json!({"role":"user","content":old})),
+            std::sync::Arc::new(json!({"type":"function_call_output","call_id":"removed","output":"orphan"})),
+            std::sync::Arc::new(json!({"role":"user","content":"recent task"})),
+            std::sync::Arc::new(json!({"type":"function_call","call_id":"retained","name":"read_file","arguments":"{}"})),
+            std::sync::Arc::new(json!({"type":"function_call_output","call_id":"retained","output":"recent evidence"})),
+        ]);
+        record.working_context = "Keep this role".into();
+        Ok(())
+    }).unwrap();
+    hub.message(&view.id, "/clear-first-half".into()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !hub
+            .view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.starts_with("Older context cleared:"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let state = engine(&hub, &view.id);
+    let history = state["history"].as_array().unwrap();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0]["content"], "recent task");
+    assert_eq!(history[1]["call_id"], history[2]["call_id"]);
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&view.id]
+            .record
+            .working_context,
+        "Keep this role"
+    );
+    assert!(mock.requests.try_recv().is_err());
+    hub.shutdown().await;
 }

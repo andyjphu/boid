@@ -2081,7 +2081,8 @@ impl Hub {
                     r.inputs.push_back(Input {
                         id: message_id.clone(),
                         compact: images.is_empty() && text.trim() == "/oai-compact",
-                        clear: images.is_empty() && text.trim() == "/clear",
+                        clear: images.is_empty()
+                            && matches!(text.trim(), "/clear" | "/clear-first-half"),
                         text,
                         images,
                         order: r.order,
@@ -2829,10 +2830,14 @@ impl Hub {
             let cancelled = input.order <= r.stop_through;
             if !cancelled {
                 let selected = if input.clear {
-                    session.clear_context();
-                    r.view.entries.push(Self::make_entry(
-                        "notice", "Context cleared. The transcript is retained; new messages start a fresh conversation.".into(),
-                    ));
+                    let notice = if input.text.trim() == "/clear-first-half" {
+                        let (removed, retained) = session.clear_first_half();
+                        format!("Older context cleared: {removed} items removed, {retained} retained. Transcript and working context preserved.")
+                    } else {
+                        session.clear_context();
+                        "Context cleared. The transcript is retained; new messages start a fresh conversation.".into()
+                    };
+                    r.view.entries.push(Self::make_entry("notice", notice));
                     vec![]
                 } else if input.compact {
                     session.request_compaction(active);
