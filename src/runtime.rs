@@ -32,6 +32,8 @@ mod journal;
 mod message_dispatch_tests;
 mod persistence;
 mod recovery;
+#[cfg(test)]
+mod response_retry_tests;
 mod screen_lifecycle;
 use persistence::{Lane, Operation, Permit, Receipt};
 #[cfg(test)]
@@ -201,6 +203,8 @@ pub struct View {
     pub status: String,
     #[serde(default)]
     pub working_since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
     pub entries: Vec<Entry>,
     pub pending: Vec<String>,
     #[serde(default)]
@@ -723,6 +727,7 @@ impl Hub {
                 record.paused = !listen;
                 record.listen_on_restart = Some(listen);
                 record.view.working_since_ms = None;
+                record.view.retry_at_ms = None;
                 record.view.status = if record.view.archived {
                     "archived"
                 } else if listen {
@@ -921,6 +926,7 @@ impl Hub {
             cwd: source.cwd.clone(),
             status: source.status.clone(),
             working_since_ms: source.working_since_ms,
+            retry_at_ms: source.retry_at_ms,
             entries: entries.to_vec(),
             pending: source.pending.clone(),
             archived: source.archived,
@@ -1394,6 +1400,9 @@ impl Hub {
         } else {
             None
         };
+        if next.view.status != "working" {
+            next.view.retry_at_ms = None;
+        }
         next.engine.skill_snapshot = if next.engine.skills == handle.record.engine.skills {
             handle.record.engine.skill_snapshot.clone()
         } else {
@@ -1484,8 +1493,9 @@ impl Hub {
         }
         if current.view.status != previous.view.status
             || current.view.working_since_ms != previous.view.working_since_ms
+            || current.view.retry_at_ms != previous.view.retry_at_ms
         {
-            events.push(json!({"type":"status","session_id":id,"status":current.view.status,"working_since_ms":current.view.working_since_ms}));
+            events.push(json!({"type":"status","session_id":id,"status":current.view.status,"working_since_ms":current.view.working_since_ms,"retry_at_ms":current.view.retry_at_ms}));
         }
         if current.view.archived
             && current.view.status == "archived"
@@ -1536,6 +1546,7 @@ impl Hub {
                 handle.record.listen_on_restart = Some(false);
                 handle.record.view.status = "error".into();
                 handle.record.view.working_since_ms = None;
+                handle.record.view.retry_at_ms = None;
                 handle.halt.send_replace(());
                 self.0.interrupts.lock().unwrap().remove(id);
                 let entry = Self::make_entry("error", message);
@@ -1546,7 +1557,7 @@ impl Hub {
                 );
                 self.emit(
                 &mut data,
-                json!({"type":"status","session_id":id,"status":"error","working_since_ms":null}),
+                json!({"type":"status","session_id":id,"status":"error","working_since_ms":null,"retry_at_ms":null}),
             );
             }
         })
@@ -1571,6 +1582,59 @@ impl Hub {
             Err(error) => self.fault(session, error),
         }
         entry.id
+    }
+    pub fn abandon_response_attempt(&self, id: &str, next: u64, maximum: u64) {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            let result = self.update_locked(&mut data, id, None, |record| {
+                record.engine.partial_text.clear();
+                record.view.entries.push(Self::make_entry(
+                    "notice",
+                    if next > 0 {
+                        format!("Request interrupted; retrying ({next}/{maximum}).")
+                    } else {
+                        "Response rejected; partial output was not committed.".into()
+                    },
+                ));
+                Ok(())
+            });
+            drop(data);
+            if let Err(error) = result {
+                self.fault(id, error);
+            }
+        });
+    }
+    pub fn retry_wait(&self, id: &str, delay_ms: Option<u64>) {
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            let Some(handle) = data.sessions.get(id) else {
+                return;
+            };
+            let deadline = if handle.record.view.status == "working" {
+                delay_ms.map(|delay| {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64;
+                    now.saturating_add(delay)
+                })
+            } else {
+                None
+            };
+            if handle.record.view.retry_at_ms == deadline {
+                return;
+            }
+            // Publish the deadline once, without reserving or awaiting disk I/O.
+            let result = self.update_locked(&mut data, id, None, |record| {
+                record.view.retry_at_ms = deadline;
+                Ok(())
+            });
+            drop(data);
+            if let Err(error) = result {
+                self.fault(id, error);
+            }
+        });
     }
     pub fn delta(&self, session: &str, entry: &str, text: &str) {
         crate::blocking::run(|| {
@@ -1667,6 +1731,7 @@ impl Hub {
                     handle.storage_error.is_none()
                         && r.view.status == status
                         && r.view.working_since_ms.is_some() == (status == "working")
+                        && (status == "working" || r.view.retry_at_ms.is_none())
                 })
         });
         if unchanged {
@@ -1753,6 +1818,7 @@ impl Hub {
                 cwd: cwd.to_string_lossy().into_owned(),
                 status: "idle".into(),
                 working_since_ms: None,
+                retry_at_ms: None,
                 entries: vec![],
                 pending: vec![],
                 archived: false,
@@ -2313,6 +2379,7 @@ impl Hub {
             self.0.interrupts.lock().unwrap().remove(id);
             h.record.view.status = "ending".into();
             h.record.view.working_since_ms = None;
+            h.record.view.retry_at_ms = None;
             h.record.paused = true;
             h.record.order += 1;
             h.record.stop_through = h.record.order;
@@ -2377,7 +2444,7 @@ impl Hub {
             }
             self.emit(
             &mut data,
-            json!({"type":"status","session_id":id,"status":"archived","working_since_ms":null}),
+            json!({"type":"status","session_id":id,"status":"archived","working_since_ms":null,"retry_at_ms":null}),
         );
             self.emit(
                 &mut data,
@@ -4234,6 +4301,65 @@ mod tests {
         reopened.shutdown().await;
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn retry_deadline_is_published_once_and_cleared_with_status() {
+        let state = tempfile::tempdir().unwrap();
+        let hub = Hub::open(Client::test_client(), state.path().into()).unwrap();
+        let view = hub
+            .create(Create {
+                name: "retry-clock".into(),
+                cwd: String::new(),
+                message: String::new(),
+            })
+            .unwrap();
+        hub.entry(&view.id, "assistant", "retained fixture work");
+        hub.status(&view.id, "working");
+        let (_, mut events) = hub.subscribe();
+        let before = {
+            let data = hub.0.data.lock().unwrap();
+            (data.seq, data.sessions[&view.id].record.journal_seq)
+        };
+        hub.retry_wait(&view.id, None);
+        {
+            let data = hub.0.data.lock().unwrap();
+            assert_eq!(
+                (data.seq, data.sessions[&view.id].record.journal_seq),
+                before,
+                "normal request start must not publish or enqueue a checkpoint"
+            );
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        hub.retry_wait(&view.id, Some(325_000));
+        let deadline = hub.view(&view.id).unwrap().retry_at_ms.unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!((now + 325_000..=after + 325_000).contains(&deadline));
+        let event = events.try_recv().unwrap();
+        assert_eq!(event["type"], "status");
+        assert_eq!(event["retry_at_ms"], deadline);
+        let (snapshot, _) = hub.subscribe();
+        assert_eq!(snapshot["sessions"][0]["retry_at_ms"], deadline);
+        hub.retry_wait(&view.id, None);
+        assert!(events.try_recv().unwrap()["retry_at_ms"].is_null());
+        assert!(hub.view(&view.id).unwrap().retry_at_ms.is_none());
+        hub.retry_wait(&view.id, Some(325_000));
+        let _ = events.try_recv().unwrap();
+        hub.status(&view.id, "stopped");
+        assert!(events.try_recv().unwrap()["retry_at_ms"].is_null());
+        assert!(hub.view(&view.id).unwrap().retry_at_ms.is_none());
+        hub.retry_wait(&view.id, Some(325_000));
+        assert!(
+            events.try_recv().is_err(),
+            "stopped session cannot acquire a wait deadline"
+        );
+        hub.shutdown().await;
     }
 
     #[tokio::test]

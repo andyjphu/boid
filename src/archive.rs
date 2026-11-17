@@ -51,6 +51,7 @@ fn metadata_view(source: &View) -> View {
         context_window: None,
         communications: vec![],
         working_since_ms: None,
+        retry_at_ms: None,
         entries: vec![],
         pending: vec![],
     }
@@ -129,6 +130,7 @@ impl ArchiveProbe {
                 context_window: None,
                 communications: vec![],
                 working_since_ms: None,
+                retry_at_ms: None,
                 entries: vec![],
                 pending: vec![],
             },

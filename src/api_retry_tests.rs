@@ -141,7 +141,14 @@ async fn exhausted_retries_stop_after_four_attempts() {
         .unwrap_err();
     assert_eq!(mock.count.load(Ordering::SeqCst), 4);
     assert!(error.to_string().contains("after 4 HTTP attempts"));
-    assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
     assert!(error.to_string().contains("upstream reset"));
     assert!(!error.to_string().contains("No error detail"));
 }
@@ -167,7 +174,13 @@ async fn permission_quota_and_invalid_requests_fail_without_retry() {
                 .is_err()
         );
         assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-        assert!(events[0]["failure"]["retry_delay_ms"].is_null());
+        assert!(
+            events
+                .iter()
+                .find(|e| e["type"] == "boid.request_failure")
+                .unwrap()["failure"]["retry_delay_ms"]
+                .is_null()
+        );
     }
     let plan = json!({"billing_route":"chatgpt"});
     assert!(
@@ -200,7 +213,7 @@ async fn transient_rate_limit_honors_retry_after_and_long_delays_are_not_shorten
     mock.client().respond(&[], json!([]), |_| {}).await.unwrap();
     assert!(start.elapsed() >= Duration::from_secs(2));
     assert_eq!(mock.count.load(Ordering::SeqCst), 2);
-    let mock = Mock::new(vec![response(503, "unavailable", Some("120"))]).await;
+    let mock = Mock::new(vec![response(503, "unavailable", Some("1801"))]).await;
     let mut events = vec![];
     assert!(
         mock.client()
@@ -209,8 +222,20 @@ async fn transient_rate_limit_honors_retry_after_and_long_delays_are_not_shorten
             .is_err()
     );
     assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-    assert_eq!(events[0]["failure"]["retry_after_ms"], 120_000);
-    assert!(events[0]["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_after_ms"],
+        1_801_000
+    );
+    assert!(
+        events
+            .iter()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 }
 
 #[test]
@@ -224,7 +249,7 @@ fn retry_after_dates_and_total_wait_budget() {
             .unwrap(),
     );
     assert_eq!(retry_after(&headers, now), Some(Duration::from_secs(20)));
-    assert!(retry_delay(2, Duration::from_secs(20), retry_after(&headers, now)).is_none());
+    assert!(retry_delay(2, Duration::from_secs(1790), retry_after(&headers, now)).is_none());
     headers.insert("retry-after", "invalid".parse().unwrap());
     assert!(retry_after(&headers, now).is_none());
     headers.insert("retry-after", "18446744073709551615".parse().unwrap());
@@ -232,23 +257,25 @@ fn retry_after_dates_and_total_wait_budget() {
 }
 
 #[tokio::test]
-async fn partial_streams_and_invalid_responses_are_never_replayed() {
+async fn partial_streams_and_invalid_responses_retry_the_same_request() {
     for body in [
         "data: not-json\n\n",
         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
     ] {
-        let mock = Mock::new(vec![response(200, body, None)]).await;
+        let mock = Mock::new(vec![response(200, body, None), success()]).await;
         let mut events = vec![];
+        mock.client()
+            .respond(&[], json!([]), |e| events.push(e.clone()))
+            .await
+            .unwrap();
+        assert_eq!(mock.count.load(Ordering::SeqCst), 2);
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests[0], requests[1]);
         assert!(
-            mock.client()
-                .respond(&[], json!([]), |e| events.push(e.clone()))
-                .await
-                .is_err()
+            events
+                .iter()
+                .any(|e| e["type"] == "boid.request_retry" && e["next_attempt"] == 2)
         );
-        assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-        let last = events.last().unwrap();
-        assert_eq!(last["failure"]["phase"], "stream");
-        assert!(last["failure"]["retry_delay_ms"].is_null());
     }
 }
 
@@ -286,9 +313,27 @@ async fn connect_failure_is_recorded_and_retried_with_a_bound() {
             .await
             .is_err()
     );
-    assert_eq!(events.len(), 4);
-    assert!(events.iter().all(|e| e["failure"]["phase"] == "connect"));
-    assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "boid.request_failure")
+            .count(),
+        4
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "boid.request_failure")
+            .all(|e| e["failure"]["phase"] == "connect")
+    );
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 }
 
 #[tokio::test]
@@ -308,8 +353,22 @@ async fn broad_http_failures_and_empty_stream_share_one_retry_budget() {
             .is_err()
     );
     assert_eq!(mock.count.load(Ordering::SeqCst), 4);
-    assert_eq!(events.last().unwrap()["failure"]["phase"], "stream");
-    assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
+    assert_eq!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["phase"],
+        "stream"
+    );
+    assert!(
+        events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "boid.request_failure")
+            .unwrap()["failure"]["retry_delay_ms"]
+            .is_null()
+    );
 
     let mock = Mock::new(vec![
         response(
@@ -383,7 +442,7 @@ async fn early_stream_failure_recovers_without_leaking_failed_usage_or_changing_
 }
 
 #[tokio::test]
-async fn output_tools_usage_and_terminal_errors_prevent_stream_replay() {
+async fn partial_local_output_recovers_but_terminal_errors_stop() {
     let overload =
         json!({"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}});
     for (prefix, terminal) in [
@@ -421,17 +480,24 @@ async fn output_tools_usage_and_terminal_errors_prevent_stream_replay() {
             "{}data: {terminal}\n\n",
             prefix.map(|p| format!("data: {p}\n\n")).unwrap_or_default()
         );
-        let mock = Mock::new(vec![response(200, &body, None)]).await;
+        let permanent =
+            terminal_provider_error(&terminal) || terminal["type"] == "response.incomplete";
+        let mut replies = vec![response(200, &body, None)];
+        if !permanent {
+            replies.push(success());
+        }
+        let mock = Mock::new(replies).await;
         let mut events = vec![];
-        assert!(
-            mock.client()
-                .respond(&[], json!([]), |e| events.push(e.clone()))
-                .await
-                .is_err()
+        let result = mock
+            .client()
+            .respond(&[], json!([]), |e| events.push(e.clone()))
+            .await;
+        assert_eq!(result.is_err(), permanent);
+        assert_eq!(
+            mock.count.load(Ordering::SeqCst),
+            if permanent { 1 } else { 2 }
         );
-        assert_eq!(mock.count.load(Ordering::SeqCst), 1);
-        assert!(events.last().unwrap()["failure"]["retry_delay_ms"].is_null());
-        assert!(events.contains(&terminal));
+        assert_eq!(events.contains(&terminal), permanent);
     }
 }
 
@@ -483,6 +549,129 @@ async fn reset_and_timeout_before_headers_recover() {
         assert!(failures[0].retry_delay_ms.is_some());
         assert!(!failures[0].message.contains("unused-test-key"));
     }
+}
+
+fn stream(events: &[Value]) -> String {
+    events.iter().map(|e| format!("data: {e}\n\n")).collect()
+}
+
+#[tokio::test]
+async fn malformed_completion_retries_before_admitting_usage_or_tools() {
+    let bad = stream(&[
+        json!({"type":"response.output_item.done","output_index":1,"item":{"id":"f","type":"function_call","call_id":"c","name":"write_file","arguments":"{}"}}),
+        json!({"type":"response.completed","response":{"output":[],"usage":{"input_tokens":99}}}),
+    ]);
+    let mock = Mock::new(vec![response(200, &bad, None), success()]).await;
+    let mut events = vec![];
+    let output = mock
+        .client()
+        .respond(&[], json!([]), |e| events.push(e.clone()))
+        .await
+        .unwrap();
+    assert!(output.is_empty());
+    assert_eq!(mock.count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "response.completed")
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["response"]["usage"]["input_tokens"] == 99)
+    );
+}
+
+#[tokio::test]
+async fn missing_observed_output_and_conflicting_done_indices_retry() {
+    for bad in [
+        stream(&[
+            json!({"type":"response.output_text.delta","output_index":0,"item_id":"m","delta":"lost"}),
+            json!({"type":"response.completed","response":{"output":[]}}),
+        ]),
+        stream(&[
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"m","type":"message","content":[]}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"id":"m","type":"message","content":[{"type":"output_text","text":"different"}]}}),
+        ]),
+    ] {
+        let mock = Mock::new(vec![response(200, &bad, None), success()]).await;
+        mock.client().respond(&[], json!([]), |_| {}).await.unwrap();
+        assert_eq!(mock.count.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn unknown_hosted_work_and_permanent_errors_never_replay() {
+    for event in [
+        json!({"type":"response.created","response":{"output":[{"type":"computer_call"}]}}),
+        json!({"type":"response.web_search_call.in_progress"}),
+        json!({"type":"error","error":{"code":"content_filter"}}),
+        json!({"type":"error","error":{"code":"max_output_tokens"}}),
+        json!({"type":"error","error":{"type":"authentication_error"}}),
+    ] {
+        let mock = Mock::new(vec![response(200, &stream(&[event]), None)]).await;
+        assert!(mock.client().respond(&[], json!([]), |_| {}).await.is_err());
+        assert_eq!(mock.count.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn nested_long_retry_advice_waits_then_recovers_without_early_request() {
+    let body = stream(&[
+        json!({"type":"error","error":{"code":"server_is_overloaded","headers":{"retry-after":"325","retry-after-ms":"325000"}}}),
+    ]);
+    let mock = Mock::new(vec![response(200, &body, None), success()]).await;
+    let client = mock.client();
+    let (send, mut notices) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        client
+            .respond(&[], json!([]), |e| {
+                if e["type"] == "boid.request_retry" {
+                    send.send(e.clone()).unwrap();
+                }
+            })
+            .await
+    });
+    notices.recv().await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(324)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(mock.count.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    task.await.unwrap().unwrap();
+    assert_eq!(mock.count.load(Ordering::SeqCst), 2);
+    let requests = mock.requests.lock().unwrap();
+    assert_eq!(requests[0], requests[1]);
+    assert!(retry_delay(1, Duration::ZERO, Some(Duration::from_secs(325))).is_some());
+    assert!(retry_delay(3, Duration::from_secs(650), Some(Duration::from_secs(325))).is_some());
+    assert!(retry_delay(1, Duration::ZERO, Some(Duration::from_secs(1801))).is_none());
+}
+
+#[tokio::test]
+async fn malformed_stream_exhaustion_discards_last_partial() {
+    let mock = Mock::new(
+        (0..4)
+            .map(|_| response(200, "data: not-json\n\n", None))
+            .collect(),
+    )
+    .await;
+    let mut events = vec![];
+    assert!(
+        mock.client()
+            .respond(&[], json!([]), |e| events.push(e.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(mock.count.load(Ordering::SeqCst), 4);
+    let resets: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "boid.request_retry")
+        .collect();
+    assert_eq!(resets.len(), 4);
+    assert!(resets.last().unwrap()["next_attempt"].is_null());
 }
 
 #[tokio::test]

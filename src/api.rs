@@ -246,6 +246,9 @@ impl Client {
                 .collect();
             request["tools"] = json!([{"type":"namespace","name":"boid","description":"Local Boid agent tools","tools":functions}]);
         }
+        // Local tools execute only after a validated complete response. An
+        // abandoned generation can therefore be retried without replaying them.
+        let local_tools_only = only_local_tools(&request["tools"]);
         // Encode borrowed input once. Building a Value with json! would copy all
         // historical payloads before serialization; retries can reuse these bytes.
         #[cfg(test)]
@@ -291,6 +294,9 @@ impl Client {
                     })
             };
             http_attempt += 1;
+            if http_attempt > 1 {
+                on_event(&json!({"type":"boid.request_start","http_attempt":http_attempt}));
+            }
             #[cfg(test)]
             self.test_handoff_mark("http_send");
             let attempt = request
@@ -388,33 +394,50 @@ impl Client {
             let mut terminal_event = None;
             let mut output_started = false;
             let mut retryable_stream = false;
+            let mut replay_safe = local_tools_only;
+            let mut local_events_only = true;
+            let mut stream_advised = advised;
             let result: Result<Vec<Value>> = async {
                 let mut stream = response.bytes_stream().eventsource();
                 let mut completed = BTreeMap::new();
+                let mut observed = BTreeMap::<usize, Option<String>>::new();
                 while let Some(event) = stream.next().await {
                     let event = event.map_err(|error| {
                         retryable_stream = true;
                         anyhow::anyhow!("Cannot read API stream: {}", redact(&error.to_string()))
                     })?;
-                    let event: Value = serde_json::from_str(&event.data)
-                        .context("Invalid JSON in the API stream.")?;
+                    let event: Value = serde_json::from_str(&event.data).map_err(|error| {
+                        retryable_stream = true;
+                        anyhow::anyhow!("Invalid JSON in the API stream: {error}")
+                    })?;
                     let kind = event["type"].as_str();
+                    local_events_only &= local_stream_event(&event);
+                    replay_safe &= local_events_only;
+                    if let Some(index) = event["output_index"].as_u64().and_then(|i| usize::try_from(i).ok()) {
+                        let id = event["item"]["id"].as_str().or_else(|| event["item_id"].as_str()).map(str::to_owned);
+                        let previous = observed.entry(index).or_default();
+                        if previous.is_some() && id.is_some() && previous != &id {
+                            retryable_stream = true;
+                            bail!("Stream output identity changed at index {index}.");
+                        }
+                        if id.is_some() { *previous = id; }
+                    }
+                    stream_advised = stream_advised.max(event_retry_after(&event));
                     if matches!(
                         kind,
                         Some("response.failed" | "response.incomplete" | "error")
                     ) {
-                        // A failed event may itself contain output or reported usage.
-                        // Preserve that attempt instead of hiding it behind a retry.
+                        // Generation may have produced text, but none of this
+                        // attempt's local tools have been admitted to execution.
                         output_started |= event
                             .pointer("/response/output")
                             .and_then(Value::as_array)
                             .is_some_and(|items| !items.is_empty());
-                        let has_usage = event
-                            .pointer("/response/usage")
-                            .is_some_and(|v| !v.is_null());
-                        retryable_stream = kind != Some("response.incomplete")
-                            && !has_usage
-                            && retryable_stream_error(&event);
+                        retryable_stream = !terminal_provider_error(&event)
+                            && !(kind == Some("response.incomplete")
+                                && matches!(event.pointer("/response/incomplete_details/reason")
+                                    .and_then(Value::as_str), Some("max_output_tokens" | "content_filter")))
+                            && (replay_safe || retryable_stream_error(&event));
                         self.pause_for_limit(profile, &event).await?;
                         let message = redact(&provider_error(
                             status.as_u16(),
@@ -433,19 +456,37 @@ impl Client {
                         kind,
                         Some("response.created" | "response.in_progress" | "response.queued")
                     );
-                    on_event(&event);
                     match kind {
                         Some("response.output_item.done") => {
+                            retryable_stream = true;
                             let index = event["output_index"]
                                 .as_u64()
-                                .context("Missing completed output index.")?;
-                            let item = event
-                                .get("item")
+                                .and_then(|index| usize::try_from(index).ok())
+                                .context("Missing or invalid completed output index.")?;
+                            let item = event.get("item")
+                                .filter(|item| item.is_object())
                                 .context("Missing completed output item.")?;
-                            completed.insert(index as usize, item.clone());
+                            if completed.get(&index).is_some_and(|previous| previous != item) {
+                                bail!("Conflicting completed output items at index {index}.");
+                            }
+                            completed.insert(index, item.clone());
+                            retryable_stream = false;
+                            on_event(&event);
                         }
-                        Some("response.completed") => return finish(&event, completed),
-                        _ => {}
+                        Some("response.completed") => {
+                            retryable_stream = true;
+                            let output = finish(&event, completed)?;
+                            for (index, id) in &observed {
+                                let item = output.get(*index).context("Completed response omits observed stream output.")?;
+                                if id.as_deref().is_some_and(|id| item["id"].as_str() != Some(id)) {
+                                    bail!("Completed response conflicts with observed stream identity.");
+                                }
+                            }
+                            // Usage and completion belong only to a valid attempt.
+                            on_event(&event);
+                            return Ok(output);
+                        }
+                        _ => on_event(&event),
                     }
                 }
                 retryable_stream = true;
@@ -455,9 +496,10 @@ impl Client {
             match result {
                 Ok(output) => return Ok(output),
                 Err(error) => {
-                    let delay = (retryable_stream && !output_started)
-                        .then(|| retry_delay(http_attempt, waited, advised))
-                        .flatten();
+                    let delay =
+                        (retryable_stream && local_events_only && (!output_started || replay_safe))
+                            .then(|| retry_delay(http_attempt, waited, stream_advised))
+                            .flatten();
                     // Only a final failure is delivered as the terminal provider event.
                     // A successful replacement owns this model turn.
                     if delay.is_none() {
@@ -475,12 +517,18 @@ impl Client {
                         (request_id != "unavailable").then_some(request_id),
                         terminal_event.as_ref().and_then(error_code),
                         &message,
-                        advised,
+                        stream_advised,
                         delay,
                     );
                     failure["failure"]["output_started"] = json!(output_started);
                     on_event(&failure);
+                    // Discard rejected partials even when the retry budget is exhausted.
+                    on_event(&json!({"type":"boid.request_retry",
+                        "next_attempt":delay.map(|_| http_attempt + 1),
+                        "max_attempts":MAX_HTTP_ATTEMPTS,"output_started":output_started}));
                     if let Some(delay) = delay {
+                        // Reset before waiting: Escape during backoff must not
+                        // recover rejected text into model input.
                         waited += delay;
                         tokio::time::sleep(delay).await;
                         continue;
@@ -652,7 +700,7 @@ impl Client {
 }
 
 const MAX_HTTP_ATTEMPTS: u32 = 4;
-const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30 * 60);
 
 fn error_code(value: &Value) -> Option<&str> {
     value
@@ -677,6 +725,8 @@ fn terminal_provider_error(error: &Value) -> bool {
                 | "invalid_grant"
                 | "billing_hard_limit_reached"
                 | "context_length_exceeded"
+                | "content_filter"
+                | "max_output_tokens"
         )
     ) || matches!(
         error_type(error),
@@ -719,6 +769,80 @@ fn retryable_stream_error(error: &Value) -> bool {
             error_type(error),
             Some("server_error" | "service_unavailable_error" | "rate_limit_error")
         ))
+}
+fn only_local_tools(tools: &Value) -> bool {
+    tools.as_array().is_some_and(|tools| {
+        tools.iter().all(|tool| match tool["type"].as_str() {
+            Some("function") => true,
+            Some("namespace") => only_local_tools(&tool["tools"]),
+            _ => false,
+        })
+    })
+}
+fn local_stream_event(event: &Value) -> bool {
+    let local_item = |item: &Value| {
+        matches!(
+            item["type"].as_str(),
+            Some("message" | "reasoning" | "function_call")
+        )
+    };
+    match event["type"].as_str().unwrap_or("") {
+        "response.created"
+        | "response.in_progress"
+        | "response.queued"
+        | "response.completed"
+        | "response.failed"
+        | "response.incomplete"
+        | "error" => event
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+            .is_none_or(|items| items.iter().all(local_item)),
+        "response.output_item.added" | "response.output_item.done" => local_item(&event["item"]),
+        "response.content_part.added"
+        | "response.content_part.done"
+        | "response.output_text.delta"
+        | "response.output_text.done"
+        | "response.output_text.annotation.added"
+        | "response.refusal.delta"
+        | "response.refusal.done"
+        | "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_text.delta"
+        | "response.reasoning_text.done"
+        | "response.function_call_arguments.delta"
+        | "response.function_call_arguments.done" => true,
+        _ => false,
+    }
+}
+// Some stream failures carry HTTP advice inside their error object.
+fn event_retry_after(event: &Value) -> Option<Duration> {
+    let mut delay = None;
+    for path in ["/error/headers", "/response/error/headers", "/headers"] {
+        let Some(headers) = event.pointer(path).and_then(Value::as_object) else {
+            continue;
+        };
+        for (key, value) in headers {
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            let parsed = if key.eq_ignore_ascii_case("retry-after-ms") {
+                value.parse::<u64>().ok().map(Duration::from_millis)
+            } else if key.eq_ignore_ascii_case("retry-after") {
+                let mut headers = reqwest::header::HeaderMap::new();
+                if let Ok(value) = value.parse() {
+                    headers.insert(reqwest::header::RETRY_AFTER, value);
+                }
+                retry_after(&headers, SystemTime::now())
+            } else {
+                None
+            };
+            delay = delay.max(parsed);
+        }
+    }
+    delay
 }
 fn retry_after(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers
@@ -802,17 +926,118 @@ fn provider_error(status: u16, request_id: &str, error: &Value, profile: &Value)
 }
 
 fn finish(event: &Value, completed: BTreeMap<usize, Value>) -> Result<Vec<Value>> {
-    let mut output = event["response"]["output"]
+    let final_output = event["response"]["output"]
         .as_array()
-        .context("Completed response has no output array.")?
-        .clone();
-    for (index, item) in completed {
-        // output_item.done carries the final encrypted reasoning content.
-        *output
-            .get_mut(index)
-            .context("Completed output index is outside the response.")? = item;
-    }
+        .context("Completed response has no output array.")?;
+    let final_ids = output_ids(final_output.iter())?;
+    let stream_ids = output_ids(completed.values())?;
+
+    // A shortened or reordered final array is recoverable only when the stream
+    // independently establishes every position and covers every final item.
+    // Do not infer missing slots from a sparse set of done events.
+    let complete_stream = !completed.is_empty()
+        && completed.keys().copied().eq(0..completed.len())
+        && final_output.iter().all(|item| {
+            item["id"]
+                .as_str()
+                .is_some_and(|id| stream_ids.contains_key(id))
+        });
+    let output = if complete_stream {
+        completed
+            .values()
+            .map(|item| {
+                let id = item["id"]
+                    .as_str()
+                    .context("Completed stream item has no stable ID.")?;
+                match final_ids.get(id) {
+                    Some(index) => merge_completed_item(&final_output[*index], item),
+                    None => Ok(item.clone()),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        let mut output = final_output.clone();
+        for (index, item) in completed {
+            let id = item["id"]
+                .as_str()
+                .context("Completed stream item has no stable ID.")?;
+            if final_ids.get(id) != Some(&index) {
+                bail!("Completed output cannot be reconciled without ambiguous ordering.");
+            }
+            output[index] = merge_completed_item(&output[index], &item)?;
+        }
+        output
+    };
+    validate_completed_calls(&output)?;
     Ok(output)
+}
+
+fn output_ids<'a>(items: impl Iterator<Item = &'a Value>) -> Result<BTreeMap<String, usize>> {
+    let mut ids = BTreeMap::new();
+    for (index, item) in items.enumerate() {
+        if !item.is_object() || item["type"].as_str().is_none_or(str::is_empty) {
+            bail!("Completed output contains an invalid item.");
+        }
+        if let Some(id) = item.get("id") {
+            let id = id
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .context("Completed output contains an invalid item ID.")?;
+            if ids.insert(id.to_owned(), index).is_some() {
+                bail!("Completed output contains duplicate item IDs.");
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn merge_completed_item(final_item: &Value, done: &Value) -> Result<Value> {
+    if final_item["id"] != done["id"] || final_item["type"] != done["type"] {
+        bail!("Completed output item identity conflicts with the stream.");
+    }
+    if done["type"] == "function_call" {
+        for field in ["call_id", "name", "arguments"] {
+            if let (Some(left), Some(right)) = (final_item.get(field), done.get(field)) {
+                if left != right {
+                    bail!("Completed function call conflicts with the stream.");
+                }
+            }
+        }
+    }
+    // Keep final-only fields, but output_item.done owns finalized content,
+    // particularly encrypted reasoning needed for the next model request.
+    let mut merged = final_item
+        .as_object()
+        .context("Invalid final output item.")?
+        .clone();
+    merged.extend(
+        done.as_object()
+            .context("Invalid completed stream item.")?
+            .clone(),
+    );
+    Ok(Value::Object(merged))
+}
+
+fn validate_completed_calls(output: &[Value]) -> Result<()> {
+    let mut calls = std::collections::BTreeSet::new();
+    for item in output.iter().filter(|item| item["type"] == "function_call") {
+        let call_id = item["call_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("Completed function call has no call ID.")?;
+        if !calls.insert(call_id) {
+            bail!("Completed output contains duplicate function call IDs.");
+        }
+        if item["name"].as_str().is_none_or(str::is_empty)
+            || !item["arguments"].is_string()
+            || item
+                .get("status")
+                .is_some_and(|status| status != "completed")
+        {
+            bail!("Completed function call has invalid fields or unfinished status.");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -986,6 +1211,129 @@ mod tests {
         let output = finish(&event, BTreeMap::from([(0, reasoning.clone())])).unwrap();
         assert_eq!(output, vec![reasoning, call]);
         assert!(finish(&json!({"response": {}}), BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn complete_stream_recovers_shortened_and_reordered_final_arrays() {
+        let reasoning = json!({"id":"r", "type":"reasoning", "encrypted_content":"final-opaque"});
+        let call = json!({"id":"f", "type":"function_call", "call_id":"c", "name":"read_file", "arguments":"{}"});
+        let done = BTreeMap::from([(0, reasoning.clone()), (1, call.clone())]);
+        for final_items in [
+            json!([]),
+            json!([call.clone()]),
+            json!([call.clone(), {"id":"r", "type":"reasoning"}]),
+        ] {
+            assert_eq!(
+                finish(&json!({"response":{"output":final_items}}), done.clone()).unwrap(),
+                vec![reasoning.clone(), call.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn aligned_partial_stream_preserves_final_only_items_and_fields() {
+        let message = json!({"id":"m", "type":"message", "content":[]});
+        let final_reasoning =
+            json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"old"});
+        let done_reasoning = json!({"id":"r", "type":"reasoning", "encrypted_content":"final"});
+        let call = json!({"id":"f", "type":"function_call", "call_id":"c", "name":"read_file", "arguments":"{}"});
+        let output = finish(
+            &json!({"response":{"output":[message.clone(), final_reasoning, call.clone()]}}),
+            BTreeMap::from([(1, done_reasoning)]),
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            vec![
+                message,
+                json!({"id":"r", "type":"reasoning", "summary":[], "encrypted_content":"final"}),
+                call
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_conflicting_output_is_not_silently_repaired() {
+        let a = json!({"id":"a", "type":"message", "content":[]});
+        let b = json!({"id":"b", "type":"reasoning", "encrypted_content":"opaque"});
+        for (final_items, done) in [
+            // A missing slot cannot be invented, even if all final IDs are known.
+            (json!([b.clone()]), BTreeMap::from([(1, b.clone())])),
+            (json!([]), BTreeMap::from([(usize::MAX, b.clone())])),
+            // Partial stream evidence cannot reorder a final-only item safely.
+            (
+                json!([b.clone(), a.clone()]),
+                BTreeMap::from([(0, a.clone())]),
+            ),
+            (json!([a.clone()]), BTreeMap::from([(0, b.clone())])),
+            (json!([a.clone(), a.clone()]), BTreeMap::new()),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, a.clone()), (1, a.clone())]),
+            ),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, json!({"id":"a", "type":"reasoning"}))]),
+            ),
+            (
+                json!([a.clone()]),
+                BTreeMap::from([(0, json!({"type":"message"}))]),
+            ),
+            (json!([null]), BTreeMap::new()),
+        ] {
+            assert!(finish(&json!({"response":{"output":final_items}}), done).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_or_duplicate_function_calls_fail_before_session_admission() {
+        let call = json!({"id":"f", "type":"function_call", "call_id":"c", "name":"read_file", "arguments":"{}"});
+        for field in ["call_id", "name", "arguments"] {
+            let mut invalid = call.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(finish(&json!({"response":{"output":[invalid]}}), BTreeMap::new()).is_err());
+        }
+        for (field, value) in [
+            ("arguments", json!({})),
+            ("name", json!("")),
+            ("call_id", json!("")),
+            ("status", json!("in_progress")),
+        ] {
+            let mut invalid = call.clone();
+            invalid[field] = value;
+            assert!(finish(&json!({"response":{"output":[invalid]}}), BTreeMap::new()).is_err());
+        }
+        let mut duplicate = call.clone();
+        duplicate["id"] = json!("other-item");
+        assert!(
+            finish(
+                &json!({"response":{"output":[call.clone(), duplicate]}}),
+                BTreeMap::new()
+            )
+            .is_err()
+        );
+        for field in ["call_id", "name", "arguments"] {
+            let mut conflict = call.clone();
+            conflict[field] = json!("different");
+            assert!(
+                finish(
+                    &json!({"response":{"output":[conflict]}}),
+                    BTreeMap::from([(0, call.clone())])
+                )
+                .is_err()
+            );
+        }
+        // Existing nonstreamed function fixtures need no synthetic item ID.
+        let mut no_item_id = call.clone();
+        no_item_id.as_object_mut().unwrap().remove("id");
+        assert_eq!(
+            finish(
+                &json!({"response":{"output":[no_item_id.clone()]}}),
+                BTreeMap::new()
+            )
+            .unwrap(),
+            vec![no_item_id]
+        );
     }
 
     #[test]

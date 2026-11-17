@@ -2359,13 +2359,17 @@ function updateActivity(ui) {
   const since = ui.view?.working_since_ms;
   const seconds = Number.isFinite(since) ? Math.max(0, Math.floor((Date.now() - since) / 1000)) : null;
   const elapsed = seconds === null ? "" : seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : (ui.questions || []).some(questionWaiting) ? "Waiting for reply" : "Working";
+  const retryAt = ui.view?.status === "working" ? ui.view?.retry_at_ms : null;
+  const remaining = Number.isFinite(retryAt) ? Math.max(0, Math.ceil((retryAt - Date.now()) / 1000)) : null;
+  const retrying = remaining === null ? null : remaining === 0 ? "Retrying…"
+    : `Retrying in ${remaining < 60 ? `${remaining}s` : `${Math.floor(remaining / 60)}m ${remaining % 60}s`}`;
+  ui.activity.firstChild.textContent = ui.interruptRequested ? "Interrupting" : (ui.questions || []).some(questionWaiting) ? "Waiting for reply" : retrying || "Working";
   for (const node of [ui.pane, ui.tab]) {
     if (ui.interruptRequested) node.dataset.interruptRequested = "true";
     else delete node.dataset.interruptRequested;
   }
   const hint = ui.interruptRequested || pickerOpen(ui) ? "" : "Esc to interrupt";
-  ui.activity.lastChild.textContent = elapsed ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
+  ui.activity.lastChild.textContent = elapsed && !retrying ? ` (${elapsed}${hint ? ` · ${hint}` : ""})` : (hint ? ` · ${hint}` : "");
   const state = ui.messageState;
   ui.activity.style.visibility = state?.queue.length ? "visible" : "";
   if (state?.queue.length && !ui.interruptRequested) {
@@ -2375,13 +2379,14 @@ function updateActivity(ui) {
   }
 }
 
-function setStatus(ui, status, workingSince = ui.view?.working_since_ms) {
+function setStatus(ui, status, workingSince = ui.view?.working_since_ms, retryAt = ui.view?.retry_at_ms) {
   if (status !== "working") {
     ui.interruptRequested = false;
   }
   if (ui.view) {
     ui.view.status = status;
     ui.view.working_since_ms = status === "working" ? workingSince : null;
+    ui.view.retry_at_ms = status === "working" ? retryAt : null;
   }
   ui.pane.dataset.status = status || "idle";
   ui.tab.dataset.status = status || "idle";
@@ -3266,7 +3271,7 @@ function startEvents() {
         if (ui.historyLoading) ui.historyUpdates.push(message);
         applyTranscriptEvent(ui, message);
       }
-      if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null);
+      if (message.type === "status") setStatus(ui, message.status, message.working_since_ms ?? null, message.retry_at_ms ?? null);
     } catch (error) { showError(workspaceError, error); }
   };
   return ready;
