@@ -12,13 +12,19 @@ unknown bracketed selections report an error.
 
 ## Adding and configuring skills
 
-Put a package containing `SKILL.md` in `.agents/skills` under the session's
-working directory or its ancestors through the nearest Git root. Outside a
-Git repository, only the working directory's `.agents/skills` is searched.
-Boid also searches the runtime user's `~/.agents/skills`, `/etc/codex/skills`,
-and roots in `BOID_SKILL_PATHS` (the platform path-list separator, colon on
-macOS and Linux). Paths refer to the native server filesystem and account home. Symlinked packages are followed and canonical paths
-supply identities; aliases to the same file are deduplicated.
+Put a complete package containing `SKILL.md` in `BOID_STATE_DIR/skills`
+(default `~/.local/share/boid/skills`). This is Boid's only runtime discovery
+folder, independent of the agent working directory. Compiled-in Humanizer remains
+available. Shared `.agents/skills`, `/etc/codex/skills`, repository skill roots,
+and `BOID_SKILL_PATHS` are not scanned. Other harnesses keep their own installs.
+
+Copy the entire package, including scripts, references, assets and licenses.
+Repository `skills/` contains installable packages; copy the chosen package into
+the runtime folder to enable it. Merely adding it to a checkout does not install
+it. Symlinked packages explicitly placed in the runtime folder are followed;
+canonical paths supply identities and aliases to the same file are deduplicated.
+Moving a package changes its source id; use its unique name or refresh `/skills`
+selections. Earlier snapshots and loaded guidance remain preserved in history.
 
 Use ordinary YAML frontmatter with a name and description. An omitted name
 falls back to the folder name. `agents/openai.yaml` may set
@@ -46,13 +52,18 @@ warning rather than accidentally ignoring disable rules.
 }
 ```
 
-The implicit catalog has an 8000-character entry budget by default, configurable
-up to 40000; fixed instructions and warning notices are additional. Descriptions
-are shortened to 500 characters. Bundled skills are listed first. Omitted entries remain available through the
-picker, explicit selection and `list_skills`, with an omission notice. Discovery
-limits are 8 directory levels, 1024 directories, 256 local packages and 512 KiB
-per skill/config file; limits and parse/read failures produce warnings. Full
-skill text is never silently truncated.
+The implicit catalog targets 8000 characters by default, configurable up to
+40000. Every enabled, implicitly available skill retains a name and description.
+Descriptions share the available space, capped at 500 characters each with an
+80-character minimum allowance. This target can be exceeded to retain every
+entry; it never hides skills. Unique names are usable `read_skill` selectors;
+ambiguous names retain source ids. `list_skills` and the picker retain full
+metadata, including disabled and explicit-only packages. Bundled skills appear
+first. Fixed instructions and notices are additional.
+
+Discovery limits are 8 directory levels, 1024 directories, 256 local packages
+and 512 KiB per skill/config file; limits and parse/read failures produce
+warnings. Full skill text is never silently truncated.
 
 ## Refresh and evidence
 

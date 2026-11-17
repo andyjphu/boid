@@ -347,9 +347,14 @@ async fn failed_and_cancelled_compaction_keep_prior_context_and_queued_input() {
 #[tokio::test]
 async fn selected_skill_compacts_after_complete_tool_batch() {
     let mut mock = Mock::new().await;
-    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
     let work = tempfile::tempdir().unwrap();
-    let skill = work.path().join(".agents/skills/oai-compact");
+    let skill = state.path().join("skills/oai-compact");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
         skill.join("SKILL.md"),

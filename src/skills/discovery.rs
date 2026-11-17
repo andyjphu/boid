@@ -43,37 +43,25 @@ struct Policy {
     products: Vec<String>,
 }
 
-pub fn roots(cwd: &Path) -> Vec<PathBuf> {
-    let repo = cwd
-        .ancestors()
-        .find(|p| p.join(".git").exists())
-        .unwrap_or(cwd);
-    let mut roots = vec![];
-    for directory in cwd.ancestors() {
-        roots.push(directory.join(".agents/skills"));
-        if directory == repo {
-            break;
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join(".agents/skills"));
-    }
-    roots.push(PathBuf::from("/etc/codex/skills"));
-    if let Some(paths) = std::env::var_os("BOID_SKILL_PATHS") {
-        roots.extend(std::env::split_paths(&paths));
-    }
-    roots
+// Runtime packages belong to this Boid instance, never to another harness's
+// global or repository skill roots. None is used by in-memory test hubs.
+pub fn roots(root: Option<&Path>) -> Vec<PathBuf> {
+    root.into_iter().map(Path::to_path_buf).collect()
 }
 
-pub fn scan(cwd: &Path) -> Snapshot {
-    scan_roots(&roots(cwd), &cwd.join(".boid/skills.json"))
+pub fn scan(cwd: &Path, root: Option<&Path>) -> Snapshot {
+    scan_roots(&roots(root), &cwd.join(".boid/skills.json"))
 }
 
-pub fn scan_cancellable(cwd: &Path, cancelled: &AtomicBool) -> Option<Snapshot> {
+pub fn scan_cancellable(
+    cwd: &Path,
+    root: Option<&Path>,
+    cancelled: &AtomicBool,
+) -> Option<Snapshot> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    let snapshot = scan_inner(&roots(cwd), &cwd.join(".boid/skills.json"), cancelled);
+    let snapshot = scan_inner(&roots(root), &cwd.join(".boid/skills.json"), cancelled);
     (!cancelled.load(Ordering::Acquire)).then_some(snapshot)
 }
 
@@ -286,8 +274,12 @@ struct FileStamp {
     #[cfg(unix)]
     unix: (u64, i64, i64, u32),
 }
-pub(super) fn fingerprint(cwd: &Path, cancelled: &AtomicBool) -> Option<Fingerprint> {
-    let roots = roots(cwd);
+pub(super) fn fingerprint(
+    cwd: &Path,
+    root: Option<&Path>,
+    cancelled: &AtomicBool,
+) -> Option<Fingerprint> {
+    let roots = roots(root);
     let mut visited = BTreeSet::new();
     let mut files = BTreeSet::new();
     for root in &roots {
@@ -319,4 +311,42 @@ pub(super) fn fingerprint(cwd: &Path, cancelled: &AtomicBool) -> Option<Fingerpr
         stamps.push((path, stamp));
     }
     Some(Fingerprint(stamps))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_boid_root_is_discovered_and_supporting_files_stay_with_package() {
+        let work = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("skills");
+        for (directory, name) in [
+            (work.path().join(".agents/skills/aws"), "inherited-aws"),
+            (work.path().join(".boid/skills/other"), "cwd-skill"),
+            (root.join("gmcpNOW"), "gmcpNOW"),
+        ] {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("SKILL.md"), format!("---\nname: {name}\ndescription: Read existing documents\n---\nRead scripts/README.md.\n")).unwrap();
+        }
+        let scripts = root.join("gmcpNOW/scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(
+            scripts.join("README.md"),
+            "Complete supporting instructions",
+        )
+        .unwrap();
+        let snapshot = scan(work.path(), Some(&root));
+        let names: Vec<_> = snapshot.skills.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"gmcpNOW") && names.contains(&"humanizer"));
+        assert!(!names.contains(&"inherited-aws") && !names.contains(&"cwd-skill"));
+        let loaded = super::super::read(&snapshot.skills, r#"{"name":"gmcpNOW"}"#);
+        let directory = PathBuf::from(loaded["directory"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(directory.join("scripts/README.md")).unwrap(),
+            "Complete supporting instructions"
+        );
+        assert_eq!(scan(work.path(), None).skills.len(), 1);
+    }
 }

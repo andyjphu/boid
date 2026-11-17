@@ -14,7 +14,7 @@ def run():
     source = Path(__file__).resolve().parents[1]
     home = Path.home()
     base = home / ".local/share/gmcpNOW"
-    target = home / ".agents/skills/gmcpNOW"
+    target = Path(os.environ.get("BOID_STATE_DIR", home / ".local/share/boid")) / "skills/gmcpNOW"
     bin_dir = home / ".local/bin"
     names = [name + suffix for name in ("gauth", "glist", "gread", "gedit") for suffix in ("", ".py")]
     marker = "# Installed by gmcpNOW"
