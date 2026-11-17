@@ -175,8 +175,18 @@ async fn clear_waits_for_tools_preserves_transcript_and_starts_fresh_after_resta
     assert!(request["input"].to_string().contains("Fresh task marker"));
     assert!(!request["input"].to_string().contains("Old task marker"));
     assert!(!request["input"].to_string().contains("/clear"));
-    assert!(request["instructions"].as_str().unwrap().contains(&view.id));
-    assert!(request["instructions"].as_str().unwrap().contains("canary"));
+    assert!(
+        request["input"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains(&view.id)
+    );
+    assert!(
+        request["input"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("canary")
+    );
     assert_eq!(request["tools"], cleared["tools"]);
     release.send((StatusCode::OK, json!([]))).unwrap();
     idle(&hub, &view.id, "idle").await;
@@ -376,6 +386,7 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
         .send((
             StatusCode::OK,
             json!([
+                {"type":"function_call","call_id":"note","name":"set_working_context","arguments":"{\"text\":\"Delegate independent work.\"}"},
                 {"type":"function_call","call_id":"compact","name":"oai_compact","arguments":"{}"},
                 {"type":"function_call","call_id":"agents","name":"list_agents","arguments":"{}"}
             ]),
@@ -383,7 +394,7 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
         .unwrap();
     let (path, compact, release) = mock.request().await;
     assert_eq!(path, "/compact");
-    for id in ["compact", "agents"] {
+    for id in ["note", "compact", "agents"] {
         assert!(
             compact["input"]
                 .as_array()
@@ -392,15 +403,24 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
                 .any(|v| v["type"] == "function_call_output" && v["call_id"] == id)
         );
     }
+    assert!(!compact["input"].as_array().unwrap().iter().any(|item| item["content"].as_str().is_some_and(|text| text.starts_with("## Status context"))));
     release.send((StatusCode::OK, compacted(window()))).unwrap();
     let (path, next, release) = mock.request().await;
     assert_eq!(path, "/");
+    assert_eq!(hub.0.data.lock().unwrap().sessions[&view.id].record.working_context, "Delegate independent work.");
+    assert!(next["input"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("Delegate independent work."));
     assert_eq!(
         &next["input"].as_array().unwrap()[..3],
         window().as_array().unwrap()
     );
     assert!(
-        next["input"].as_array().unwrap().last().unwrap()["content"]
+        next["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .nth(1)
+            .unwrap()["content"]
             .as_str()
             .unwrap()
             .contains("Context compacted")

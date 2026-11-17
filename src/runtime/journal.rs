@@ -111,7 +111,7 @@ impl Event {
             } => {
                 let mut next: Record = serde_json::from_value(metadata)?;
                 if next.view.id != record.view.id
-                    || !matches!(next.version, 7 | 8)
+                    || !matches!(next.version, 7 | 8 | 9)
                     || next.journal_seq != self.seq
                 {
                     bail!("Checkpoint identity/version/sequence differs; original retained");
@@ -281,6 +281,8 @@ mod tests {
                 pending: vec![],
             },
             engine: Session::default(),
+            working_context: String::new(),
+            working_context_editor: None,
             usage: Default::default(),
             inputs: VecDeque::new(),
             inbox: VecDeque::new(),
@@ -306,6 +308,12 @@ mod tests {
             .entries
             .push(Hub::make_entry("tool", "y".repeat(1024 * 1024)));
         let mut next = before.clone();
+        next.version = 9;
+        next.working_context = "Retain this peer reminder through memory replacement.".into();
+        next.working_context_editor = Some(super::super::WorkingContextEditor {
+            id: "editor".into(),
+            name: "captain".into(),
+        });
         let mut history = next.engine.take_history();
         history.push(Arc::new(
             json!({"type":"function_call_output","call_id":"tool-1","output":"new result"}),

@@ -160,7 +160,7 @@ impl Hub {
             store.backup_before_diagnostics_suspension(id)?;
             record.version = 6;
         }
-        if !matches!(record.version, 1..=8) {
+        if !matches!(record.version, 1..=9) {
             bail!(
                 "Unsupported session version {}; original retained",
                 record.version
@@ -195,7 +195,7 @@ impl Hub {
             if probe.view.id != id {
                 bail!("Session identity differs from filename; original retained");
             }
-            if !matches!(probe.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
+            if !matches!(probe.version, 1..=9) {
                 bail!(
                     "Unsupported session version {}; original retained",
                     probe.version

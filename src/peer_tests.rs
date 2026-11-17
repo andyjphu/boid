@@ -845,7 +845,7 @@ async fn browser_fixture() {
     let router = Router::new().route(
         "/",
         post(|Json(input): Json<Value>| async move {
-            let last = input["input"].as_array().unwrap().last().unwrap();
+            let last = input["input"].as_array().unwrap().iter().rev().nth(1).unwrap();
             let content = last["content"].as_str().unwrap_or("");
             if content == "Hold" {
                 tokio::time::sleep(Duration::from_secs(120)).await;

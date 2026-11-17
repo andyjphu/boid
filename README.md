@@ -7,6 +7,8 @@ The goal is useful work, done quickly and with good judgment. Boid should
 improve with experience and make effective use of agents working together.
 [Performance profiling and the speed mandate](docs/performance.md) guide work
 on harness overhead.
+[Context blocks](docs/context-blocks.md) separate stable guidance, current peer
+status, and each agent's editable working note.
 
 [Usage diagnostics](docs/diagnostics.md) are sunset and hidden. Their accounting
 is not currently reliable; the existing components remain for a later revisit,

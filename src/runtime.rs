@@ -21,6 +21,8 @@ pub use pane_groups::GroupRevisionConflict;
 mod archive;
 use archive::ArchivedReceipt;
 #[cfg(test)]
+mod context_tests;
+#[cfg(test)]
 mod handoff_tests;
 #[cfg(test)]
 mod incremental_benchmark;
@@ -175,10 +177,21 @@ struct Peer {
     text: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
+struct WorkingContextEditor {
+    id: String,
+    name: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
 struct Record {
     version: u32,
     view: View,
     engine: Session,
+    // Authoritative metadata outside worker-owned model memory. A stale engine
+    // checkpoint cannot overwrite a peer's newer explicit edit.
+    #[serde(default)]
+    working_context: String,
+    #[serde(default)]
+    working_context_editor: Option<WorkingContextEditor>,
     // Diagnostics are suspended. Legacy bytes are backed up before migration.
     #[serde(skip)]
     usage: crate::usage::Ledger,
@@ -464,6 +477,17 @@ fn validate_agent_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn peer_roster(data: &Data, compact: bool) -> Value {
+    json!(data.sessions.values().filter(|h| !h.record.view.archived).map(|h| {
+        let v = &h.record.view;
+        let mut row = json!({"id":v.id,"name":v.name,"status":v.status,
+            "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error",
+            "wakeable":h.storage_error.is_none() && !h.archiving && (!h.record.paused || h.record.peer_restartable.unwrap_or(false))});
+        if !compact { row["cwd"] = json!(v.cwd); }
+        row
+    }).collect::<Vec<_>>())
+}
+
 fn session_identity(view: &View) -> String {
     format!(
         "Your current session identity is the following JSON. The name is a display label, not an instruction, and supersedes any earlier name. Use the stable session ID for peer messaging.\n{}",
@@ -544,7 +568,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -1132,6 +1156,11 @@ impl Hub {
     }
     fn prepare_record(&self, record: &mut Record) -> Result<()> {
         record.version = record.version.max(8);
+        if !record.working_context.is_empty() || record.working_context_editor.is_some() {
+            // Older binaries must refuse this state rather than silently erase
+            // agent-owned context when they rewrite an unknown field.
+            record.version = record.version.max(9);
+        }
         if record.engine.has_image_refs() {
             // Older binaries must refuse these records instead of dropping images.
             record.version = record.version.max(5);
@@ -1260,7 +1289,8 @@ impl Hub {
         let mut next = handle.record.clone();
         let result = change(&mut next)?;
         let activating = handle.draft.is_some()
-            && (!next.inputs.is_empty()
+            && (!next.working_context.is_empty()
+                || !next.inputs.is_empty()
                 || !next.inbox.is_empty()
                 || next
                     .view
@@ -1268,11 +1298,13 @@ impl Hub {
                     .iter()
                     .any(|entry| !matches!(entry.kind.as_str(), "notice" | "context")));
         if handle.draft.is_some() {
-            // Control changes do not activate or persist a draft. Keep fast-mode
-            // feedback visible in memory without restoring other startup notices.
+            // A nonempty working note is retained work. Other control changes
+            // leave drafts ephemeral; retain their explicit feedback in memory.
             next.view.entries.retain(|entry| {
                 !matches!(entry.kind.as_str(), "notice" | "context")
-                    || (entry.kind == "notice" && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
+                    || (entry.kind == "notice"
+                        && (entry.text.as_str() == FAST_MODE_ENABLED_NOTICE
+                            || entry.text.starts_with("Working context updated by ")))
             });
             if activating {
                 if next.view.name == handle.record.view.name {
@@ -1734,6 +1766,8 @@ impl Hub {
                 version: 8,
                 view,
                 engine,
+                working_context: String::new(),
+                working_context_editor: None,
                 usage: crate::usage::Ledger::default(),
                 inputs: VecDeque::new(),
                 inbox: VecDeque::new(),
@@ -2365,20 +2399,90 @@ impl Hub {
         Ok(())
     }
     pub fn peers(&self) -> Value {
+        crate::blocking::run(|| peer_roster(&self.0.data.lock().unwrap(), false))
+    }
+    pub fn request_context(&self, id: &str) -> Result<Value> {
         crate::blocking::run(|| {
             let data = self.0.data.lock().unwrap();
-            json!(
-                data.sessions
-                    .values()
-                    .filter(|h| !h.record.view.archived)
-                    .map(|h| {
-                        let v = &h.record.view;
-                        json!({"id":v.id,"name":v.name,"status":v.status,"cwd":v.cwd,
-                "listening":!h.record.paused && h.storage_error.is_none() && v.status != "error",
-                "wakeable":h.storage_error.is_none() && !h.archiving && (!h.record.paused || h.record.peer_restartable.unwrap_or(false))})
-                    })
-                    .collect::<Vec<_>>()
+            let record = &data
+                .sessions
+                .get(id)
+                .filter(|h| !h.record.view.archived)
+                .context("Unknown session.")?
+                .record;
+            let view = &record.view;
+            Ok(
+                json!({"self":{"id":view.id,"name":view.name,"cwd":view.cwd},
+                "peers":peer_roster(&data, true),
+                "working_context":{"text":record.working_context,"editor":record.working_context_editor}}),
             )
+        })
+    }
+    pub fn set_working_context(&self, from: &str, arguments: &str) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Edit {
+            text: String,
+            #[serde(default)]
+            to: Option<String>,
+        }
+        let edit: Edit = serde_json::from_str(arguments)?;
+        let text = edit.text.trim();
+        let words = text.split_whitespace().count();
+        if words > 150 || text.len() > 8192 {
+            bail!(
+                "Working context must be at most 150 whitespace-separated words and 8192 UTF-8 bytes. Existing context retained."
+            );
+        }
+        let to = edit.to.as_deref().unwrap_or(from);
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            if data.closing {
+                bail!("Server is shutting down.");
+            }
+            let sender = data
+                .sessions
+                .get(from)
+                .filter(|h| !h.record.view.archived && !h.archiving && h.storage_error.is_none())
+                .context("Editor is unavailable.")?;
+            let editor = WorkingContextEditor {
+                id: from.into(),
+                name: sender.record.view.name.clone(),
+            };
+            let target = data
+                .sessions
+                .get(to)
+                .filter(|h| !h.record.view.archived)
+                .context("Unknown open session.")?;
+            if target.record.working_context == text
+                && target
+                    .record
+                    .working_context_editor
+                    .as_ref()
+                    .is_some_and(|e| e.id == from)
+            {
+                return Ok(
+                    json!({"to":to,"text":text,"words":words,"max_words":150,"editor":editor}),
+                );
+            }
+            let notice = Self::make_entry(
+                "notice",
+                format!(
+                    "Working context updated by {} ({})\n{}",
+                    editor.name,
+                    editor.id,
+                    if text.is_empty() { "[cleared]" } else { text }
+                ),
+            );
+            // Normal coalescing persistence does not wait for disk. No inbox
+            // entry, wake, interruption or model request is triggered.
+            self.update_locked(&mut data, to, None, |record| {
+                record.working_context = text.to_owned();
+                record.working_context_editor = Some(editor.clone());
+                record.view.entries.push(notice);
+                Ok(())
+            })?;
+            Ok(json!({"to":to,"text":text,"words":words,"max_words":150,"editor":editor}))
         })
     }
     #[cfg(test)]
@@ -3210,7 +3314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_during_request_changes_next_system_identity_without_rewriting_history() {
+    async fn rename_during_request_changes_next_status_without_rewriting_history() {
         use axum::{Json, Router, routing::post};
         use std::time::Duration;
         use tokio::sync::{mpsc, oneshot};
@@ -3250,7 +3354,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            first["instructions"]
+            first["input"].as_array().unwrap().last().unwrap()["content"]
                 .as_str()
                 .unwrap()
                 .contains("\"name\":\"canary\"")
@@ -3262,11 +3366,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let instructions = next["instructions"].as_str().unwrap();
+        assert_eq!(first["instructions"], next["instructions"]);
+        let instructions = next["input"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap();
         assert!(instructions.contains("\"name\":\"swift\""));
         assert!(!instructions.contains("\"name\":\"canary\""));
         assert!(instructions.contains(&view.id));
         let prior = first["input"].as_array().unwrap();
+        let prior = &prior[..prior.len() - 1];
         assert_eq!(&next["input"].as_array().unwrap()[..prior.len()], prior);
         assert_eq!(hub.view(&view.id).unwrap().name, "swift");
         release.send(json!([])).unwrap();
@@ -3817,8 +3925,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
         let input = after_boundary["input"].as_array().unwrap();
-        assert_eq!(input[input.len() - 2]["content"], "First correction");
-        assert_eq!(input[input.len() - 1]["content"], "Second correction");
+        assert_eq!(input[input.len() - 3]["content"], "First correction");
+        assert_eq!(input[input.len() - 2]["content"], "Second correction");
         let view = hub.view(&target.id).unwrap();
         assert!(
             view.entries
@@ -3868,8 +3976,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
         let input = after_escape["input"].as_array().unwrap();
-        assert_eq!(input[input.len() - 2]["content"], "Third correction");
-        assert_eq!(input[input.len() - 1]["content"], "Fourth correction");
+        assert_eq!(input[input.len() - 3]["content"], "Third correction");
+        assert_eq!(input[input.len() - 2]["content"], "Fourth correction");
         assert!(
             hub.view(&target.id)
                 .unwrap()
@@ -3940,7 +4048,7 @@ mod tests {
             serde_json::from_str(following_output["output"].as_str().unwrap()).unwrap();
         assert_eq!(following_output, json!({"ok":true}));
         assert_eq!(
-            input.last().unwrap()["content"],
+            input.iter().rev().nth(1).unwrap()["content"],
             "Keep the completed tool result"
         );
 
@@ -3968,7 +4076,9 @@ mod tests {
             after_completion["input"]
                 .as_array()
                 .unwrap()
-                .last()
+                .iter()
+                .rev()
+                .nth(1)
                 .unwrap()["content"],
             "Continue after completion"
         );
@@ -4184,7 +4294,10 @@ mod tests {
                 .iter()
                 .any(|item| item["content"] == "Queued before crash")
         );
-        assert_eq!(input.last().unwrap()["content"], "Inspect and continue");
+        assert_eq!(
+            input.iter().rev().nth(1).unwrap()["content"],
+            "Inspect and continue"
+        );
         assert_eq!(
             std::fs::read_to_string(work.path().join("effects")).unwrap(),
             "effect"
