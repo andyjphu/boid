@@ -12,6 +12,8 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 use uuid::Uuid;
 
+const FAST_MODE_ENABLED_NOTICE: &str = "Fast mode enabled";
+
 #[path = "pane_groups.rs"]
 mod pane_groups;
 pub use pane_groups::GroupRevisionConflict;
@@ -1222,16 +1224,23 @@ impl Hub {
                     .iter()
                     .any(|entry| !matches!(entry.kind.as_str(), "notice" | "context")));
         if handle.draft.is_some() {
-            // Naming, model choices and control changes configure the draft but
-            // do not create conversation history. Emit their metadata normally.
-            next.view
-                .entries
-                .retain(|entry| !matches!(entry.kind.as_str(), "notice" | "context"));
+            // Control changes do not activate or persist a draft. Keep fast-mode
+            // feedback visible in memory without restoring other startup notices.
+            next.view.entries.retain(|entry| {
+                !matches!(entry.kind.as_str(), "notice" | "context")
+                    || (entry.kind == "notice"
+                        && entry.text.as_str() == FAST_MODE_ENABLED_NOTICE)
+            });
             if activating {
                 if next.view.name == handle.record.view.name {
                     next.view.name = activation_name;
                 }
-                next.view.entries.insert(0, Self::initial_context(&next));
+                // Draft feedback has already been published. Keep that prefix
+                // stable so append-only events include context before new input.
+                next.view.entries.insert(
+                    handle.record.view.entries.len(),
+                    Self::initial_context(&next),
+                );
             }
         }
         // Engine profile describes the last/current request. Pane assignment and
@@ -1739,6 +1748,13 @@ impl Hub {
                 // The worker's profile belongs to its current request. Only the
                 // authoritative next-request preference changes here.
                 record.view.profile = profile.clone();
+                if enabled {
+                    // Transcript feedback only; never add this to model history.
+                    record.view.entries.push(Self::make_entry(
+                        "notice",
+                        FAST_MODE_ENABLED_NOTICE.into(),
+                    ));
+                }
                 Ok(())
             })?;
             Ok(profile)
