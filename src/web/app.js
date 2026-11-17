@@ -348,7 +348,7 @@ const inputTiming = (() => {
       // Browser event timestamps share performance.now's time origin on current
       // browsers. Treat an unexpected origin as unavailable, never as a delay.
       const queue = at - event.timeStamp;
-      return { at, queueMs: Number.isFinite(queue) && queue >= 0 && queue < 60_000 ? queue : null };
+      return { at, queueMs: event.timeStamp > 0 && Number.isFinite(queue) && queue >= 0 ? queue : null };
     },
     begin(sessionId, startedAt, keyboard = null) {
       if (!enabled || startedAt == null) return null;
@@ -2281,7 +2281,8 @@ function addSession(view) {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       enterTiming = inputTiming.keyboard(event);
-      ui.composer.requestSubmit();
+      try { ui.composer.requestSubmit(); }
+      finally { enterTiming = null; }
     }
   });
   ui.composer.addEventListener("submit", async event => {
