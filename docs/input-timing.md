@@ -15,7 +15,7 @@ The browser keeps at most 64 samples. Compare a browser sample's `messageId` and
 
 The browser reports Enter-key handler to dispatch, acknowledgment, server-delivered entry and DOM completion, plus a separate browser event-queue estimate where the event timestamp is compatible. Programmatic submissions have no Enter timestamp. `submitTo*` values begin in the submit handler. The user entry may arrive by SSE before the HTTP acknowledgment; only actual server admission counts as acceptance. DOM completion is not physical pixel display. Note document visibility and whether the entry was in the viewport when comparing cases.
 
-The server records accepted-to-worker-consumed and accepted-to-first-HTTP-send durations for traced input. A user turn can involve several inputs and tool/model cycles, so compare records by message ID and do not infer one input equals one provider request. The first send is measured at the client dispatch boundary; it does not include provider reasoning. Existing HTTP `Server-Timing` headers separately report lock wait, mutation, admission, and handler time for each message POST. These intervals overlap and must not be summed.
+The server records accepted-to-worker-consumed and accepted-to-first-HTTP-send-attempt durations for traced input. A user turn can involve several inputs and tool/model cycles, so compare records by message ID and do not infer one input equals one provider request. The send-attempt mark is made just before the client calls `send()`; it does not prove that bytes left the host or that the provider received them. Existing HTTP `Server-Timing` headers separately report lock wait, mutation, admission, and handler time for each message POST. These intervals overlap and must not be summed.
 
 ## Stop immediately
 
