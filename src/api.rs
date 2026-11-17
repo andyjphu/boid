@@ -279,7 +279,9 @@ impl Client {
                     })
             };
             http_attempt += 1;
-            on_event(&json!({"type":"boid.request_start","http_attempt":http_attempt}));
+            if http_attempt > 1 {
+                on_event(&json!({"type":"boid.request_start","http_attempt":http_attempt}));
+            }
             #[cfg(test)]
             self.test_handoff_mark("http_send");
             let sent = request
