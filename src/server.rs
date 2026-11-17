@@ -460,6 +460,13 @@ async fn message(
     // Axum authentication/body extraction has already completed. This measures
     // handler entry to response construction, not socket flush or client receipt.
     let started = Instant::now();
+    if input.images.is_empty() && input.text.trim() == "/eject-context" {
+        return match tokio::task::spawn_blocking(move || app.hub.eject_context(&id)).await {
+            Ok(Ok(exported)) => Json(exported).into_response(),
+            Ok(Err(error)) => invalid(error).into_response(),
+            Err(error) => invalid(error).into_response(),
+        };
+    }
     let (result, timings) = if input.images.is_empty() {
         app.hub.message_timed(&id, input.text)
     } else {

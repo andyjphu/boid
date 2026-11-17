@@ -24,7 +24,7 @@ suggest that it disappears after a turn or restart.
 - **Working context:** an agent-authored note for the current role, reminders,
   priorities or other useful information. `set_working_context({"text":"...","to":null})`
   replaces the caller's note; `to` can instead name an open peer's stable session
-  ID. At most 150 whitespace-separated words and 8192 UTF-8 bytes; empty text
+  ID. At most 1024 Unicode characters, including spaces and line breaks; empty text
   clears it. Each edit records the editor's stable ID and name. Changes
   apply to the next model request, persist through compaction, `/clear` and restart,
   and appear in the ordinary tool-call/result record. Earlier receipts retain the
@@ -75,3 +75,18 @@ and tool execution. The ordinary crash-loss window still applies.
 Records with working-context edits use format version 9. Older binaries reject
 these records rather than silently discard the note. Rollback must retain the
 upgraded state and restore the matching pre-upgrade state and binary together.
+
+## Exporting context
+
+`/eject-context` saves a private `ejected-context-<unique-id>.json` under
+`$BOID_STATE_DIR/context-exports/<session-id>/`, normally
+`~/.local/share/boid/context-exports/<session-id>/`. It makes no provider call
+and does not clear, compact, wake or interrupt the agent. The `eject-context`
+skill uses the equivalent `eject_context` tool.
+
+The JSON contains the latest committed model history, instructions, tool
+schemas, model name, and current status/working context. Images are embedded.
+In-flight partial output and unapplied queued messages are excluded. This is
+a current context snapshot, not a historical API request or full transcript.
+Each export gets a new filename. Serialization and disk writes run outside
+the global session lock; normal turns do not perform export work.
