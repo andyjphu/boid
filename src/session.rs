@@ -447,11 +447,12 @@ impl Session {
 
     pub(crate) fn stable_instructions(&self) -> String {
         format!(
-            "## Stable context\n{}\n\n{}\n\n{}\n\n{}",
+            "## Stable context\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
             self.instructions,
             tool_calls::PEER_TRACE_GUIDANCE,
             crate::request_context::GUIDANCE,
-            parallel::GUIDANCE
+            parallel::GUIDANCE,
+            include_str!("TEAMWORK.md")
         )
     }
 
