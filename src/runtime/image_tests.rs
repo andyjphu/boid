@@ -188,7 +188,13 @@ async fn image_requests_reach_api_and_subscription_and_survive_compaction() {
             .await
             .unwrap()
             .unwrap();
-        let content = &first["input"].as_array().unwrap().last().unwrap()["content"];
+        let content = &first["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .nth(1)
+            .unwrap()["content"];
         assert_eq!(content[0]["text"], "[Image #1]");
         assert_eq!(content[2]["text"], "[Image #2]");
         for index in [1, 3] {
@@ -234,7 +240,13 @@ async fn image_requests_reach_api_and_subscription_and_survive_compaction() {
             .await
             .unwrap()
             .unwrap();
-        let content = &second["input"].as_array().unwrap().last().unwrap()["content"];
+        let content = &second["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .nth(1)
+            .unwrap()["content"];
         assert_eq!(content[0]["text"], "/clear");
         assert_eq!(content[2]["type"], "input_image");
         assert!(second["input"].as_array().unwrap().len() > 2);

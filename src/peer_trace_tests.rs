@@ -327,7 +327,7 @@ async fn agent_tool_reads_a_peer_while_its_response_is_still_streaming() {
         .unwrap()
         .unwrap();
     assert!(
-        request["instructions"]
+        request["input"].as_array().unwrap().last().unwrap()["content"]
             .as_str()
             .unwrap()
             .contains(&reader.id)
@@ -369,7 +369,7 @@ async fn agent_tool_reads_a_peer_while_its_response_is_still_streaming() {
         .unwrap()
         .unwrap();
     assert!(
-        request["instructions"]
+        request["input"].as_array().unwrap().last().unwrap()["content"]
             .as_str()
             .unwrap()
             .contains(&reader.id),

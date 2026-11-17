@@ -83,12 +83,12 @@ impl Fixture {
                 let read = Instant::now();
                 let body: Value = serde_json::from_slice(&bytes).unwrap();
                 let parsed = Instant::now();
-                let identity = body["instructions"].as_str().unwrap().lines()
-                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .find(|value| value["id"].is_string() && value["cwd"].is_string()).unwrap();
+                let context = body["input"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
+                let status: Value = serde_json::from_str(context.lines().nth(1).unwrap()).unwrap();
+                let identity = &status["self"];
                 let id = identity["id"].as_str().unwrap();
                 if body["input"].as_array().unwrap().iter().rev()
-                    .find(|item| item["role"] == "user")
+                    .find(|item| item["role"] == "user" && !item["content"].as_str().is_some_and(|text| text.starts_with("## Status context")))
                     .is_some_and(|item| item["content"] == "dispatch fixture held proof") {
                     probe.mark(id, "held_proof_http_arrival", arrived);
                 }

@@ -280,6 +280,7 @@ impl Session {
             for definition in [
                 tool_calls::peer_trace_definition(),
                 tool_calls::wake_agent_definition(),
+                tool_calls::working_context_definition(),
             ] {
                 if let Some(tool) = tools
                     .iter_mut()
@@ -417,6 +418,15 @@ impl Session {
             ));
         }
         entries
+    }
+
+    fn stable_instructions(&self) -> String {
+        format!(
+            "## Stable context\n{}\n\n{}\n\n{}",
+            self.instructions,
+            tool_calls::PEER_TRACE_GUIDANCE,
+            crate::request_context::GUIDANCE
+        )
     }
 
     pub fn user(&mut self, text: String) {
@@ -575,12 +585,9 @@ impl Session {
             vec![("notice".into(), "Compacting context…".into())],
         )?;
         hub.archive_context(id, self.model_requests)?;
-        let instructions = format!(
-            "{}\n\n{}\n\n{}",
-            self.instructions,
-            hub.identity(id)?,
-            tool_calls::PEER_TRACE_GUIDANCE
-        );
+        // Compact conversation history, not a temporary roster snapshot. The
+        // working note is stored separately and survives the returned window.
+        let instructions = format!("{}\n\n{}", self.stable_instructions(), hub.identity(id)?);
         let result = async {
             let materialized = self.provider_input(hub, id).await?;
             let input = materialized.as_deref().unwrap_or(&self.history);
@@ -670,22 +677,21 @@ impl Session {
             self.refresh_request_profile(hub, id)?;
             self.request_in_flight = true;
             hub.checkpoint(id, self)?;
-            // Read current metadata at each request; worker checkpoints never overwrite names.
-            let instructions = format!(
-                "{}\n\n{}\n\n{}",
-                self.instructions,
-                hub.identity(id)?,
-                tool_calls::PEER_TRACE_GUIDANCE
-            );
+            let instructions = self.stable_instructions();
             let materialized = self.provider_input(hub, id).await?;
-            let input = materialized.as_deref().unwrap_or(&self.history);
+            // Borrow history and append one request-only context item. Capture
+            // status after preparation, without scanning files or saving it.
+            let input = crate::request_context::Input::new(
+                materialized.as_deref().unwrap_or(&self.history),
+                hub.request_context(id)?,
+            );
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
             let context_usage = &mut self.context_usage;
             let output = client
                 .respond_with(
-                    input,
+                    &input,
                     self.tools.clone(),
                     &self.model,
                     &instructions,
@@ -798,6 +804,8 @@ impl Session {
             }
             "read_skill" => skills::read(&self.skills, &call.arguments),
             "list_agents" => hub.peers(),
+            "set_working_context" => hub.set_working_context(id, &call.arguments)
+                .unwrap_or_else(|error| json!({"error":error.to_string()})),
             "prompt_user" => {
                 match serde_json::from_str::<crate::runtime::PromptArgs>(&call.arguments) {
                     Ok(args) => hub
