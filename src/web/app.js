@@ -445,7 +445,10 @@ function flushPaneGroups() {
 }
 function uiFromTarget(target) {
   const tab = target.closest('.pane-tab');
-  return tab ? subpanes.get(tab.dataset.subpaneKey) : [...subpanes.values()].find(ui => ui.pane === target.closest('.subpane'));
+  if (tab) return subpanes.get(tab.dataset.subpaneKey);
+  const ui = [...subpanes.values()].find(ui => ui.pane === target.closest('.subpane'));
+  const group = paneGroups.get(target.closest('.pane-group')?.dataset.paneKey);
+  return ui || subpanes.get(group?.record.active);
 }
 function renderPaneGroup(group) {
   const live = group.record.tabs.map(key => subpanes.get(key)).filter(ui => ui?.group === group);
@@ -2224,10 +2227,9 @@ function addSession(view) {
   });
   ui.input.addEventListener("keydown", event => {
     if (!event.isComposing && !ui.slashSuggestion.hidden && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      if (["Escape", "Tab", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      if (["Escape", "ArrowUp", "ArrowDown"].includes(event.key)) {
         event.preventDefault();
         if (event.key === "Escape") { ui.slashDismissed = true; resizeInput(); }
-        if (event.key === "Tab") { ui.input.value = ui.slashCommand; resizeInput(); }
         if (event.key === "ArrowUp" || event.key === "ArrowDown") {
           const index = ui.slashMatches.indexOf(ui.slashCommand);
           ui.slashCommand = ui.slashMatches[(index + (event.key === "ArrowDown" ? 1 : -1) + ui.slashMatches.length) % ui.slashMatches.length];
@@ -3828,6 +3830,30 @@ document.addEventListener("focusin", event => {
   if (ui?.inactive) selectSubpane(ui);
   selected = ui?.pane || null;
 });
+// Capture Tab before composer slash completion or native control traversal.
+// Only the foreground agent in each visible pane participates.
+document.addEventListener("keydown", event => {
+  if (event.key !== "Tab" || event.defaultPrevented || event.isComposing
+      || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (imagePreview?.open || credentialMode || diagnosticsDialog.open || sessionHistory.open
+      || document.querySelector("#plan-welcome").open) return;
+  const current = [...sessions.values()].find(ui => ui.pane === selected);
+  if (!current || !current.modelPicker.hidden || !current.skillPicker.hidden) return;
+  // Keep normal field navigation inside questions, rename fields and other forms.
+  if (event.target.closest("input, textarea, [contenteditable]") && event.target !== current.input) return;
+  const agents = [...sessions.values()]
+    .filter(ui => !ui.inactive && ui.pane.isConnected && !ui.input.disabled)
+    .map(ui => ({ ui, box: ui.group.pane.getBoundingClientRect() }))
+    .filter(({ box }) => box.width > 0 && box.height > 0)
+    .sort((a, b) => Math.round(a.box.top) - Math.round(b.box.top) || a.box.left - b.box.left);
+  const index = agents.findIndex(({ ui }) => ui === current);
+  if (index < 0) return;
+  const next = agents[(index + (event.shiftKey ? -1 : 1) + agents.length) % agents.length].ui;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  selected = next.pane;
+  next.input.focus({ preventScroll: true });
+}, true);
 document.addEventListener("keydown", async event => {
   if (imagePreview?.open || credentialMode || diagnosticsDialog.open || sessionHistory.open || document.querySelector("#plan-welcome").open) return;
   const skillPicker = [...sessions.values()].find(ui => ui.pane === selected && !ui.skillPicker.hidden);
