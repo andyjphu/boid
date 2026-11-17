@@ -101,7 +101,7 @@ fn context(request: &Value) -> (Value, String) {
     let (status, working) = text
         .strip_prefix("## Status context\n")
         .unwrap()
-        .split_once("## Working context\n")
+        .split_once("## Role context\n")
         .unwrap();
     let working: Value = serde_json::from_str(working.trim()).unwrap();
     (
@@ -113,10 +113,10 @@ fn working_block(request: &Value) -> Value {
     let text = request["input"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
         .unwrap();
-    serde_json::from_str(text.split_once("## Working context\n").unwrap().1.trim()).unwrap()
+    serde_json::from_str(text.split_once("## Role context\n").unwrap().1.trim()).unwrap()
 }
 fn call(id: &str, arguments: Value) -> Value {
-    json!([{"type":"function_call", "id":id, "call_id":id, "name":"set_working_context", "arguments":arguments.to_string()}])
+    json!([{"type":"function_call", "id":id, "call_id":id, "name":"set_role_context", "arguments":arguments.to_string()}])
 }
 fn result(request: &Value, id: &str) -> Value {
     let item = request["input"]
@@ -172,7 +172,7 @@ async fn context_refreshes_each_request_without_rewriting_history_or_stable_inst
             .as_array()
             .unwrap()
             .iter()
-            .any(|tool| tool["name"] == "set_working_context")
+            .any(|tool| tool["name"] == "set_role_context")
     );
     hub.rename(&peer.id, "osprey".into()).unwrap();
     hub.stop(&peer.id).unwrap();
@@ -516,5 +516,78 @@ async fn eject_context_exports_without_clearing_waking_or_provider_calls() {
         assert!(record.inputs.is_empty());
     }
     assert!(fixture.requests.try_recv().is_err());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn operator_role_migration_rejects_stale_text_or_editor_without_waking() {
+    let mut fixture = Fixture::new().await;
+    let hub = Hub::new(Client::test_client_at(fixture.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let target = create(&hub, work.path(), "target", "");
+    let peer = create(&hub, work.path(), "peer", "");
+    let edit = |text: &str, expected: Value| {
+        serde_json::from_value::<RoleContextPatch>(json!({"text":text,"expected":expected}))
+            .unwrap()
+    };
+    hub.set_working_context(
+        &target.id,
+        &json!({"text":"Preserve these results"}).to_string(),
+    )
+    .unwrap();
+    let before = hub.role_context(&target.id).unwrap();
+    hub.set_working_context(
+        &peer.id,
+        &json!({"text":"New constraint", "to":target.id}).to_string(),
+    )
+    .unwrap();
+    assert!(
+        hub.patch_role_context(&target.id, edit("Coordinator", before.clone()))
+            .is_err()
+    );
+    assert_eq!(
+        hub.role_context(&target.id).unwrap()["text"],
+        "New constraint"
+    );
+    // Equal text with a different editor must also invalidate the snapshot.
+    hub.set_working_context(
+        &peer.id,
+        &json!({"text":"Preserve these results", "to":target.id}).to_string(),
+    )
+    .unwrap();
+    assert!(
+        hub.patch_role_context(&target.id, edit("Coordinator", before))
+            .is_err()
+    );
+    let current = hub.role_context(&target.id).unwrap();
+    assert!(
+        hub.patch_role_context(&target.id, edit(&"x".repeat(1025), current.clone()))
+            .is_err()
+    );
+    assert_eq!(hub.role_context(&target.id).unwrap(), current);
+    let receipt = hub
+        .patch_role_context(
+            &target.id,
+            edit(
+                "Coordinator. No provider calls. Notes: /private/task.md",
+                current,
+            ),
+        )
+        .unwrap();
+    assert_eq!(receipt["editor"]["id"], "operator");
+    assert_eq!(
+        receipt["characters"],
+        receipt["text"].as_str().unwrap().chars().count()
+    );
+    assert_eq!(
+        hub.role_context(&target.id).unwrap()["text"],
+        receipt["text"]
+    );
+    assert_eq!(hub.view(&target.id).unwrap().status, "idle");
+    assert!(hub.view(&target.id).unwrap().pending.is_empty());
+    assert!(
+        fixture.requests.try_recv().is_err(),
+        "editing must not trigger inference"
+    );
     hub.shutdown().await;
 }
