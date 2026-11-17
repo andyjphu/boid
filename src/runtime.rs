@@ -124,7 +124,9 @@ impl InputTimingStore {
         false
     }
     fn request_ready(&self, session_id: &str, ids: &[String]) {
-        if ids.is_empty() { return; }
+        if ids.is_empty() {
+            return;
+        }
         let mut records = self.records.lock().unwrap();
         for r in records.iter_mut().filter(|r| {
             r.session_id == session_id && r.state == "consumed" && ids.contains(&r.message_id)
@@ -144,11 +146,15 @@ impl InputTimingStore {
         }
     }
     fn cancel_queued(&self, session_id: &str, ids: &[String]) {
-        if ids.is_empty() { return; }
+        if ids.is_empty() {
+            return;
+        }
         let mut records = self.records.lock().unwrap();
         for r in records.iter_mut().filter(|r| {
             r.session_id == session_id && r.state == "queued" && ids.contains(&r.message_id)
-        }) { r.state = "cancelled"; }
+        }) {
+            r.state = "cancelled";
+        }
     }
     fn no_send(&self, session_id: &str, ids: &[String]) {
         if ids.is_empty() || !self.enabled.load(Ordering::Acquire) {
@@ -2369,38 +2375,44 @@ impl Hub {
         Ok(true)
     }
     async fn close_without_storage(&self, id: &str, finishing: bool) -> Result<bool> {
-        let (task, cancelled, users, peers, cancelled_trace_ids) = crate::blocking::run(|| -> Result<_> {
-            let mut data = self.0.data.lock().unwrap();
-            let h = data.sessions.get_mut(id).context("Unknown session.")?;
-            if h.record.view.archived && !finishing {
-                bail!("Session has already ended.");
-            }
-            h.record.view.archived = true;
-            self.0.interrupts.lock().unwrap().remove(id);
-            h.record.view.status = "ending".into();
-            h.record.view.working_since_ms = None;
-            h.record.view.retry_at_ms = None;
-            h.record.paused = true;
-            h.record.order += 1;
-            h.record.stop_through = h.record.order;
-            h.record.cancel_queued_question_answers();
-            let users = h.record.inputs.len();
-            let peers = h.record.inbox.len();
-            let cancelled_trace_ids: Vec<_> = h.record.inputs.iter().filter(|input| input.observe)
-                .map(|input| input.id.clone()).collect();
-            h.record.inputs.clear();
-            h.record.inbox.clear();
-            for message in &mut h.record.messages {
-                if message.state == "queued" || (finishing && message.state == "cancelled") {
-                    message.state = "cancelled".into();
-                    message.blocked = false;
-                    message.persisted = false;
+        let (task, cancelled, users, peers, cancelled_trace_ids) =
+            crate::blocking::run(|| -> Result<_> {
+                let mut data = self.0.data.lock().unwrap();
+                let h = data.sessions.get_mut(id).context("Unknown session.")?;
+                if h.record.view.archived && !finishing {
+                    bail!("Session has already ended.");
                 }
-            }
-            let cancelled = std::mem::take(&mut h.record.view.pending);
-            h.halt.send_replace(());
-            Ok((h.task.take(), cancelled, users, peers, cancelled_trace_ids))
-        })?;
+                h.record.view.archived = true;
+                self.0.interrupts.lock().unwrap().remove(id);
+                h.record.view.status = "ending".into();
+                h.record.view.working_since_ms = None;
+                h.record.view.retry_at_ms = None;
+                h.record.paused = true;
+                h.record.order += 1;
+                h.record.stop_through = h.record.order;
+                h.record.cancel_queued_question_answers();
+                let users = h.record.inputs.len();
+                let peers = h.record.inbox.len();
+                let cancelled_trace_ids: Vec<_> = h
+                    .record
+                    .inputs
+                    .iter()
+                    .filter(|input| input.observe)
+                    .map(|input| input.id.clone())
+                    .collect();
+                h.record.inputs.clear();
+                h.record.inbox.clear();
+                for message in &mut h.record.messages {
+                    if message.state == "queued" || (finishing && message.state == "cancelled") {
+                        message.state = "cancelled".into();
+                        message.blocked = false;
+                        message.persisted = false;
+                    }
+                }
+                let cancelled = std::mem::take(&mut h.record.view.pending);
+                h.halt.send_replace(());
+                Ok((h.task.take(), cancelled, users, peers, cancelled_trace_ids))
+            })?;
         self.0.input_timing.cancel_queued(id, &cancelled_trace_ids);
         Self::wait_task(task).await;
         self.release_skill_watch(id);
@@ -4662,21 +4674,30 @@ mod input_timing_tests {
         let state = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let hub = Hub::open(crate::api::Client::test_client(), state.path().into()).unwrap();
-        let view = hub.create(Create {
-            name: "timing-end".into(), cwd: work.path().to_string_lossy().into_owned(),
-            message: String::new(),
-        }).unwrap();
+        let view = hub
+            .create(Create {
+                name: "timing-end".into(),
+                cwd: work.path().to_string_lossy().into_owned(),
+                message: String::new(),
+            })
+            .unwrap();
         let message_id = uuid::Uuid::new_v4().to_string();
         hub.update(&view.id, |record| {
             record.order += 1;
             record.paused = true;
             record.inputs.push_back(Input {
-                id: message_id.clone(), text: "fixture".into(), images: vec![],
-                order: record.order, observe: true, compact: false, clear: false,
+                id: message_id.clone(),
+                text: "fixture".into(),
+                images: vec![],
+                order: record.order,
+                observe: true,
+                compact: false,
+                clear: false,
             });
             record.view.pending.push(message_id.clone());
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         hub.0.input_timing.accept(&view.id, &message_id);
         assert!(hub.close(&view.id).await.unwrap());
         let record = &hub.input_timing()["messages"][0];
@@ -4705,7 +4726,13 @@ mod input_timing_tests {
         let rows = store.read();
         assert!(rows["messages"][0]["accepted_to_request_ready_ms"].is_number());
         assert!(rows["messages"][2]["accepted_to_request_ready_ms"].is_null());
-        assert!(rows["messages"][0]["accepted_to_http_send_attempt_ms"].as_f64().unwrap()
-            >= rows["messages"][0]["accepted_to_request_ready_ms"].as_f64().unwrap());
+        assert!(
+            rows["messages"][0]["accepted_to_http_send_attempt_ms"]
+                .as_f64()
+                .unwrap()
+                >= rows["messages"][0]["accepted_to_request_ready_ms"]
+                    .as_f64()
+                    .unwrap()
+        );
     }
 }
