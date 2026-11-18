@@ -580,7 +580,8 @@ async fn api_cache_boundaries_survive_checkpoints_and_new_user_turn_then_clear()
     let mut fixture = Fixture::new().await;
     let mut client = Client::test_client_at(fixture.endpoint.clone());
     client.model = "gpt-6-sol".into();
-    let hub = Hub::new(client).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let hub = Hub::open(client, state.path().into()).unwrap();
     let work = tempfile::tempdir().unwrap();
     let agent = create(&hub, work.path(), "cache-test", "original request");
     let (first, release) = fixture.next().await;
