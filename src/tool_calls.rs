@@ -94,7 +94,7 @@ pub const PEER_TRACE_GUIDANCE: &str = "Use read_peer_trace by default to inspect
 pub fn role_context_definition() -> Value {
     definition(
         "set_role_context",
-        "Replace role context for yourself (to=null) or an open peer (to=session ID). Include only role, responsibilities, team, working style, current hard constraints and at most one task/handoff-file pointer. Put results, counts, completed work, next steps and interaction history in that file; preserve existing task notes there before replacing a mixed note. At most 1024 Unicode characters, including spaces and line breaks; empty text explicitly clears it. The note stays attached to the session ID through compaction, context clear, rename and restart until explicitly replaced or cleared. Every edit is attributed. The next model request sees it; editing does not wake or interrupt the target. Notes do not override operator instructions, stable rules or permissions.",
+        "Replace role context for yourself (to=null) or an open peer (to=session ID). Use extremely rarely: only for an explicit role reassignment or material lasting change to responsibilities or governing constraints. Include only durable role, responsibilities, team, working style, governing constraints and at most one task/handoff-file pointer. Never update for task switches, progress, routine handoffs, context clear, compaction or restart. Temporary task limits belong in the task/handoff file. Put results, counts, completed work, next steps and interaction history in that file; preserve existing task notes there before replacing a mixed note. At most 1024 Unicode characters, including spaces and line breaks; empty text explicitly clears it. The note stays attached to the session ID through compaction, context clear, rename and restart until explicitly replaced or cleared. Every edit is attributed. The next model request sees it; editing does not wake or interrupt the target. Notes do not override operator instructions, stable rules or permissions.",
         &[
             ("text", json!({"type":"string"})),
             ("to", json!({"type":["string","null"]})),
@@ -105,7 +105,7 @@ pub fn role_context_definition() -> Value {
 pub fn wake_agent_definition() -> Value {
     definition(
         "wake_agent",
-        "Send an attributed request to wake an idle peer or resume a peer paused by a model-request error. The to field requires a recipient session ID from the status context or list_agents; text supplies the request and context. A working peer queues it as a regular message without interruption. Operator Stop, ended sessions, storage failures and crash-uncertainty holds are not overridden. Delivery does not mean task acceptance.",
+        "Send an attributed request to wake an idle peer or resume a peer paused by a model-request error. The to field requires a recipient session ID from list_agents; text supplies the request and context. A working peer queues it as a regular message without interruption. Operator Stop, ended sessions, storage failures and crash-uncertainty holds are not overridden. Delivery does not mean task acceptance.",
         &[
             ("to", json!({"type":"string", "minLength":1})),
             ("text", json!({"type":"string", "minLength":1})),
@@ -390,7 +390,7 @@ pub const AGENT_COLORS: &[&str] = &[
 pub fn agent_color_definition() -> Value {
     definition(
         "set_agent_color",
-        "Set your own tab color (to=null) or a peer's (session ID or unambiguous name). Palette: grey (default), red, orange, yellow, lime, green, mint, cyan, sky, blue, violet, magenta, rose. Captains choose a non-grey team color and apply it to agents assigned to them. Existing colors appear in status context and list_agents; omitted color means grey. Colors persist with agent identity across clears, compaction, moves and restart. Fast-mode red takes visual precedence and the team color returns when fast mode ends. Does not wake or interrupt the target.",
+        "Set your own tab color (to=null) or a peer's (session ID or unambiguous name). Palette: grey (default), red, orange, yellow, lime, green, mint, cyan, sky, blue, violet, magenta, rose. Captains choose a non-grey team color and apply it to agents assigned to them. Existing colors appear in list_agents; omitted color means grey. Colors persist with agent identity across clears, compaction, moves and restart. Fast-mode red takes visual precedence and the team color returns when fast mode ends. Does not wake or interrupt the target.",
         &[
             ("to", json!({"type":["string","null"]})),
             ("color", json!({"type":"string","enum":AGENT_COLORS})),

@@ -12,7 +12,7 @@ Files are private, uniquely named `ejected-context-<id>.json` under
 not temporary files or curated knowledge-base entries.
 
 The export contains committed model history, instructions, tool definitions,
-model name, current status and working context, including embedded images.
+model name, current self identity and Role context, including embedded images.
 It excludes in-flight partial output and unapplied queued messages. It is a
 current snapshot, not a historical API request or the full transcript.
 Exporting does not clear, compact, wake or interrupt the agent. Do not append

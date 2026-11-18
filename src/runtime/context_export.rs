@@ -24,9 +24,8 @@ impl Hub {
                     record.engine.clone(),
                     view.name.clone(),
                     view.status.clone(),
-                    json!({"self":{"id":view.id,"name":view.name,"cwd":view.cwd,"color":view.tab_color.as_deref().unwrap_or("grey")},
-                     "peers":peer_roster(&data, true),
-                     "working_context":{"text":record.working_context,"editor":record.working_context_editor}}),
+                    json!({"self":{"id":view.id,"name":view.name},
+                          "working_context":{"text":record.working_context,"editor":record.working_context_editor}}),
                 )
             };
             let root = self
@@ -61,7 +60,8 @@ impl Hub {
                 model: &engine.model,
                 instructions: engine.stable_instructions(),
                 tools: &engine.tools,
-                input: crate::request_context::Input::new(&history, runtime_context),
+                input: crate::request_context::Input::new(&history, runtime_context)
+                    .with_cache(engine.cache_plan()),
             };
             let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
             {

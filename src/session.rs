@@ -86,6 +86,10 @@ pub struct Session {
     #[serde(default)]
     pub profile: Value,
     request_in_flight: bool,
+    // Optimization only: immutable-item identity validates the prior boundary.
+    // Restart begins a fresh cursor; it never rewrites persisted history.
+    #[serde(skip)]
+    cache_boundary: Option<crate::request_context::cache::Boundary>,
     history: ModelHistory,
     pending: VecDeque<Call>,
     running: Option<Call>,
@@ -445,6 +449,13 @@ impl Session {
         entries
     }
 
+    pub(crate) fn cache_plan(&self) -> crate::request_context::cache::Plan {
+        crate::request_context::cache::Plan::new(
+            &self.history,
+            self.cache_boundary.as_ref(),
+            crate::request_context::cache::enabled(&self.model, &self.profile),
+        )
+    }
     pub(crate) fn stable_instructions(&self) -> String {
         format!(
             "## Stable context\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
@@ -476,6 +487,13 @@ impl Session {
         std::mem::take(&mut self.history).0
     }
     pub(crate) fn restore_history(&mut self, items: Vec<Arc<Value>>) {
+        if self
+            .cache_boundary
+            .as_ref()
+            .is_some_and(|b| !b.valid(&items))
+        {
+            self.cache_boundary = None;
+        }
         let images = items.iter().any(|item| crate::images::has_refs(item));
         self.history = ModelHistory(items, images);
     }
@@ -649,6 +667,7 @@ impl Session {
 
     pub fn clear_context(&mut self) {
         self.history.clear();
+        self.cache_boundary = None;
         self.partial_text.clear();
         self.context_usage = None;
         self.compact_requested = false;
@@ -710,6 +729,7 @@ impl Session {
         let (kind, notice) = match result {
             Ok(result) => {
                 // The whole returned window is canonical, including retained messages.
+                self.cache_boundary = None;
                 self.history = result["output"].as_array().unwrap().clone().into();
                 self.context_usage = None;
                 (
@@ -768,12 +788,15 @@ impl Session {
             hub.checkpoint(id, self)?;
             let instructions = self.stable_instructions();
             let materialized = self.provider_input(hub, id).await?;
-            // Borrow history and append one request-only context item. Capture
-            // status after preparation, without scanning files or saving it.
+            // Borrow history and append identity/role context after the cache
+            // boundaries. No automatic peer-roster scan or disk wait.
+            let cache_plan = self.cache_plan();
+            let next_boundary = cache_plan.next();
             let input = crate::request_context::Input::new(
                 materialized.as_deref().unwrap_or(&self.history),
                 hub.request_context(id)?,
-            );
+            )
+            .with_cache(cache_plan);
             let mut streams: BTreeMap<String, String> = BTreeMap::new();
             let mut argument_entries = BTreeMap::new();
             let partial = &mut self.partial_text;
@@ -838,6 +861,7 @@ impl Session {
                     },
                 )
                 .await?;
+            self.cache_boundary = next_boundary;
             self.partial_text.clear();
             self.request_in_flight = false;
             let calls: Result<VecDeque<_>> = output

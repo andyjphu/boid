@@ -406,7 +406,7 @@ async fn selected_skill_compacts_after_complete_tool_batch() {
     assert!(!compact["input"].as_array().unwrap().iter().any(|item| {
         item["content"]
             .as_str()
-            .is_some_and(|text| text.starts_with("## Status context"))
+            .is_some_and(|text| text.starts_with("## Identity"))
     }));
     release.send((StatusCode::OK, compacted(window()))).unwrap();
     let (path, next, release) = mock.request().await;

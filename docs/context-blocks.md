@@ -16,16 +16,16 @@ narrows the contract rather than treating that use as a proven agent violation.
 - **Stable context:** operator-independent rules and practices, available-skill
   guidance, and tool-use conventions. This is the request's `instructions` field.
   Stable does not mean immutable: approved guidance and skill changes can update it.
-- **Status context:** current session identity and open-agent IDs, names, statuses,
-  listening and wake eligibility. The harness reads one in-memory roster snapshot
-  for each model request. It excludes archived sessions and includes no transcript
-  summaries, wall-clock ticker or speculative task progress. A working status does
-  not prove completion. Status can change during inference; tool dispatch checks
-  the actual current state.
-- **Role context:** role, responsibilities, team, working style, current hard
+- **Identity:** only the current agent's stable ID and display name. Automatic
+  live peer status was removed at Andy's request on 2026-11-17. Use `list_agents`
+  when discovering peers, assigning work, or resolving an unavailable recipient.
+- **Role context:** durable role, responsibilities, team, working style, governing
   constraints and at most one pointer to a task/handoff file.
-  Results, counts, completed work, next steps and interaction history belong in
-  that file. Preserve those details before replacing an existing mixed note.
+  Updates must be extremely rare: an explicit role reassignment or a material
+  lasting change to responsibilities or governing constraints. Task switches,
+  progress, results, counts, completed work, next steps, temporary task limits
+  and interaction history belong in the task file. Routine handoffs, clears,
+  compactions and restarts do not justify rewriting Role context. Preserve those details before replacing an existing mixed note.
   `set_role_context({"text":"...","to":null})`
   replaces the caller's note; `to` can instead name an open peer's stable session
   ID. At most 1024 Unicode characters, including spaces and line breaks; empty text
@@ -41,12 +41,12 @@ Example captain note:
 > Keep ownership clear and surface blockers promptly.
 
 This example is not installed automatically. An agent can edit its own or a peer's
-note in response to its assigned work. It should revise the note when the role or hard constraints change;
+note in response to its assigned work. It should revise the note only for a lasting role or governing-constraint change;
 no periodic rewriting is required.
 
 ## Request representation and authority
 
-Status and role context (text plus editor attribution) are serialized as
+Identity and role context (text plus editor attribution) are serialized as
 quoted JSON data in one request-only user-role item after conversation history. They are not new operator messages.
 Stable instructions define their meaning: the role note is fallible agent data,
 subordinate to stable rules, operator directions, stop orders and permissions.
@@ -54,8 +54,7 @@ Putting a reminder here does not grant authority or alter tool permissions.
 
 The harness borrows existing history and appends this item while serializing;
 it does not copy the transcript or append runtime snapshots to persisted history.
-A changing roster therefore does not rewrite stable instructions or earlier input
-items. Only one current runtime-context item is supplied per request. Provider
+Peer status is not included in this request-only item. Only one current runtime-context item is supplied per request. Provider
 retries reuse the same encoded request; the next new model request takes a new
 snapshot. `list_agents` remains available for an explicit refresh.
 
@@ -89,7 +88,7 @@ and does not clear, compact, wake or interrupt the agent. The `eject-context`
 skill uses the equivalent `eject_context` tool.
 
 The JSON contains the latest committed model history, instructions, tool
-schemas, model name, and current status/role context. Images are embedded.
+schemas, model name, and current identity/role context. Images are embedded.
 In-flight partial output and unapplied queued messages are excluded. This is
 a current context snapshot, not a historical API request or full transcript.
 Each export gets a new filename. Serialization and disk writes run outside
@@ -118,3 +117,30 @@ operator-authorized migration, not an automatic semantic filter on future edits.
 
 The content boundary is guidance. The server enforces length and edit authority,
 not whether prose describes a role. Improved agent adherence remains unmeasured.
+
+## Stable cache boundaries (1.1.53)
+
+For API-key requests to `gpt-6-sol` and its dated snapshots, the wire projection
+marks the latest supported content block in retained history and the prior
+successful request's marked block. It keeps default implicit lookup enabled.
+The transient identity/role item remains after both explicit boundaries.
+Subscription and other model requests keep their existing history encoding.
+
+Eligible string content is consistently represented as `input_text` arrays on
+every request, not only while marked. Text, order, call IDs, images and opaque
+reasoning are preserved. Serialization borrows history and does not rewrite the
+stored transcript or clone all its payloads. Markers are on supported input
+content blocks, never reasoning or function-call items. At most two explicit
+markers plus the default implicit marker are supplied.
+
+The prior boundary is an in-memory immutable-item reference and position. Normal
+checkpoints retain it; clears and successful compaction reset it, and replacing
+or moving its item invalidates it. Restart starts with a fresh cursor and can
+require cache warming; no cache optimization state is added to durable history.
+The newest boundary is committed after a successful response. A failed request
+retains the earlier successful cursor. Exports use the same wire projection.
+
+No diagnostics, usage ledger, measurement jobs or paid cache tests were added.
+Andy owns measurement. Local request-shape and lifecycle checks establish the
+implementation, not a production cache-hit rate or cost reduction. Guidance
+changes also do not establish that agents will comply with rare-update rules.

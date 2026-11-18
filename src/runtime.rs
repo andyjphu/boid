@@ -2443,11 +2443,8 @@ impl Hub {
                 .context("Unknown session.")?
                 .record;
             let view = &record.view;
-            Ok(
-                json!({"self":{"id":view.id,"name":view.name,"cwd":view.cwd,"color":view.tab_color.as_deref().unwrap_or("grey")},
-                "peers":peer_roster(&data, true),
-                "working_context":{"text":record.working_context,"editor":record.working_context_editor}}),
-            )
+            Ok(json!({"self":{"id":view.id,"name":view.name},
+                "working_context":{"text":record.working_context,"editor":record.working_context_editor}}))
         })
     }
     #[cfg(test)]
