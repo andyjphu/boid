@@ -100,7 +100,12 @@ mod tests {
             Some("cyan")
         );
         assert_eq!(
-            hub.request_context(&peer.id).unwrap()["self"]["color"],
+            hub.peers()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == peer.id)
+                .unwrap()["color"],
             "cyan"
         );
         assert!(

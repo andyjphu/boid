@@ -308,3 +308,19 @@ cap and refill behavior, a queued write proves the barrier, and Escape verifies
 process-group termination plus completed-result retention. These are harness
 checks without external provider calls, not a measured end-to-end provider
 speedup or proof that models always choose useful batches.
+
+
+### Cache reuse with transient role context (1.1.53)
+
+For the API `gpt-6-sol` route, two explicit content boundaries preserve the
+latest stable history and the prior successful boundary, while implicit lookup
+remains enabled. See [context blocks](context-blocks.md#stable-cache-boundaries-1153).
+The previous boundary must survive ordinary journal checkpoints, which borrow
+and restore engine history; clearing it there defeats cross-turn reuse.
+
+A request-only tail is not append-only history: `H + role` followed by
+`H + new messages + role` no longer contains the earlier cached ending. A
+boundary before that tail makes stable history reusable without changing message
+roles. The automatic live peer roster was also removed; agents use `list_agents`
+on demand. This repair adds no blocking persistence or usage ledger. Cache
+savings are unmeasured; Andy will measure provider-reported results.

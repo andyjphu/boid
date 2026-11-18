@@ -84,7 +84,7 @@ fn context(request: &Value) -> (Value, String) {
             item["role"] == "user"
                 && item["content"]
                     .as_str()
-                    .is_some_and(|text| text.starts_with("## Status context\n"))
+                    .is_some_and(|text| text.starts_with("## Identity\n"))
         })
         .collect();
     assert_eq!(
@@ -99,7 +99,7 @@ fn context(request: &Value) -> (Value, String) {
     );
     let text = contexts[0]["content"].as_str().unwrap();
     let (status, working) = text
-        .strip_prefix("## Status context\n")
+        .strip_prefix("## Identity\n")
         .unwrap()
         .split_once("## Role context\n")
         .unwrap();
@@ -134,7 +134,7 @@ fn assert_no_saved_snapshots(hub: &Hub, id: &str) {
         item["role"] == "user"
             && item["content"]
                 .as_str()
-                .is_some_and(|text| text.starts_with("## Status context\n"))
+                .is_some_and(|text| text.starts_with("## Identity\n"))
     }));
 }
 
@@ -161,11 +161,8 @@ async fn context_refreshes_each_request_without_rewriting_history_or_stable_inst
     assert_eq!(status["self"]["id"], captain.id);
     assert_eq!(working, "");
     assert!(
-        status["peers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == peer.id && row["name"] == "swift")
+        status.get("peers").is_none(),
+        "peer status must not be injected"
     );
     assert!(
         first["tools"]
@@ -186,22 +183,8 @@ async fn context_refreshes_each_request_without_rewriting_history_or_stable_inst
     assert_eq!(second["instructions"], first["instructions"]);
     let (status, working) = context(&second);
     assert_eq!(status["self"]["name"], "ursa");
-    let row = status["peers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == peer.id)
-        .unwrap();
-    assert_eq!(row["name"], "osprey");
-    assert_eq!(row["listening"], false);
-    assert_eq!(row["wakeable"], false);
-    assert!(
-        !status["peers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == ended.id)
-    );
+    assert!(status.get("peers").is_none());
+    assert!(!second["input"].to_string().contains("osprey"));
     assert_eq!(working, note);
     assert_eq!(result(&second, "remember")["text"], note);
     assert_eq!(
@@ -589,5 +572,60 @@ async fn operator_role_migration_rejects_stale_text_or_editor_without_waking() {
         fixture.requests.try_recv().is_err(),
         "editing must not trigger inference"
     );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn api_cache_boundaries_survive_checkpoints_and_new_user_turn_then_clear() {
+    let mut fixture = Fixture::new().await;
+    let mut client = Client::test_client_at(fixture.endpoint.clone());
+    client.model = "gpt-6-sol".into();
+    let hub = Hub::new(client).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let agent = create(&hub, work.path(), "cache-test", "original request");
+    let (first, release) = fixture.next().await;
+    let marked = |request: &Value| -> Vec<usize> {
+        request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let content = v.get("output").or_else(|| v.get("content"));
+                content
+                    .and_then(Value::as_array)
+                    .filter(|a| a.iter().any(|b| b.get("prompt_cache_breakpoint").is_some()))
+                    .map(|_| i)
+            })
+            .collect()
+    };
+    let first_marker = marked(&first);
+    assert_eq!(first_marker.len(), 1);
+    release.send(json!([{"type":"function_call","call_id":"roster","name":"list_agents","arguments":"{}"}])).unwrap();
+    let (second, release) = fixture.next().await;
+    let second_markers = marked(&second);
+    assert_eq!(second_markers.len(), 2);
+    assert!(second_markers.contains(&first_marker[0]));
+    let latest = *second_markers.last().unwrap();
+    assert_eq!(second["input"][latest]["call_id"], "roster");
+    assert!(second["input"][latest]["output"][0]["text"].is_string());
+    release.send(json!([])).unwrap();
+    idle(&hub, &agent.id).await;
+    // A fresh worker reads the checkpointed engine; serialization must not have
+    // discarded its in-memory boundary when taking/restoring borrowed history.
+    hub.message(&agent.id, "next user turn".into()).unwrap();
+    let (third, release) = fixture.next().await;
+    assert!(marked(&third).contains(&latest));
+    assert_eq!(third["input"][latest], second["input"][latest]);
+    release.send(json!([])).unwrap();
+    idle(&hub, &agent.id).await;
+    hub.message(&agent.id, "/clear".into()).unwrap();
+    idle(&hub, &agent.id).await;
+    hub.message(&agent.id, "after clear".into()).unwrap();
+    let (fourth, release) = fixture.next().await;
+    assert_eq!(marked(&fourth).len(), 1);
+    assert!(!fourth["input"].to_string().contains("original request"));
+    release.send(json!([])).unwrap();
+    idle(&hub, &agent.id).await;
     hub.shutdown().await;
 }

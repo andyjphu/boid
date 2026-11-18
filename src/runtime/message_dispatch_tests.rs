@@ -88,7 +88,7 @@ impl Fixture {
                 let identity = &status["self"];
                 let id = identity["id"].as_str().unwrap();
                 if body["input"].as_array().unwrap().iter().rev()
-                    .find(|item| item["role"] == "user" && !item["content"].as_str().is_some_and(|text| text.starts_with("## Status context")))
+                    .find(|item| item["role"] == "user" && !item["content"].as_str().is_some_and(|text| text.starts_with("## Identity")))
                     .is_some_and(|item| item["content"] == "dispatch fixture held proof") {
                     probe.mark(id, "held_proof_http_arrival", arrived);
                 }
