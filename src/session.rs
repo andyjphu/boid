@@ -214,6 +214,13 @@ mod tests {
             1
         );
         assert!(tools.contains(&retained));
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] == "clear_peer_context_first_half")
+                .count(),
+            1
+        );
         let initial = tool_calls::definitions();
         assert_eq!(
             initial
@@ -301,6 +308,7 @@ impl Session {
             for definition in [
                 tool_calls::peer_trace_definition(),
                 tool_calls::wake_agent_definition(),
+                tool_calls::clear_peer_context_definition(),
                 tool_calls::role_context_definition(),
                 tool_calls::agent_color_definition(),
                 tool_calls::eject_context_definition(),
@@ -948,6 +956,10 @@ impl Session {
                 }
             }
             "read_peer_trace" => hub.read_peer_trace(id, &call.arguments),
+            "clear_peer_context_first_half" => hub
+                .clear_peer_context_first_half(id, &call.arguments)
+                .await
+                .unwrap_or_else(|error| json!({"error":error.to_string()})),
             "wake_agent" => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]

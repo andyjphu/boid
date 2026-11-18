@@ -1420,6 +1420,128 @@ async fn peer_wake_resumes_model_error_and_deduplicates_without_operator_imperso
 }
 
 #[tokio::test]
+async fn peer_emergency_clear_uses_worker_preserves_history_and_survives_restart() {
+    let work = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let old = "historical payload ".repeat(1000);
+    let target = agent(&hub, work.path(), "target", &old);
+    let (_, release) = next(&mut rx).await;
+    release.send(json!([])).unwrap();
+    await_peer_status(&hub, &target.id, "idle").await;
+    hub.set_working_context(
+        &target.id,
+        &json!({"text":"Captain; preserve validity", "to":null}).to_string(),
+    )
+    .unwrap();
+    hub.message(
+        &target.id,
+        "Crucial recovery task; no provider experiments authorized".into(),
+    )
+    .unwrap();
+    let (_, release) = next(&mut rx).await;
+    release.send(json!({"type":"error","error":{"code":"context_length_exceeded","message":"fixture context is too large"}})).unwrap();
+    await_peer_status(&hub, &target.id, "error").await;
+    let before = hub.view(&target.id).unwrap();
+    let reason = "Context too large blocks crucial recovery. Reduce old context; retain the no-experiments restriction.";
+    let args = json!({"to":target.id,"reason":reason});
+    let sender = agent(&hub, work.path(), "rescuer", "Inspect and recover the peer");
+    let (request, release) = next(&mut rx).await;
+    assert!(
+        request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "clear_peer_context_first_half")
+    );
+    release
+        .send(json!([call(
+            "recover-1",
+            "clear_peer_context_first_half",
+            args.clone()
+        )]))
+        .unwrap();
+    let (request, release) = next(&mut rx).await;
+    let output = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "recover-1")
+        .unwrap();
+    let receipt: Value = serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["cleared"], true);
+    assert_eq!(receipt["resumed"], false);
+    assert!(receipt["removed"].as_u64().unwrap() > 0);
+    release.send(json!([])).unwrap();
+    await_peer_status(&hub, &sender.id, "idle").await;
+    assert_eq!(hub.view(&target.id).unwrap().status, "error");
+    let duplicate = hub
+        .clear_peer_context_first_half(&sender.id, &args.to_string())
+        .await
+        .unwrap();
+    assert_eq!(duplicate["already_cleared"], true);
+    let after = hub.view(&target.id).unwrap();
+    for (old, new) in before.entries.iter().zip(&after.entries) {
+        assert_eq!(old.id, new.id);
+        assert_eq!(old.text, new.text);
+    }
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|entry| entry.text.contains("Emergency first-half")
+                && entry.text.contains(&sender.id)
+                && entry.text.contains(reason))
+    );
+    hub.shutdown().await;
+    drop(hub);
+    server.abort();
+    let record = materialized_fixture(state.path(), &target.id);
+    assert!(record["paused"].as_bool().unwrap());
+    assert_eq!(record["working_context"], "Captain; preserve validity");
+    assert!(!record["engine"]["history"].to_string().contains(&old));
+    let archives: Vec<_> = std::fs::read_dir(state.path().join("sessions/clears"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(archives.len(), 1);
+    let archive: Value = serde_json::from_slice(&std::fs::read(&archives[0]).unwrap()).unwrap();
+    assert!(archive["engine"]["history"].to_string().contains(&old));
+
+    let (hub, mut rx, server) = fixture(Some(state.path().into())).await;
+    let duplicate = hub
+        .clear_peer_context_first_half(&sender.id, &args.to_string())
+        .await
+        .unwrap();
+    assert_eq!(duplicate["already_cleared"], true);
+    hub.wake_peer(
+        &sender.id,
+        &target.id,
+        "Continue the authorized recovery task; no provider experiments.",
+        "resume-1",
+        "",
+    )
+    .unwrap();
+    let (request, release) = next(&mut rx).await;
+    let input = request["input"].to_string();
+    assert!(
+        !input.contains(&old),
+        "worker must not restore the stale pre-clear context"
+    );
+    assert!(input.contains("Crucial recovery task"));
+    assert!(input.contains("Captain; preserve validity"));
+    release.send(json!([])).unwrap();
+    await_peer_status(&hub, &target.id, "idle").await;
+    assert!(
+        hub.clear_peer_context_first_half(&sender.id, &args.to_string())
+            .await
+            .is_err()
+    );
+    hub.shutdown().await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn peer_wake_queues_for_busy_peers_and_never_overrides_stop_or_end() {
     let work = tempfile::tempdir().unwrap();
     let (hub, mut rx, server) = fixture(None).await;
