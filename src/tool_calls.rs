@@ -12,6 +12,7 @@ pub fn definitions() -> Value {
         prompt_user_definition(),
         peer_trace_definition(),
         wake_agent_definition(),
+        clear_peer_context_definition(),
         role_context_definition(),
         agent_color_definition(),
         eject_context_definition(),
@@ -109,6 +110,20 @@ pub fn wake_agent_definition() -> Value {
         &[
             ("to", json!({"type":"string", "minLength":1})),
             ("text", json!({"type":"string", "minLength":1})),
+        ],
+    )
+}
+
+pub fn clear_peer_context_definition() -> Value {
+    definition(
+        "clear_peer_context_first_half",
+        "Emergency recovery only: remove approximately the older half of a peer's model context when a model-request error is blocking a crucial authorized task and reducing context is a plausible remedy. First inspect read_peer_trace. Supply the session ID and a reason explaining the observed error, crucial task and why this remedy is needed. Never use for routine memory cleanup or credential/rate-limit errors. Requires a current model-error pause; rejects working/idle peers, operator Stop, storage failures and uncertain recovery. Preserves the transcript and role context; archives the prior context asynchronously. Applies once per error episode, in the target worker, without waking it. After success use wake_agent with the retained task and essential constraints if continuation is still authorized. A tool result confirms actual clearing, not successful recovery.",
+        &[
+            ("to", json!({"type":"string", "minLength":1})),
+            (
+                "reason",
+                json!({"type":"string", "minLength":1, "maxLength":2048}),
+            ),
         ],
     )
 }

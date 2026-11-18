@@ -22,6 +22,7 @@ mod archive;
 use archive::ArchivedReceipt;
 mod agent_colors;
 mod context_export;
+mod peer_context;
 mod role_context;
 pub use role_context::RoleContextPatch;
 #[cfg(test)]
@@ -215,6 +216,8 @@ struct Record {
     listen_on_restart: Option<bool>,
     #[serde(default)]
     peer_restartable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_context_clear: Option<peer_context::ClearReceipt>,
     stream_seq: u64,
     #[serde(default)]
     journal_seq: u64,
@@ -425,6 +428,7 @@ struct Handle {
     halt: watch::Sender<()>,
     wake: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
+    context_clear: tokio::sync::mpsc::Sender<peer_context::ClearRequest>,
     storage_error: Option<String>,
     archiving: bool,
 }
@@ -789,6 +793,7 @@ impl Hub {
                 halt,
                 wake: wake.clone(),
                 task: None,
+                context_clear: tokio::sync::mpsc::channel(1).0,
                 storage_error: None,
                 archiving: false,
             },
@@ -810,6 +815,8 @@ impl Hub {
         let (halt, halted) = watch::channel(());
         let wake = Arc::new(Notify::new());
         handle.cancel = cancel;
+        let (context_clear, context_clears) = tokio::sync::mpsc::channel(1);
+        handle.context_clear = context_clear;
         handle.emergency = emergency;
         handle.halt = halt;
         handle.wake = wake.clone();
@@ -823,8 +830,16 @@ impl Hub {
         let hub = self.clone();
         let worker_id = id.to_owned();
         handle.task = Some(tokio::spawn(async move {
-            hub.worker(worker_id, cancelled, interrupted, emergencies, halted, wake)
-                .await;
+            hub.worker(
+                worker_id,
+                cancelled,
+                interrupted,
+                emergencies,
+                halted,
+                wake,
+                context_clears,
+            )
+            .await;
         }));
         if pending {
             handle.wake.notify_one();
@@ -1801,6 +1816,7 @@ impl Hub {
                 paused: false,
                 listen_on_restart: Some(true),
                 peer_restartable: Some(false),
+                peer_context_clear: None,
                 stream_seq: 0,
                 journal_seq: 0,
             };
@@ -2831,6 +2847,7 @@ impl Hub {
         mut emergency: watch::Receiver<u64>,
         mut halt: watch::Receiver<()>,
         wake: Arc<Notify>,
+        mut context_clears: tokio::sync::mpsc::Receiver<peer_context::ClearRequest>,
     ) {
         #[cfg(test)]
         self.0.client.test_worker_mark(&id, "worker_start");
@@ -2866,6 +2883,7 @@ impl Hub {
                 Stop,
                 Halt,
                 Wake,
+                ClearContext(peer_context::ClearRequest),
                 Finished(Result<bool>),
             }
             let next = if halt.has_changed().unwrap_or(false) {
@@ -2877,6 +2895,10 @@ impl Hub {
             } else if interrupt.has_changed().unwrap_or(false) {
                 interrupt.borrow_and_update();
                 Next::Interrupt
+            } else if let Ok(request) = context_clears.try_recv() {
+                // Resolve at a step boundary. A stale recovery request must
+                // never cancel an inference started by newer operator input.
+                Next::ClearContext(request)
             } else if !urgent_turn && self.urgent_ready(&id) {
                 emergency.borrow_and_update();
                 Next::Emergency
@@ -2931,6 +2953,7 @@ impl Hub {
                     }
                 } else {
                     tokio::select! {biased;_=halt.changed()=>Next::Halt,_=cancel.changed()=>Next::Stop,_=interrupt.changed()=>Next::Interrupt,
+                    Some(request)=context_clears.recv()=>Next::ClearContext(request),
                     _=emergency.changed()=>Next::Emergency,_=wake.notified()=>Next::Wake}
                 }
             };
@@ -2938,6 +2961,12 @@ impl Hub {
                 continue;
             }
             match next {
+                Next::ClearContext(request) => {
+                    if !request.reply.is_closed() {
+                        let result = self.apply_peer_context_clear(&id, &mut session, &request);
+                        let _ = request.reply.send(result);
+                    }
+                }
                 Next::Emergency => {
                     // A notification can outlive the message it announced.
                     if !self.urgent_ready(&id) {

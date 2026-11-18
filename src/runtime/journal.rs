@@ -293,6 +293,7 @@ mod tests {
             paused: false,
             listen_on_restart: Some(true),
             peer_restartable: Some(false),
+            peer_context_clear: None,
         }
     }
 

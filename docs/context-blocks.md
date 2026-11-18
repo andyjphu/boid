@@ -79,6 +79,28 @@ Records with working-context edits use format version 9. Older binaries reject
 these records rather than silently discard the note. Rollback must retain the
 upgraded state and restore the matching pre-upgrade state and binary together.
 
+## Emergency peer context recovery
+
+`clear_peer_context_first_half({"to":"session-id","reason":"..."})` is for
+emergencies where a model error blocks a crucial authorized task and reducing
+context is a plausible remedy. Inspect the peer trace first. The reason must
+identify the error, task and need for this remedy. Task importance and remedy
+suitability require agent judgment; a nonempty reason does not prove either.
+
+The runtime requires an actual model-error pause and rechecks it in the target
+worker before changing its live context. Working or idle agents, operator
+stops, storage failures, unfinished execution and uncertain recovery are
+ineligible. One error episode permits one clear; duplicate calls return the
+existing result. This is not routine cleanup or a fix for credentials or limits.
+
+The operation uses the same approximately half-by-size boundary as the operator
+`/clear-first-half` command. It preserves transcripts and Role context, queues
+the existing pre-clear archive, and records the requesting peer and reason.
+Persistence stays asynchronous. The result confirms clearing, not successful
+recovery. The target remains paused. If continued work is authorized, use
+`wake_agent` separately with the task and essential constraints, consulting the
+preserved trace or task file for details lost from model context.
+
 ## Exporting context
 
 `/eject-context` saves a private `ejected-context-<unique-id>.json` under
