@@ -25,7 +25,7 @@ During preparation or source review, inspect the real paid path's source and con
 - Model `max_tokens`, provider transport timeouts and retries, and gate wait and rate.
 - Parent wall time and turns, including its cleanup limit.
 - Docker build, health and runtime, plus child tool, reviewer and setup timeouts.
-- Request-count limits and cumulative request, output, trace, event and archive byte limits.
+- Per-action input, tool output, provider response and reviewer-message size caps, in bytes or characters. Check request-count and cumulative request, output, trace, event and archive byte limits too.
 
 Include inherited defaults and per-call overrides. A long outer limit cannot compensate for a short inner limit.
 
