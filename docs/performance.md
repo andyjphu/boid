@@ -324,3 +324,19 @@ boundary before that tail makes stable history reusable without changing message
 roles. The automatic live peer roster was also removed; agents use `list_agents`
 on demand. This repair adds no blocking persistence or usage ledger. Cache
 savings are unmeasured; Andy will measure provider-reported results.
+
+## Build storage (2026-11-19)
+
+Reuse one isolated native worktree and its Cargo target directory for successive
+Ursa releases. Keep `CARGO_BUILD_JOBS=1`. Do not create another full compiler cache
+for each feature or copy target directories into deployment bundles. A cached
+build still needs a clean, recorded source revision and its own verification.
+
+Keep one verified candidate executable for the pending restart. After a newer
+candidate is verified, mark the old plan superseded and remove its executable.
+Andy explicitly permits removing obsolete builds and does not want retained
+rollback packages. The running binary stays in place until the authorized swap.
+Keep small build logs, source hashes, and verification receipts. Any temporary
+private state clone used for restart verification is removed after successful
+verification. Transcripts, research results, and live credential storage are
+not build artifacts.

@@ -134,6 +134,7 @@ mod tests {
             order: 1,
             compact: false,
             clear: false,
+            take_context: None,
         });
         record.inbox.push_back(Peer {
             id: "old-peer".into(),
@@ -233,6 +234,7 @@ mod tests {
             order: 1,
             compact: false,
             clear: false,
+            take_context: None,
         });
         records[1].order = 1;
         records[1].view.pending.push("old-user-id".into());

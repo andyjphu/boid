@@ -491,6 +491,23 @@ impl Session {
         )
     }
 
+    pub(crate) fn reload_system_prompt(&mut self) {
+        // Refresh the deployed base while retaining the current skill catalog.
+        let catalog = self
+            .skill_base
+            .as_ref()
+            .and_then(|base| self.instructions.strip_prefix(base))
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "\n{}",
+                    skills::catalog::prompt(&self.skills, 8000, &self.skill_warnings)
+                )
+            });
+        let base = include_str!("PRINCIPLES.md");
+        self.instructions = format!("{base}{catalog}");
+        self.skill_base = Some(base.into());
+    }
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }

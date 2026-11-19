@@ -247,6 +247,7 @@ mod tests {
                         order: 1,
                         compact: false,
                         clear: false,
+                        take_context: None,
                     }),
                     "new_error" => h
                         .record

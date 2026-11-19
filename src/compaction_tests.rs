@@ -815,3 +815,288 @@ async fn clear_first_half_preserves_recent_context_transcript_and_working_note()
     assert!(mock.requests.try_recv().is_err());
     hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn take_context_waits_for_recipient_tools_preserves_archive_and_survives_restart() {
+    let mut mock = Mock::new().await;
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    let source = hub
+        .create(Create {
+            name: "swift".into(),
+            cwd: work.path().to_string_lossy().into(),
+            message: "Source task".into(),
+        })
+        .unwrap();
+    let (_, _, release) = mock.request().await;
+    release.send((StatusCode::OK, json!([
+        {"type":"reasoning","id":"rs-source","encrypted_content":"opaque-source"},
+        {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Source result"}]}
+    ]))).unwrap();
+    idle(&hub, &source.id, "idle").await;
+    let original_source = engine(&hub, &source.id);
+    let target = hub
+        .create(Create {
+            name: "xenops".into(),
+            cwd: work.path().to_string_lossy().into(),
+            message: "Old recipient task".into(),
+        })
+        .unwrap();
+    let (_, _, release) = mock.request().await;
+    hub.update(&target.id, |r| {
+        r.working_context = "Recipient role".into();
+        Ok(())
+    })
+    .unwrap();
+    let profile = hub.profile(&target.id).unwrap();
+    let copy_id = hub
+        .message(&target.id, format!("/take-context {}", source.id))
+        .unwrap();
+    release.send((StatusCode::OK,json!([
+        {"type":"function_call","call_id":"recipient-tool","name":"list_agents","arguments":"{}"}
+    ]))).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    let copied = engine(&hub, &target.id);
+    let items = copied["history"].as_array().unwrap();
+    assert_eq!(
+        &items[..items.len() - 1],
+        original_source["history"].as_array().unwrap()
+    );
+    assert!(
+        items.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("xenops ({})", target.id))
+    );
+    assert!(!copied["history"].to_string().contains("Old recipient task"));
+    assert_eq!(engine(&hub, &source.id), original_source);
+    assert_eq!(hub.profile(&target.id).unwrap(), profile);
+    assert!(mock.requests.try_recv().is_err());
+    flush_recording(&hub, &target.id).unwrap();
+    let archived: Value = serde_json::from_slice(
+        &std::fs::read(
+            state
+                .path()
+                .join(format!("sessions/clears/{}-{copy_id}.json", target.id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        archived["engine"]["history"]
+            .to_string()
+            .contains("Old recipient task")
+    );
+    assert!(
+        archived["engine"]["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["type"] == "function_call_output" && i["call_id"] == "recipient-tool")
+    );
+    assert!(
+        hub.view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.as_str() == "Old recipient task")
+    );
+    hub.shutdown().await;
+    drop(hub);
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    assert_eq!(engine(&hub, &target.id)["history"], copied["history"]);
+    assert_eq!(
+        hub.0.data.lock().unwrap().sessions[&target.id]
+            .record
+            .working_context,
+        "Recipient role"
+    );
+    hub.message(&target.id, "Continue as xenops".into())
+        .unwrap();
+    let (_, request, release) = mock.request().await;
+    assert!(request["input"].to_string().contains("Source task"));
+    assert!(!request["input"].to_string().contains("Old recipient task"));
+    assert!(
+        request["input"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains(&target.id)
+    );
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn take_context_copies_images_closes_unfinished_calls_and_retains_opaque_items() {
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let source = create(&hub, work.path(), "");
+    let target = create(&hub, work.path(), "");
+    let store = hub.image_store();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let image = store.put(&source.id, "image/png", png.get_ref()).unwrap();
+    let history = vec![
+        Arc::new(
+            json!({"role":"user","content":[{"type":"input_image","image_url":crate::images::ImageStore::reference(&source.id,&image)}]}),
+        ),
+        Arc::new(
+            json!({"type":"compaction","id":"cmp-source","encrypted_content":"retained-opaque"}),
+        ),
+        Arc::new(
+            json!({"type":"function_call","call_id":"pending-source","name":"exec_command","arguments":"{\"cmd\":\"must never execute\"}"}),
+        ),
+    ];
+    hub.update(&source.id, |r| {
+        r.engine.restore_history(history.clone());
+        Ok(())
+    })
+    .unwrap();
+    let before = engine(&hub, &source.id);
+    hub.message(&target.id, format!("/take-context {}", source.id))
+        .unwrap();
+    idle(&hub, &target.id, "idle").await;
+    assert_eq!(engine(&hub, &source.id), before);
+    assert!(mock.requests.try_recv().is_err());
+    let copied = engine(&hub, &target.id);
+    assert_eq!(copied["history"][1], *history[1]);
+    assert!(
+        copied["history"][0]["content"][0]["image_url"]
+            .as_str()
+            .unwrap()
+            .contains(&target.id)
+    );
+    assert_eq!(
+        store.read(&target.id, &image.id).unwrap().1.as_slice(),
+        png.get_ref()
+    );
+    assert!(copied["history"].as_array().unwrap().iter().any(|i| {
+        i["type"] == "function_call_output"
+            && i["call_id"] == "pending-source"
+            && i["output"]
+                .as_str()
+                .unwrap()
+                .contains("source agent may still")
+    }));
+    hub.message(&target.id, "Describe the image".into())
+        .unwrap();
+    let (_, request, release) = mock.request().await;
+    assert!(
+        request["input"][0]["content"][0]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn take_context_invalid_or_missing_peer_preserves_recipient_and_consumes_failed_command() {
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let source = create(&hub, work.path(), "");
+    let target = create(&hub, work.path(), "Original task");
+    let (_, _, release) = mock.request().await;
+    assert!(
+        hub.message(&target.id, format!("/take-context {}", target.id))
+            .is_err()
+    );
+    assert!(
+        hub.message(&target.id, "/take-context missing".into())
+            .is_err()
+    );
+    let peers = hub.context_peers(&target.id).unwrap();
+    assert_eq!(peers["peers"].as_array().unwrap().len(), 1);
+    assert_eq!(peers["peers"][0]["id"], source.id);
+    hub.message(&target.id, format!("/take-context {}", source.id))
+        .unwrap();
+    hub.close(&source.id).await.unwrap();
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    assert!(
+        engine(&hub, &target.id)["history"]
+            .to_string()
+            .contains("Original task")
+    );
+    assert!(
+        hub.view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.starts_with("Context unchanged:"))
+    );
+    assert!(mock.requests.try_recv().is_err());
+    hub.message(&target.id, "Still usable".into()).unwrap();
+    let (_, request, release) = mock.request().await;
+    assert!(request["input"].to_string().contains("Still usable"));
+    assert!(!request["input"].to_string().contains("/take-context"));
+    release.send((StatusCode::OK, json!([]))).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn reload_refreshes_base_without_clearing_history_or_starting_inference() {
+    let mut session = Session::new(
+        "test".into(),
+        "old base\nretained catalog".into(),
+        json!([]),
+        "identity".into(),
+    );
+    session.skill_base = Some("old base".into());
+    session.user("Retain this conversation".into());
+    let before = serde_json::to_value(&session).unwrap();
+    session.reload_system_prompt();
+    let after = serde_json::to_value(&session).unwrap();
+    assert_eq!(after["history"], before["history"]);
+    assert_eq!(after["skill_base"], include_str!("PRINCIPLES.md"));
+    assert!(
+        after["instructions"]
+            .as_str()
+            .unwrap()
+            .ends_with("\nretained catalog")
+    );
+    assert!(!after["instructions"].as_str().unwrap().contains("old base"));
+    for field in [
+        "model",
+        "profile",
+        "tools",
+        "model_requests",
+        "auto_oai_compact",
+    ] {
+        assert_eq!(after[field], before[field]);
+    }
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let target = create(&hub, work.path(), "");
+    let history = engine(&hub, &target.id)["history"].clone();
+    hub.message(&target.id, "/reload".into()).unwrap();
+    idle(&hub, &target.id, "idle").await;
+    assert_eq!(engine(&hub, &target.id)["history"], history);
+    assert!(
+        hub.view(&target.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.as_str() == "System prompt reloaded.")
+    );
+    assert!(mock.requests.try_recv().is_err());
+    hub.shutdown().await;
+}

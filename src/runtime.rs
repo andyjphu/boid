@@ -22,6 +22,7 @@ mod archive;
 use archive::ArchivedReceipt;
 mod agent_colors;
 mod context_export;
+mod context_take;
 mod peer_context;
 mod role_context;
 pub use role_context::RoleContextPatch;
@@ -178,6 +179,8 @@ struct Input {
     compact: bool,
     #[serde(default)]
     clear: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    take_context: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Peer {
@@ -584,7 +587,7 @@ impl Hub {
                 if let Some(id) = &record.engine.skill_snapshot {
                     record.engine.skills = hub.0.store.load_skills(id)?;
                 }
-                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
+                if !matches!(record.version, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11) {
                     bail!(
                         "Unsupported session version {}; original retained",
                         record.version
@@ -2109,10 +2112,21 @@ impl Hub {
                     bail!("Server is shutting down.");
                 }
                 let message_id = Uuid::new_v4().to_string();
+                let take_context = if images.is_empty() {
+                    context_take::command_source(&data, id, &text)?
+                } else {
+                    None
+                };
+                let display_text = take_context
+                    .as_ref()
+                    .map(|source| {
+                        format!("/take-context {}", data.sessions[source].record.view.name)
+                    })
+                    .unwrap_or_else(|| text.clone());
                 let entry = Entry {
                     id: message_id.clone(),
                     kind: "user".into(),
-                    text: text.clone().into(),
+                    text: display_text.into(),
                     images: images.clone(),
                     replaces: None,
                     input_batch: None,
@@ -2127,12 +2141,19 @@ impl Hub {
                     if !images.is_empty() {
                         r.version = r.version.max(5);
                     }
+                    if take_context.is_some() {
+                        // Older readers would treat this queued replacement as
+                        // a plain clear and silently discard its source.
+                        r.version = r.version.max(11);
+                    }
                     r.order += 1;
                     r.inputs.push_back(Input {
                         id: message_id.clone(),
                         compact: images.is_empty() && text.trim() == "/oai-compact",
                         clear: images.is_empty()
-                            && matches!(text.trim(), "/clear" | "/clear-first-half"),
+                            && (take_context.is_some()
+                                || matches!(text.trim(), "/clear" | "/clear-first-half")),
+                        take_context,
                         text,
                         images,
                         order: r.order,
@@ -2788,6 +2809,9 @@ impl Hub {
     }
     fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
         crate::blocking::run(|| {
+            // Capture shared history briefly under the lock. Image copying and
+            // normalization happen outside it, before any target context change.
+            let mut copied = self.stage_context_copy(id);
             let mut permit = self.reserve_persistence(id, 2)?;
             let mut data = self.0.data.lock().unwrap();
             let profile = data.sessions.get(id).and_then(|handle| {
@@ -2802,7 +2826,13 @@ impl Hub {
             });
             let handle = data.sessions.get_mut(id).context("Unknown session.")?;
             if let Some(input) = handle.record.inputs.front().filter(|i| {
-                i.clear && !handle.record.paused && i.order > handle.record.stop_through
+                i.clear
+                    && !handle.record.paused
+                    && i.order > handle.record.stop_through
+                    && (i.take_context.is_none()
+                        || copied
+                            .as_ref()
+                            .is_some_and(|(key, result)| key == &i.id && result.is_ok()))
             }) {
                 handle.persistence.enqueue_reserved(
                     Operation::Clear(input.id.clone(), Box::new(handle.record.clone())),
@@ -2820,7 +2850,28 @@ impl Hub {
             let cancelled = input.order <= r.stop_through;
             let mut continue_work = !input.clear;
             if !cancelled {
-                let selected = if input.clear {
+                let selected = if input.images.is_empty() && input.text.trim() == "/reload" {
+                    session.reload_system_prompt();
+                    continue_work = active;
+                    r.view.entries.push(Self::make_entry("notice", "System prompt reloaded.".into()));
+                    vec![]
+                } else if input.take_context.is_some() {
+                    let result = copied.take().filter(|(key, _)| key == &input.id)
+                        .map(|(_, result)| result)
+                        .unwrap_or_else(|| Err(anyhow::anyhow!("Context source is unavailable.")));
+                    match result {
+                        Ok(copy) => {
+                            session.clear_context();
+                            session.restore_history(copy.history);
+                            r.view.entries.push(Self::make_entry("notice", format!("Context taken from {}.", copy.name)));
+                        }
+                        Err(error) => {
+                            continue_work = active;
+                            r.view.entries.push(Self::make_entry("error", format!("Context unchanged: {error:#}")));
+                        }
+                    }
+                    vec![]
+                } else if input.clear {
                     let notice = if input.text.trim() == "/clear-first-half" {
                         let (removed, retained) = session.clear_first_half();
                         format!("Older context cleared: {removed} items removed, {retained} retained. Transcript and role context preserved.")
@@ -2939,7 +2990,8 @@ impl Hub {
                                     && !input.compact
                                     && !input.clear
                                     && !(input.images.is_empty()
-                                        && Session::is_auto_compaction_command(&input.text))
+                                        && (Session::is_auto_compaction_command(&input.text)
+                                            || input.text.trim() == "/reload"))
                             })
                         });
                         if needs_refresh {
