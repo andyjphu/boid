@@ -98,6 +98,8 @@ settings are omitted. `/clear` works on either route. `/oai-compact` and its mod
 tool are unavailable on the plan route because support for the separate
 compaction endpoint is not established by this integration's documented route.
 No API-key compaction request is made as a fallback.
+`/auto-oai-compact on` is also a no-op on subscription credentials, with an
+explanation in the transcript. It never changes the pane's credential.
 
 Credentials are stored under `$BOID_STATE_DIR/chatgpt` (by default
 `~/.local/share/boid/chatgpt`), with a private directory and owner-only atomic

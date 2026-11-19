@@ -2368,6 +2368,7 @@ function addSession(view) {
       "/fast": `/fast  Turn fast mode ${ui.view.profile?.service_tier === "priority" ? "off" : "on"}`,
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
+      "/auto-oai-compact": "/auto-oai-compact  Toggle compaction above 900K",
       "/clear": "/clear  Start fresh model context",
       "/clear-first-half": "/clear-first-half  Remove older half of context",
       "/eject-context": "/eject-context  Export context to a file",

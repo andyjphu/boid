@@ -104,6 +104,10 @@ pub struct Session {
     compact_resume: bool,
     #[serde(default)]
     compact_in_flight: bool,
+    #[serde(default)]
+    auto_oai_compact: bool,
+    #[serde(default)]
+    compact_automatic: bool,
 }
 
 #[cfg(test)]
@@ -405,10 +409,22 @@ impl Session {
     fn recover_interrupted(&mut self, uncertain: bool) -> Vec<(String, String)> {
         let mut entries = vec![];
         if self.compact_requested || self.compact_in_flight {
+            let automatic = self.compact_automatic;
+            if automatic {
+                self.auto_oai_compact = false;
+            }
+            self.compact_automatic = false;
             self.compact_requested = false;
             self.compact_in_flight = false;
             self.compact_resume = false;
             entries.push(("notice".into(), "Compaction interrupted; the previous context is retained. Request compaction again to retry.".into()));
+            if automatic {
+                entries.push((
+                    "notice".into(),
+                    "Automatic compaction is off. Use /auto-oai-compact on to enable it again."
+                        .into(),
+                ));
+            }
         }
         if !self.partial_text.is_empty() {
             self.history
@@ -681,7 +697,74 @@ impl Session {
         self.compact_requested = false;
         self.compact_resume = false;
         self.compact_in_flight = false;
+        self.compact_automatic = false;
         self.request_in_flight = false;
+    }
+    pub fn is_auto_compaction_command(text: &str) -> bool {
+        text.split_whitespace().next() == Some("/auto-oai-compact")
+    }
+    pub fn auto_compaction_command(
+        &mut self,
+        text: &str,
+        profile: &Value,
+        active: bool,
+    ) -> (String, bool) {
+        let words: Vec<_> = text.split_whitespace().collect();
+        let enabled = match words.as_slice() {
+            ["/auto-oai-compact"] => !self.auto_oai_compact,
+            ["/auto-oai-compact", "on"] => true,
+            ["/auto-oai-compact", "off"] => false,
+            _ => return ("Use /auto-oai-compact [on|off].".into(), active),
+        };
+        if enabled && profile["billing_route"] == "chatgpt" {
+            return ("Automatic OpenAI compaction is unavailable on subscription credentials. No change or API-key request was made.".into(), active);
+        }
+        self.auto_oai_compact = enabled;
+        if !enabled && self.compact_automatic && self.compact_requested {
+            self.compact_requested = false;
+            self.compact_automatic = false;
+            // A queued automatic compaction can be the only reason the worker
+            // is active. Turning it off must not start an idle model turn.
+            let resume = self.compact_resume;
+            self.compact_resume = false;
+            return ("Automatic compaction is off.".into(), resume);
+        }
+        if enabled && self.auto_compaction_due() {
+            self.request_compaction(active);
+            self.compact_automatic = true;
+        }
+        (
+            if enabled {
+                "Automatic compaction is on above 900,000 context tokens.".into()
+            } else {
+                "Automatic compaction is off.".into()
+            },
+            active || self.compact_requested,
+        )
+    }
+    fn auto_compaction_due(&self) -> bool {
+        self.auto_oai_compact
+            && !self.compact_requested
+            && self.pending.is_empty()
+            && self.context_usage.as_ref().is_some_and(|usage| {
+                usage.input_tokens.saturating_add(usage.output_tokens) > 900_000
+            })
+    }
+    fn schedule_auto_compaction(&mut self, hub: &Hub, id: &str, resume: bool) -> Result<()> {
+        if !self.auto_compaction_due() {
+            return Ok(());
+        }
+        // Resolve the current pane credential only when compaction is due.
+        self.refresh_request_profile(hub, id)?;
+        if self.profile["billing_route"] == "chatgpt" {
+            self.auto_oai_compact = false;
+            hub.checkpoint_entries(id, self, vec![("notice".into(),
+                "Automatic compaction is off: subscription credentials do not support it. No API-key request was made.".into())])?;
+        } else {
+            self.request_compaction(resume);
+            self.compact_automatic = true;
+        }
+        Ok(())
     }
     pub fn request_compaction(&mut self, resume: bool) {
         if !self.compact_requested {
@@ -691,6 +774,7 @@ impl Session {
     }
     async fn compact(&mut self, client: &Client, hub: &Hub, id: &str) -> Result<bool> {
         let resume = self.compact_resume;
+        let automatic = self.compact_automatic;
         self.compact_requested = false;
         self.compact_resume = false;
         self.compact_in_flight = true;
@@ -734,6 +818,7 @@ impl Session {
         }
         .await;
         self.compact_in_flight = false;
+        self.compact_automatic = false;
         let (kind, notice) = match result {
             Ok(result) => {
                 // The whole returned window is canonical, including retained messages.
@@ -745,10 +830,18 @@ impl Session {
                     "Context compacted. The transcript is unchanged.".to_owned(),
                 )
             }
-            Err(error) => (
-                "error",
-                format!("Compaction failed; previous context retained: {error:#}"),
-            ),
+            Err(error) => {
+                let suffix = if automatic {
+                    self.auto_oai_compact = false;
+                    "\nAutomatic compaction is off; use /auto-oai-compact on to retry."
+                } else {
+                    ""
+                };
+                (
+                    "error",
+                    format!("Compaction failed; previous context retained: {error:#}{suffix}"),
+                )
+            }
         };
         if resume {
             self.history
@@ -774,6 +867,7 @@ impl Session {
         id: &str,
     ) -> Result<bool> {
         self.ensure_peer_trace_tool();
+        self.schedule_auto_compaction(hub, id, true)?;
         if self.compact_requested && self.pending.is_empty() {
             self.refresh_request_profile(hub, id)?;
             return self.compact(client, hub, id).await;
@@ -894,8 +988,11 @@ impl Session {
                 .collect();
             self.pending = calls?;
             self.history.extend(output);
+            // A completed final response may also cross the threshold. Compact
+            // it without starting another inference. Tool calls finish first.
+            self.schedule_auto_compaction(hub, id, false)?;
             hub.checkpoint(id, self)?;
-            return Ok(!self.pending.is_empty());
+            return Ok(!self.pending.is_empty() || self.compact_requested);
         };
         if parallel::eligible(&call.name)
             && self

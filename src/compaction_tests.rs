@@ -32,12 +32,17 @@ impl Mock {
                 if uri.path() == "/compact" {
                     (status, Json(result)).into_response()
                 } else {
+                    let response = if result.is_array() {
+                        json!({"output":result})
+                    } else {
+                        result
+                    };
                     (
                         status,
                         [("content-type", "text/event-stream")],
                         format!(
                             "data: {}\n\n",
-                            json!({"type":"response.completed","response":{"output":result}})
+                            json!({"type":"response.completed","response":response})
                         ),
                     )
                         .into_response()
@@ -63,7 +68,10 @@ impl Mock {
 }
 async fn idle(hub: &Hub, id: &str, status: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while hub.view(id).unwrap().status != status {
+        while {
+            let view = hub.view(id).unwrap();
+            view.status != status || (status == "idle" && !view.pending.is_empty())
+        } {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -98,6 +106,200 @@ fn create(hub: &Hub, work: &std::path::Path, message: &str) -> View {
         message: message.into(),
     })
     .unwrap()
+}
+
+fn used(output: Value, total: u64) -> Value {
+    json!({"output":output,"usage":{"input_tokens":total-1,"output_tokens":1}})
+}
+
+#[tokio::test]
+async fn auto_compaction_threshold_idle_turn_and_persistent_preference() {
+    let mut mock = Mock::new().await;
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    let view = create(&hub, work.path(), "");
+    let other = create(&hub, work.path(), "");
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], false);
+    hub.message(&view.id, "/auto-oai-compact".into()).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], true);
+    assert_eq!(engine(&hub, &other.id)["auto_oai_compact"], false);
+    assert!(mock.requests.try_recv().is_err());
+    hub.message(&view.id, "At threshold".into()).unwrap();
+    let (_, request, release) = mock.request().await;
+    assert!(!request["input"].to_string().contains("/auto-oai-compact"));
+    release
+        .send((StatusCode::OK, used(json!([]), 900_000)))
+        .unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert!(mock.requests.try_recv().is_err());
+    hub.message(&view.id, "Cross threshold".into()).unwrap();
+    let (_, _, release) = mock.request().await;
+    release
+        .send((StatusCode::OK, used(json!([]), 900_001)))
+        .unwrap();
+    let (path, request, release) = mock.request().await;
+    assert_eq!(path, "/compact");
+    assert!(request["input"].to_string().contains("Cross threshold"));
+    release.send((StatusCode::OK, compacted(window()))).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["history"], window());
+    assert!(mock.requests.try_recv().is_err());
+    assert!(
+        hub.view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.as_str() == "Cross threshold")
+    );
+    flush_recording(&hub, &view.id).unwrap();
+    assert_eq!(
+        std::fs::read_dir(state.path().join("sessions/compactions"))
+            .unwrap()
+            .count(),
+        1
+    );
+    hub.message(&view.id, "/clear".into()).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], true);
+    hub.shutdown().await;
+    drop(hub);
+    let hub = Hub::open(
+        Client::test_client_at(mock.endpoint.clone()),
+        state.path().into(),
+    )
+    .unwrap();
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], true);
+    hub.message(&view.id, "/auto-oai-compact off".into())
+        .unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], false);
+    assert!(mock.requests.try_recv().is_err());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_compaction_waits_for_tools_and_disables_after_failure_or_interrupt() {
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let view = create(&hub, work.path(), "/auto-oai-compact on");
+    idle(&hub, &view.id, "idle").await;
+    hub.message(&view.id, "Run a tool".into()).unwrap();
+    let (_, _, release) = mock.request().await;
+    release.send((StatusCode::OK, used(json!([
+        {"type":"function_call","call_id":"first","name":"list_agents","arguments":"{}"},
+        {"type":"function_call","call_id":"second","name":"list_agents","arguments":"{}"}
+    ]), 900_001))).unwrap();
+    let (path, request, release) = mock.request().await;
+    assert_eq!(path, "/compact");
+    for id in ["first", "second"] {
+        assert!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["type"] == "function_call_output" && i["call_id"] == id)
+        );
+    }
+    let before = engine(&hub, &view.id)["history"].clone();
+    release
+        .send((
+            StatusCode::BAD_GATEWAY,
+            json!({"error":"fixture unavailable"}),
+        ))
+        .unwrap();
+    let (path, request, release) = mock.request().await;
+    assert_eq!(path, "/");
+    assert_eq!(
+        &request["input"].as_array().unwrap()[..before.as_array().unwrap().len()],
+        before.as_array().unwrap()
+    );
+    release
+        .send((StatusCode::OK, used(json!([]), 900_001)))
+        .unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], false);
+    assert!(mock.requests.try_recv().is_err());
+    hub.message(&view.id, "/auto-oai-compact on".into())
+        .unwrap();
+    let (path, _, _release) = mock.request().await;
+    assert_eq!(path, "/compact");
+    hub.interrupt(&view.id).unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], false);
+    assert!(
+        engine(&hub, &view.id)["history"]
+            .to_string()
+            .contains("Run a tool")
+    );
+    assert!(mock.requests.try_recv().is_err());
+    hub.shutdown().await;
+}
+
+fn use_subscription(hub: &Hub, id: &str) {
+    let mut data = hub.0.data.lock().unwrap();
+    let group = data
+        .screens
+        .groups
+        .values_mut()
+        .find(|group| group.tabs.contains(&format!("agent:{id}")))
+        .unwrap();
+    group.credential_id = Some("fixture-subscription".into());
+    group.credential_type = Some("chatgpt".into());
+}
+
+#[tokio::test]
+async fn auto_compaction_subscription_command_and_route_change_make_no_api_call() {
+    let mut mock = Mock::new().await;
+    let hub = Hub::new(Client::test_client_at(mock.endpoint.clone())).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let view = create(&hub, work.path(), "");
+    use_subscription(&hub, &view.id);
+    hub.message(&view.id, "/auto-oai-compact on".into())
+        .unwrap();
+    idle(&hub, &view.id, "idle").await;
+    assert_eq!(engine(&hub, &view.id)["auto_oai_compact"], false);
+    assert!(
+        hub.view(&view.id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.text.contains("unavailable on subscription"))
+    );
+    assert!(
+        !engine(&hub, &view.id)["history"]
+            .to_string()
+            .contains("/auto-oai-compact")
+    );
+    assert_eq!(
+        hub.profile(&view.id).unwrap()["credential_id"],
+        "fixture-subscription"
+    );
+    assert!(mock.requests.try_recv().is_err());
+
+    let api = create(&hub, work.path(), "/auto-oai-compact on");
+    idle(&hub, &api.id, "idle").await;
+    hub.message(&api.id, "Finish before credential change".into())
+        .unwrap();
+    let (_, _, release) = mock.request().await;
+    use_subscription(&hub, &api.id);
+    release
+        .send((StatusCode::OK, used(json!([]), 900_001)))
+        .unwrap();
+    idle(&hub, &api.id, "idle").await;
+    assert_eq!(engine(&hub, &api.id)["auto_oai_compact"], false);
+    assert!(mock.requests.try_recv().is_err());
+    assert_eq!(
+        hub.profile(&api.id).unwrap()["credential_id"],
+        "fixture-subscription"
+    );
+    hub.shutdown().await;
 }
 
 #[tokio::test]

@@ -107,6 +107,21 @@ using the same operation as the `oai_compact` tool. Both wait for the current
 response and tool batch. Clearing makes no model request; queued messages then
 use the fresh context. Previous context is saved privately in `sessions/clears/`.
 
+`/auto-oai-compact` toggles automatic OpenAI compaction for this agent; add `on`
+or `off` to set it explicitly. It defaults off and survives clears and restarts.
+On the API-key route, it compacts after the last reported input plus output usage
+exceeds 900,000 tokens, after pending tools finish. It preserves the transcript
+and archives the previous context in `sessions/compactions/`. A finished turn
+stays finished. Failure or interruption turns automatic compaction off so it
+cannot retry in a loop; enable it again to retry.
+
+Enabling on subscription credentials makes no change and no API-key request.
+If an enabled agent switches to subscription credentials, automatic compaction
+turns off when next due. The 900K threshold leaves 150K tokens in the configured
+GPT-6 Sol window, but newly added messages and tool results are not yet included
+in reported usage. Compaction itself still requires an input that fits the model
+window. See the [OpenAI compaction guide](https://developers.openai.com/api/docs/guides/compaction).
+
 Agents can call `prompt_user` for important questions. Blocking questions open
 a reply panel and mark the agent pane in red. Other questions collect behind
 the pane's Questions button, with a picker when several are open. Replies appear
