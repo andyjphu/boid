@@ -2790,6 +2790,16 @@ impl Hub {
         crate::blocking::run(|| {
             let mut permit = self.reserve_persistence(id, 2)?;
             let mut data = self.0.data.lock().unwrap();
+            let profile = data.sessions.get(id).and_then(|handle| {
+                handle
+                    .record
+                    .inputs
+                    .front()
+                    .filter(|input| {
+                        input.images.is_empty() && Session::is_auto_compaction_command(&input.text)
+                    })
+                    .map(|_| Self::effective_profile(&data, id, &handle.record.view.profile))
+            });
             let handle = data.sessions.get_mut(id).context("Unknown session.")?;
             if let Some(input) = handle.record.inputs.front().filter(|i| {
                 i.clear && !handle.record.paused && i.order > handle.record.stop_through
@@ -2808,6 +2818,7 @@ impl Hub {
             };
             let input = r.inputs.pop_front().unwrap();
             let cancelled = input.order <= r.stop_through;
+            let mut continue_work = !input.clear;
             if !cancelled {
                 let selected = if input.clear {
                     let notice = if input.text.trim() == "/clear-first-half" {
@@ -2821,6 +2832,11 @@ impl Hub {
                     vec![]
                 } else if input.compact {
                     session.request_compaction(active);
+                    vec![]
+                } else if let Some(profile) = &profile {
+                    let (notice, resume) = session.auto_compaction_command(&input.text, profile, active);
+                    continue_work = resume;
+                    r.view.entries.push(Self::make_entry("notice", notice));
                     vec![]
                 } else {
                     session.operator_with_images(input.text, id, &input.images)
@@ -2836,7 +2852,7 @@ impl Hub {
                 }
             }
             r.view.pending.retain(|p| p != &input.id);
-            Ok((!cancelled).then_some(!input.clear))
+            Ok((!cancelled).then_some(continue_work))
         })?;
             drop(data);
             Ok(event)
@@ -2919,7 +2935,11 @@ impl Hub {
                             let data = self.0.data.lock().unwrap();
                             let record = &data.sessions[&id].record;
                             record.inputs.front().is_some_and(|input| {
-                                input.order > record.stop_through && !input.compact && !input.clear
+                                input.order > record.stop_through
+                                    && !input.compact
+                                    && !input.clear
+                                    && !(input.images.is_empty()
+                                        && Session::is_auto_compaction_command(&input.text))
                             })
                         });
                         if needs_refresh {
