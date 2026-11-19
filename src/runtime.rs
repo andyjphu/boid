@@ -2809,11 +2809,23 @@ impl Hub {
     }
     fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
         crate::blocking::run(|| {
-            // Capture shared history briefly under the lock. Image copying and
-            // normalization happen outside it, before any target context change.
-            let mut copied = self.stage_context_copy(id);
             let mut permit = self.reserve_persistence(id, 2)?;
             let mut data = self.0.data.lock().unwrap();
+            let mut copied = if data
+                .sessions
+                .get(id)
+                .and_then(|handle| handle.record.inputs.front())
+                .is_some_and(|input| input.take_context.is_some())
+            {
+                // Only context copies need staging. Ordinary input keeps its
+                // existing lock path; image work never holds the shared lock.
+                drop(data);
+                let copied = self.stage_context_copy(id);
+                data = self.0.data.lock().unwrap();
+                copied
+            } else {
+                None
+            };
             let profile = data.sessions.get(id).and_then(|handle| {
                 handle
                     .record
