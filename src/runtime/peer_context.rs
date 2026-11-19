@@ -137,7 +137,8 @@ impl Hub {
                 return Ok(receipt.result(true));
             }
             let mut staged = session.clone();
-            let (removed, retained) = staged.clear_first_half();
+            let change = staged.edit_context(crate::session::ContextEdit::KeepRecentHalf);
+            let (removed, retained) = (change.removed, change.retained);
             if removed == 0 {
                 bail!("No older context can be removed without splitting the retained turn.");
             }

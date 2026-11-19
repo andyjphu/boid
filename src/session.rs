@@ -5,7 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+mod compaction;
+mod context;
+mod history;
 mod parallel;
+mod prompt;
+pub(crate) use context::ContextEdit;
+use history::ModelHistory;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
@@ -20,51 +26,6 @@ impl ContextUsage {
             input_tokens: usage["input_tokens"].as_u64()?,
             output_tokens: usage["output_tokens"].as_u64()?,
         })
-    }
-}
-
-// Completed model input items are immutable. Cloning a checkpoint shares their
-// payloads; appending, clearing, or compacting one history does not change another.
-// The serialized form remains the same JSON array used by existing records.
-#[derive(Default, Clone, Serialize)]
-#[serde(transparent)]
-struct ModelHistory(Vec<Arc<Value>>, #[serde(skip)] bool);
-impl<'de> Deserialize<'de> for ModelHistory {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let items = Vec::<Arc<Value>>::deserialize(deserializer)?;
-        let images = items.iter().any(|item| crate::images::has_refs(item));
-        Ok(Self(items, images))
-    }
-}
-impl ModelHistory {
-    fn push(&mut self, item: Value) {
-        self.1 |= crate::images::has_refs(&item);
-        self.0.push(Arc::new(item));
-    }
-    fn clear(&mut self) {
-        self.0.clear();
-        self.1 = false;
-    }
-}
-impl Extend<Value> for ModelHistory {
-    fn extend<T: IntoIterator<Item = Value>>(&mut self, items: T) {
-        for item in items {
-            self.push(item);
-        }
-    }
-}
-impl From<Vec<Value>> for ModelHistory {
-    fn from(items: Vec<Value>) -> Self {
-        let images = items.iter().any(crate::images::has_refs);
-        Self(items.into_iter().map(Arc::new).collect(), images)
-    }
-}
-impl std::ops::Deref for ModelHistory {
-    type Target = [Arc<Value>];
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
@@ -473,41 +434,6 @@ impl Session {
         entries
     }
 
-    pub(crate) fn cache_plan(&self) -> crate::request_context::cache::Plan {
-        crate::request_context::cache::Plan::new(
-            &self.history,
-            self.cache_boundary.as_ref(),
-            crate::request_context::cache::enabled(&self.model, &self.profile),
-        )
-    }
-    pub(crate) fn stable_instructions(&self) -> String {
-        format!(
-            "## Stable context\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
-            self.instructions,
-            tool_calls::PEER_TRACE_GUIDANCE,
-            crate::request_context::GUIDANCE,
-            parallel::GUIDANCE,
-            include_str!("TEAMWORK.md")
-        )
-    }
-
-    pub(crate) fn reload_system_prompt(&mut self) {
-        // Refresh the deployed base while retaining the current skill catalog.
-        let catalog = self
-            .skill_base
-            .as_ref()
-            .and_then(|base| self.instructions.strip_prefix(base))
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "\n{}",
-                    skills::catalog::prompt(&self.skills, 8000, &self.skill_warnings)
-                )
-            });
-        let base = include_str!("PRINCIPLES.md");
-        self.instructions = format!("{base}{catalog}");
-        self.skill_base = Some(base.into());
-    }
     pub fn user(&mut self, text: String) {
         self.history.push(json!({"role":"user","content":text}));
     }
@@ -520,42 +446,6 @@ impl Session {
                 tools.push(tool_calls::prompt_user_definition());
             }
         }
-    }
-    pub(crate) fn history_items(&self) -> &[Arc<Value>] {
-        &self.history
-    }
-    pub(crate) fn take_history(&mut self) -> Vec<Arc<Value>> {
-        std::mem::take(&mut self.history).0
-    }
-    pub(crate) fn restore_history(&mut self, items: Vec<Arc<Value>>) {
-        if self
-            .cache_boundary
-            .as_ref()
-            .is_some_and(|b| !b.valid(&items))
-        {
-            self.cache_boundary = None;
-        }
-        let images = items.iter().any(|item| crate::images::has_refs(item));
-        self.history = ModelHistory(items, images);
-    }
-    pub fn has_image_refs(&self) -> bool {
-        self.history.1
-    }
-    async fn provider_input(&self, hub: &Hub, id: &str) -> Result<Option<Vec<Arc<Value>>>> {
-        if !self.has_image_refs() {
-            return Ok(None);
-        }
-        let history = self.history.0.clone();
-        let store = hub.image_store();
-        let id = id.to_owned();
-        let permit = store.work_permit().await;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            store.materialize(&id, &history)
-        })
-        .await
-        .context("Image request preparation failed.")?
-        .map(Some)
     }
     pub fn operator(&mut self, text: String) -> Vec<Value> {
         self.operator_with_images(text, "", &[])
@@ -609,29 +499,6 @@ impl Session {
         }
         entries
     }
-    pub fn refresh_skills(&mut self, snapshot: skills::discovery::Snapshot) {
-        let Some(base) = self.skill_base.as_ref() else {
-            return;
-        };
-        let prompt = skills::catalog::prompt(&snapshot.skills, snapshot.budget, &snapshot.warnings);
-        let instructions = format!("{base}\n{prompt}");
-        if self.skills == snapshot.skills
-            && self.skill_warnings == snapshot.warnings
-            && self.instructions == instructions
-        {
-            return;
-        }
-        self.skills = snapshot.skills;
-        self.skill_snapshot = None;
-        self.skill_warnings = snapshot.warnings;
-        self.instructions = instructions;
-        let notice = format!(
-            "Skill catalog refreshed for this operator message. This replaces earlier skill availability and policy; previously loaded text is historical.\n{prompt}\nDiscovery warnings: {}",
-            json!(self.skill_warnings)
-        );
-        self.history
-            .push(json!({"role":"developer","content":notice}));
-    }
     pub fn request_count(&self) -> u64 {
         self.model_requests
     }
@@ -646,226 +513,6 @@ impl Session {
     }
     pub(crate) fn has_parallel_tools(&self) -> bool {
         !self.parallel_running.is_empty()
-    }
-    /// Remove approximately the older half by JSON text size, never splitting
-    /// a message or replaying an orphan function result. No token estimation call.
-    pub fn clear_first_half(&mut self) -> (usize, usize) {
-        fn size(value: &Value) -> usize {
-            match value {
-                Value::String(text) => text.len(),
-                Value::Array(items) => items.iter().map(size).sum(),
-                Value::Object(fields) => fields
-                    .iter()
-                    .map(|(key, value)| key.len() + size(value))
-                    .sum(),
-                _ => 8,
-            }
-        }
-        let history = self.take_history();
-        let total = history.len();
-        let target = history.iter().map(|item| size(item)).sum::<usize>() / 2;
-        let mut cut = 0;
-        let mut removed_size = 0;
-        while cut < total.saturating_sub(1) && removed_size < target {
-            removed_size += size(&history[cut]);
-            cut += 1;
-        }
-        // A retained call may need the reasoning from its original model output.
-        if history
-            .get(cut)
-            .is_some_and(|item| item["type"] == "function_call")
-        {
-            while cut > 0
-                && matches!(
-                    history[cut - 1]["type"].as_str(),
-                    Some("reasoning" | "function_call")
-                )
-            {
-                cut -= 1;
-            }
-        }
-        let mut calls = std::collections::BTreeSet::new();
-        let retained: Vec<_> = history
-            .into_iter()
-            .skip(cut)
-            .filter(|item| {
-                if item["type"] == "function_call" {
-                    if let Some(id) = item["call_id"].as_str() {
-                        calls.insert(id.to_owned());
-                    }
-                }
-                item["type"] != "function_call_output"
-                    || item["call_id"]
-                        .as_str()
-                        .is_some_and(|id| calls.contains(id))
-            })
-            .collect();
-        let count = retained.len();
-        self.clear_context();
-        self.restore_history(retained);
-        (total - count, count)
-    }
-
-    pub fn clear_context(&mut self) {
-        self.history.clear();
-        self.cache_boundary = None;
-        self.partial_text.clear();
-        self.context_usage = None;
-        self.compact_requested = false;
-        self.compact_resume = false;
-        self.compact_in_flight = false;
-        self.compact_automatic = false;
-        self.request_in_flight = false;
-    }
-    pub fn is_auto_compaction_command(text: &str) -> bool {
-        text.split_whitespace().next() == Some("/auto-oai-compact")
-    }
-    pub fn auto_compaction_command(
-        &mut self,
-        text: &str,
-        profile: &Value,
-        active: bool,
-    ) -> (String, bool) {
-        let words: Vec<_> = text.split_whitespace().collect();
-        let enabled = match words.as_slice() {
-            ["/auto-oai-compact"] => !self.auto_oai_compact,
-            ["/auto-oai-compact", "on"] => true,
-            ["/auto-oai-compact", "off"] => false,
-            _ => return ("Use /auto-oai-compact [on|off].".into(), active),
-        };
-        if enabled && profile["billing_route"] == "chatgpt" {
-            return ("Automatic OpenAI compaction is unavailable on subscription credentials. No change or API-key request was made.".into(), active);
-        }
-        self.auto_oai_compact = enabled;
-        if !enabled && self.compact_automatic && self.compact_requested {
-            self.compact_requested = false;
-            self.compact_automatic = false;
-            // A queued automatic compaction can be the only reason the worker
-            // is active. Turning it off must not start an idle model turn.
-            let resume = self.compact_resume;
-            self.compact_resume = false;
-            return ("Automatic compaction is off.".into(), resume);
-        }
-        if enabled && self.auto_compaction_due() {
-            self.request_compaction(active);
-            self.compact_automatic = true;
-        }
-        (
-            if enabled {
-                "Automatic compaction is on above 900,000 context tokens.".into()
-            } else {
-                "Automatic compaction is off.".into()
-            },
-            active || self.compact_requested,
-        )
-    }
-    fn auto_compaction_due(&self) -> bool {
-        self.auto_oai_compact
-            && !self.compact_requested
-            && self.pending.is_empty()
-            && self.context_usage.as_ref().is_some_and(|usage| {
-                usage.input_tokens.saturating_add(usage.output_tokens) > 900_000
-            })
-    }
-    fn schedule_auto_compaction(&mut self, hub: &Hub, id: &str, resume: bool) -> Result<()> {
-        if !self.auto_compaction_due() {
-            return Ok(());
-        }
-        // Resolve the current pane credential only when compaction is due.
-        self.refresh_request_profile(hub, id)?;
-        if self.profile["billing_route"] == "chatgpt" {
-            self.auto_oai_compact = false;
-            hub.checkpoint_entries(id, self, vec![("notice".into(),
-                "Automatic compaction is off: subscription credentials do not support it. No API-key request was made.".into())])?;
-        } else {
-            self.request_compaction(resume);
-            self.compact_automatic = true;
-        }
-        Ok(())
-    }
-    pub fn request_compaction(&mut self, resume: bool) {
-        if !self.compact_requested {
-            self.compact_resume = resume;
-        }
-        self.compact_requested = true;
-    }
-    async fn compact(&mut self, client: &Client, hub: &Hub, id: &str) -> Result<bool> {
-        let resume = self.compact_resume;
-        let automatic = self.compact_automatic;
-        self.compact_requested = false;
-        self.compact_resume = false;
-        self.compact_in_flight = true;
-        self.model_requests += 1;
-        hub.checkpoint_entries(
-            id,
-            self,
-            vec![("notice".into(), "Compacting context…".into())],
-        )?;
-        hub.archive_context(id, self.model_requests)?;
-        // Compact conversation history, not a temporary roster snapshot. The
-        // working note is stored separately and survives the returned window.
-        let instructions = format!("{}\n\n{}", self.stable_instructions(), hub.identity(id)?);
-        let result = async {
-            let materialized = self.provider_input(hub, id).await?;
-            let input = materialized.as_deref().unwrap_or(&self.history);
-            let mut result = client
-                .compact(input, &self.model, &instructions, &self.profile)
-                .await?;
-            let encoded_images = result["output"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(crate::images::has_data_images));
-            if encoded_images {
-                let store = hub.image_store();
-                let id = id.to_owned();
-                let permit = store.work_permit().await;
-                result = tokio::task::spawn_blocking(move || -> Result<Value> {
-                    let _permit = permit;
-                    store.retain_compaction_images(
-                        &id,
-                        result["output"]
-                            .as_array_mut()
-                            .context("Missing compaction window.")?,
-                    )?;
-                    Ok(result)
-                })
-                .await
-                .context("Cannot retain compacted images.")??;
-            }
-            Ok::<_, anyhow::Error>(result)
-        }
-        .await;
-        self.compact_in_flight = false;
-        self.compact_automatic = false;
-        let (kind, notice) = match result {
-            Ok(result) => {
-                // The whole returned window is canonical, including retained messages.
-                self.cache_boundary = None;
-                self.history = result["output"].as_array().unwrap().clone().into();
-                self.context_usage = None;
-                (
-                    "notice",
-                    "Context compacted. The transcript is unchanged.".to_owned(),
-                )
-            }
-            Err(error) => {
-                let suffix = if automatic {
-                    self.auto_oai_compact = false;
-                    "\nAutomatic compaction is off; use /auto-oai-compact on to retry."
-                } else {
-                    ""
-                };
-                (
-                    "error",
-                    format!("Compaction failed; previous context retained: {error:#}{suffix}"),
-                )
-            }
-        };
-        if resume {
-            self.history
-                .push(json!({"role":"developer","content":notice}));
-        }
-        hub.checkpoint_entries(id, self, vec![(kind.into(), notice)])?;
-        Ok(resume)
     }
     fn refresh_request_profile(&mut self, hub: &Hub, id: &str) -> Result<()> {
         self.profile = hub.profile(id)?;
