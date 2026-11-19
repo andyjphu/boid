@@ -39,6 +39,12 @@ async fn screen_membership_filters_streams_and_survives_restart_without_changing
     ));
     assert!(hub.screen_event(&json!({"type":"closed","session_id":second.id}), Some(1)));
     let before = serde_json::to_value(hub.view(&second.id)).unwrap();
+    let named = hub.rename_screen(2, "  stuff stuff  ").unwrap();
+    assert_eq!(named["names"]["2"], "stuff stuff");
+    assert_eq!(hub.rename_screen(2, "stuff stuff").unwrap(), named);
+    assert!(hub.rename_screen(99, "missing").is_err());
+    assert!(hub.rename_screen(2, "two\nlines").is_err());
+    assert!(hub.rename_screen(2, &"a".repeat(81)).is_err());
     hub.move_pane(&format!("agent:{}", second.id), 1).unwrap();
     assert_eq!(serde_json::to_value(hub.view(&second.id)).unwrap(), before);
     assert!(hub.move_pane(&format!("agent:{}", second.id), 99).is_err());
@@ -55,6 +61,8 @@ async fn screen_membership_filters_streams_and_survives_restart_without_changing
     drop(hub);
     let restored = Hub::open(Client::test_client(), dir.path().into()).unwrap();
     assert_eq!(restored.screens(), saved);
+    assert_eq!(restored.screens()["names"]["2"], "stuff stuff");
+    assert_eq!(restored.rename_screen(2, " ").unwrap()["names"], json!({}));
     assert_eq!(
         restored.subscribe_screen(true, Some(2)).0["sessions"][0]["id"],
         second.id

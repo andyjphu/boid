@@ -116,7 +116,25 @@ const view = id => ({ id, name: id, cwd: '/mock/home', status: 'idle', pending: 
     assert.equal(await page.locator('.session-history input').count(),0);await page.locator('.session-history .session-card[data-session-id="b"]').click();await frames();
     assert.equal(await tab('agent:b').getAttribute('aria-selected'),'true');
     // Close the original group key while another tab remains: the group and other sessions survive.
-    await tab('agent:a').click();await tab('agent:a').getByRole('button',{name:'Close a',exact:true}).click();await frames();
+    assert.equal(await tab('agent:a').locator('.pane-close').count(), 0);
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      readText: async () => 'pasted text', writeText: async text => { window.copiedText = text; },
+    }}));
+    await tab('agent:a').click({button:'right'});
+    await page.getByRole('menuitem', {name:'Paste', exact:true}).click();
+    await page.waitForFunction(() => sessions.get('a').input.value.includes('pasted text'));
+    assert.equal(posts.length, 1, 'context-menu paste must not submit a message');
+    await input('a').evaluate(field => { field.select(); });
+    const selection = await input('a').inputValue();
+    await input('a').click({button:'right'});
+    await page.getByRole('menuitem', {name:'Copy', exact:true}).click();
+    assert.equal(await page.evaluate(() => copiedText), selection);
+    await tab('agent:a').click({button:'right'}); await page.keyboard.press('Escape');
+    assert.equal(await page.getByRole('menu').count(), 0);
+    assert.ok(agents.some(agent => agent.id === 'a'), 'dismissing is not closing');
+    await tab('agent:a').click({button:'right'});
+    if(process.env.SCREENSHOT)await page.screenshot({path:process.env.SCREENSHOT.replace('.png','-menu.png')});
+    await page.getByRole('menuitem',{name:'Close agent',exact:true}).click();await frames();
     assert.equal(await group('agent:a').count(),1);assert.ok((await order('agent:a')).includes('agent:b'));
     for(let i=0;i<7;i++){await group('agent:a').locator('.subpane-add').click();await page.waitForFunction(()=>!paneGroups.get('agent:a').plus.disabled);await frames();}
     await page.setViewportSize({width:390,height:850});await frames();

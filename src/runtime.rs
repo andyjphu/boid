@@ -356,8 +356,10 @@ struct Screens {
     groups_revision: u64,
     #[serde(default)]
     revision: u64,
-    // Stable IDs are never reused. Labels are ordinals over nonremoved IDs.
+    // Stable IDs are never reused. Unnamed windows use visible ordinals.
     count: u32,
+    #[serde(default)]
+    names: BTreeMap<u32, String>,
     #[serde(default)]
     removed: BTreeSet<u32>,
     panes: BTreeMap<String, u32>,
@@ -369,6 +371,7 @@ impl Default for Screens {
             groups: BTreeMap::new(),
             groups_revision: 0,
             count: 1,
+            names: BTreeMap::new(),
             removed: BTreeSet::new(),
             panes: BTreeMap::new(),
         }

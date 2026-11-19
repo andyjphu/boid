@@ -452,6 +452,96 @@ function uiFromTarget(target) {
   const group = paneGroups.get(target.closest('.pane-group')?.dataset.paneKey);
   return ui || subpanes.get(group?.record.active);
 }
+let agentContextMenu = null;
+function dismissAgentContextMenu(restoreFocus = false) {
+  if (!agentContextMenu) return;
+  const { menu, previousFocus } = agentContextMenu;
+  agentContextMenu = null; menu.remove();
+  if (restoreFocus && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+}
+async function pasteIntoAgent(ui, field, start, end) {
+  const original = field.value;
+  let text = '', files = [];
+  if (navigator.clipboard?.read) {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      if (item.types.includes('text/plain')) text += await (await item.getType('text/plain')).text();
+      const type = item.types.find(type => type.startsWith('image/'));
+      if (type && field === ui.input) files.push(new File([await item.getType(type)], 'clipboard-image', { type }));
+    }
+  } else if (navigator.clipboard?.readText) text = await navigator.clipboard.readText();
+  else throw new Error('Use Cmd+V or Ctrl+V to paste in the message field.');
+  if (sessions.get(ui.id) !== ui || !field.isConnected) return;
+  if (ui.inactive) selectSubpane(ui);
+  field.focus({ preventScroll: true });
+  if (text) {
+    if (field.value !== original) { start = field.selectionStart; end = field.selectionEnd; }
+    field.setRangeText(text, start, end, 'end');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if (files.length) {
+    const data = new DataTransfer();
+    for (const file of files) data.items.add(file);
+    pasteComposerImages(ui, { clipboardData: data, preventDefault() {} });
+  }
+}
+document.addEventListener('contextmenu', event => {
+  dismissAgentContextMenu();
+  if (event.defaultPrevented || event.target.closest('a, .credential-overlay, dialog')) return;
+  const ui = uiFromTarget(event.target);
+  if (!ui?.input || !sessions.has(ui.id)) return;
+  event.preventDefault();
+  const field = event.target.closest('input, textarea');
+  const range = window.getSelection();
+  const text = field && typeof field.selectionStart === 'number'
+    ? field.value.slice(field.selectionStart, field.selectionEnd)
+    : range?.anchorNode && ui.pane.contains(range.anchorNode) ? range.toString() : '';
+  const pasteField = field || ui.input;
+  const start = pasteField.selectionStart, end = pasteField.selectionEnd;
+  const menu = element('div', 'context-menu'); menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Agent actions');
+  const previousFocus = document.activeElement;
+  function action(label, run, disabled = false) {
+    const button = element('button', '', label); button.type = 'button';
+    button.setAttribute('role', 'menuitem'); button.disabled = disabled;
+    button.onclick = async () => {
+      dismissAgentContextMenu();
+      try { await run(); }
+      catch (error) { showError(ui.pane.isConnected ? ui.error : workspaceError, error); }
+    };
+    menu.append(button); return button;
+  }
+  action('Copy', async () => {
+    if (!navigator.clipboard?.writeText) throw new Error('Use Cmd+C or Ctrl+C to copy the selection.');
+    await navigator.clipboard.writeText(text);
+  }, !text);
+  action('Paste', () => pasteIntoAgent(ui, pasteField, start, end), pasteField.disabled || pasteField.readOnly);
+  action('Close agent', () => ui.closeAgent(), ui.closing).classList.add('context-menu-separated');
+  menu.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault(); dismissAgentContextMenu(true); return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = [...menu.querySelectorAll('button:not(:disabled)')];
+    const current = buttons.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (current + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  });
+  agentContextMenu = { menu, previousFocus };
+  document.body.append(menu);
+  menu.style.left = `${Math.max(0, Math.min(event.clientX, innerWidth - menu.offsetWidth))}px`;
+  menu.style.top = `${Math.max(0, Math.min(event.clientY, innerHeight - menu.offsetHeight))}px`;
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+});
+document.addEventListener('pointerdown', event => {
+  if (agentContextMenu && !agentContextMenu.menu.contains(event.target)) dismissAgentContextMenu();
+}, true);
+window.addEventListener('blur', () => dismissAgentContextMenu());
+window.addEventListener('resize', () => dismissAgentContextMenu());
+window.addEventListener('scroll', () => dismissAgentContextMenu());
 function renderPaneGroup(group) {
   const live = group.record.tabs.map(key => subpanes.get(key)).filter(ui => ui?.group === group);
   const active = live.find(ui => ui.pane.dataset.paneKey === group.record.active) || live[0];
@@ -576,6 +666,7 @@ function attachSubpane(ui) {
   renderPaneGroup(group);
 }
 function detachSubpane(ui, moving = false) {
+  dismissAgentContextMenu();
   const group = ui.group, key = ui.pane.dataset.paneKey;
   const wasSelected = selected === ui.pane;
   if (!group) { ui.pane.remove(); return; }
@@ -838,6 +929,48 @@ async function pruneEmptyScreen(number) {
   catch (error) { showError(workspaceError, error); }
   finally { screenRemovals.delete(number); }
 }
+function screenLabel(number) {
+  return screenCatalog.names?.[number] || String(screenNumbers().indexOf(number) + 1);
+}
+function editScreenName(link, number) {
+  if (link.querySelector('input') || !screenExists(number)) return;
+  const original = screenLabel(number);
+  const href = link.getAttribute('href');
+  const input = element('input', 'screen-name-input');
+  input.type = 'text'; input.value = original; input.maxLength = 80;
+  input.setAttribute('aria-label', 'Window name');
+  input.autocomplete = 'off'; input.spellcheck = false;
+  const size = () => { input.size = Math.max(6, Math.min(24, input.value.length + 1)); };
+  size(); input.addEventListener('input', size);
+  let finished = false;
+  async function finish(save, focus = false) {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    input.disabled = true;
+    try {
+      if (save && name !== original && screenExists(number)) {
+        receiveScreens(await request(`/api/screens/${number}`, 'PATCH', { name }));
+      }
+    } catch (error) { showError(workspaceError, error); }
+    finally {
+      link.classList.remove('editing');
+      link.setAttribute('href', href);
+      link.textContent = screenLabel(number);
+      if (focus && link.isConnected && (document.activeElement === document.body || document.activeElement === input)) link.focus({ preventScroll: true });
+    }
+  }
+  input.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.isComposing) return;
+    if (event.key === 'Enter' || event.key === 'Escape') {
+      event.preventDefault(); finish(event.key === 'Enter', true);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+  link.removeAttribute('href'); link.classList.add('editing'); link.replaceChildren(input);
+  input.focus({ preventScroll: true }); input.select();
+}
 function renderScreens() {
   const wanted = new Set();
   for (const [index, number] of screenNumbers().entries()) {
@@ -850,8 +983,13 @@ function renderScreens() {
       const url = new URL(location.href); url.searchParams.set("screen", id); url.hash = "";
       link.href = url.pathname + url.search;
       link.addEventListener("click", event => {
+        if (event.target.closest('input')) return;
         if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault(); switchScreen(number);
+      });
+      link.addEventListener('dblclick', event => {
+        if (event.target.closest('input')) return;
+        event.preventDefault(); editScreenName(link, number);
       });
       link.addEventListener("dragover", event => {
         if (!event.dataTransfer.types.includes("application/x-boid-pane") || paneDrag?.screen === number) return;
@@ -871,8 +1009,8 @@ function renderScreens() {
       });
       screensNav.insertBefore(link, addScreenButton);
     }
-    link.textContent = String(index + 1);
-    link.setAttribute("aria-label", `Screen ${index + 1}`);
+    if (!link.querySelector('input')) link.textContent = screenLabel(number);
+    link.setAttribute("aria-label", screenCatalog.names?.[number] || `Screen ${index + 1}`);
     if (number === activeScreen) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
@@ -1487,13 +1625,16 @@ function makePane(name, cwd, kind, id) {
   const error = element("p", "error-banner");
   error.setAttribute("role", "alert");
   error.hidden = true;
-  const close = element("button", "pane-close");
-  close.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
-  close.type = "button";
-  close.setAttribute("aria-label", `Close ${name}`);
-  close.setAttribute("aria-description", kind === "agent" ? "End and close this agent" : "End and close this terminal");
+  const close = kind === 'terminal' ? element("button", "pane-close") : null;
+  if (close) {
+    close.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
+    close.type = "button";
+    close.setAttribute("aria-label", `Close ${name}`);
+    close.setAttribute("aria-description", "End and close this terminal");
+  }
   directory.hidden = true;
-  tab.append(paneIcon(kind), title, close);
+  tab.append(paneIcon(kind), title);
+  if (close) tab.append(close);
   tab.draggable = true;
   const ui = { pane, header, tab, title, status, directory, error, close };
   attachSubpane(ui);
@@ -1508,7 +1649,7 @@ function enablePaneRename(ui, kind) {
     ui.name = name || ui.id;
     ui.title.textContent = ui.name;
     ui.pane.setAttribute("aria-label", ui.name);
-    ui.close.setAttribute("aria-label", `Close ${ui.name}`);
+    ui.close?.setAttribute("aria-label", `Close ${ui.name}`);
     if (ui.view) ui.view.name = ui.name;
     if (ui.input) ui.input.setAttribute("aria-label", `Message ${ui.name}`);
   };
@@ -2262,14 +2403,16 @@ function addSession(view) {
   });
   traceResize.observe(ui.trace);
   ui.traceResize = traceResize;
-  ui.close.addEventListener("click", async () => {
-    ui.close.disabled = true;
+  ui.closeAgent = async () => {
+    if (ui.closing || !sessions.has(id)) return;
+    ui.closing = true;
     try {
       const result = await request(`/api/sessions/${encodeURIComponent(id)}`, "DELETE");
       reportUnsavedEnd(result);
       if (sessions.has(id)) removeSession(ui);
-    } catch (error) { showError(ui.error, error); ui.close.disabled = false; }
-  });
+    } catch (error) { showError(ui.error, error); }
+    finally { ui.closing = false; }
+  };
   ui.input.addEventListener("keydown", event => {
     if (!event.isComposing && !ui.slashSuggestion.hidden && !event.ctrlKey && !event.metaKey && !event.altKey) {
       if (["Escape", "ArrowUp", "ArrowDown"].includes(event.key)) {
@@ -3866,6 +4009,7 @@ async function initialize() {
   }
 }
 document.addEventListener("pointerdown", event => {
+  if (event.button) return;
   rememberDiagnosticsAgent(event.target);
   const ui = uiFromTarget(event.target);
   if (ui?.inactive) selectSubpane(ui);
@@ -3882,7 +4026,7 @@ document.addEventListener("focusin", event => {
 document.addEventListener("keydown", event => {
   if (event.key !== "Tab" || event.defaultPrevented || event.isComposing
       || event.ctrlKey || event.metaKey || event.altKey) return;
-  if (imagePreview?.open || credentialMode || diagnosticsDialog.open || sessionHistory.open
+  if (agentContextMenu || imagePreview?.open || credentialMode || diagnosticsDialog.open || sessionHistory.open
       || document.querySelector("#plan-welcome").open) return;
   const current = [...sessions.values()].find(ui => ui.pane === selected);
   if (!current || !current.modelPicker.hidden || !current.skillPicker.hidden) return;
