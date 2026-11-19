@@ -23,6 +23,8 @@ use archive::ArchivedReceipt;
 mod agent_colors;
 mod context_export;
 mod context_take;
+mod input;
+use input::Input;
 mod peer_context;
 mod role_context;
 pub use role_context::RoleContextPatch;
@@ -167,20 +169,6 @@ pub struct Create {
     pub cwd: String,
     #[serde(default)]
     pub message: String,
-}
-#[derive(Clone, Serialize, Deserialize)]
-struct Input {
-    id: String,
-    text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    images: Vec<crate::images::Image>,
-    order: u64,
-    #[serde(default)]
-    compact: bool,
-    #[serde(default)]
-    clear: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    take_context: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Peer {
@@ -2147,17 +2135,13 @@ impl Hub {
                         r.version = r.version.max(11);
                     }
                     r.order += 1;
-                    r.inputs.push_back(Input {
-                        id: message_id.clone(),
-                        compact: images.is_empty() && text.trim() == "/oai-compact",
-                        clear: images.is_empty()
-                            && (take_context.is_some()
-                                || matches!(text.trim(), "/clear" | "/clear-first-half")),
-                        take_context,
+                    r.inputs.push_back(Input::new(
+                        message_id.clone(),
                         text,
                         images,
-                        order: r.order,
-                    });
+                        r.order,
+                        take_context,
+                    ));
                     r.view.entries.push(entry.clone());
                     r.view.pending.push(message_id.clone());
                     r.paused = false;
@@ -2807,120 +2791,6 @@ impl Hub {
         })
         .unwrap()
     }
-    fn next_input(&self, id: &str, session: &mut Session, active: bool) -> Result<Option<bool>> {
-        crate::blocking::run(|| {
-            let mut permit = self.reserve_persistence(id, 2)?;
-            let mut data = self.0.data.lock().unwrap();
-            let mut copied = if data
-                .sessions
-                .get(id)
-                .and_then(|handle| handle.record.inputs.front())
-                .is_some_and(|input| input.take_context.is_some())
-            {
-                // Only context copies need staging. Ordinary input keeps its
-                // existing lock path; image work never holds the shared lock.
-                drop(data);
-                let copied = self.stage_context_copy(id);
-                data = self.0.data.lock().unwrap();
-                copied
-            } else {
-                None
-            };
-            let profile = data.sessions.get(id).and_then(|handle| {
-                handle
-                    .record
-                    .inputs
-                    .front()
-                    .filter(|input| {
-                        input.images.is_empty() && Session::is_auto_compaction_command(&input.text)
-                    })
-                    .map(|_| Self::effective_profile(&data, id, &handle.record.view.profile))
-            });
-            let handle = data.sessions.get_mut(id).context("Unknown session.")?;
-            if let Some(input) = handle.record.inputs.front().filter(|i| {
-                i.clear
-                    && !handle.record.paused
-                    && i.order > handle.record.stop_through
-                    && (i.take_context.is_none()
-                        || copied
-                            .as_ref()
-                            .is_some_and(|(key, result)| key == &i.id && result.is_ok()))
-            }) {
-                handle.persistence.enqueue_reserved(
-                    Operation::Clear(input.id.clone(), Box::new(handle.record.clone())),
-                    &mut permit,
-                )?;
-            }
-            let (event, _) = self.update_locked(&mut data, id, Some(&mut permit), |r| {
-            let Some(input) = r.inputs.front() else {
-                return Ok(None);
-            };
-            if r.paused && input.order > r.stop_through {
-                return Ok(None);
-            };
-            let input = r.inputs.pop_front().unwrap();
-            let cancelled = input.order <= r.stop_through;
-            let mut continue_work = !input.clear;
-            if !cancelled {
-                let selected = if input.images.is_empty() && input.text.trim() == "/reload" {
-                    session.reload_system_prompt();
-                    continue_work = active;
-                    r.view.entries.push(Self::make_entry("notice", "System prompt reloaded.".into()));
-                    vec![]
-                } else if input.take_context.is_some() {
-                    let result = copied.take().filter(|(key, _)| key == &input.id)
-                        .map(|(_, result)| result)
-                        .unwrap_or_else(|| Err(anyhow::anyhow!("Context source is unavailable.")));
-                    match result {
-                        Ok(copy) => {
-                            session.clear_context();
-                            session.restore_history(copy.history);
-                            r.view.entries.push(Self::make_entry("notice", format!("Context taken from {}.", copy.name)));
-                        }
-                        Err(error) => {
-                            continue_work = active;
-                            r.view.entries.push(Self::make_entry("error", format!("Context unchanged: {error:#}")));
-                        }
-                    }
-                    vec![]
-                } else if input.clear {
-                    let notice = if input.text.trim() == "/clear-first-half" {
-                        let (removed, retained) = session.clear_first_half();
-                        format!("Older context cleared: {removed} items removed, {retained} retained. Transcript and role context preserved.")
-                    } else {
-                        session.clear_context();
-                        "Context cleared. The transcript is retained; new messages start a fresh conversation.".into()
-                    };
-                    r.view.entries.push(Self::make_entry("notice", notice));
-                    vec![]
-                } else if input.compact {
-                    session.request_compaction(active);
-                    vec![]
-                } else if let Some(profile) = &profile {
-                    let (notice, resume) = session.auto_compaction_command(&input.text, profile, active);
-                    continue_work = resume;
-                    r.view.entries.push(Self::make_entry("notice", notice));
-                    vec![]
-                } else {
-                    session.operator_with_images(input.text, id, &input.images)
-                };
-                for text in selected {
-                    r.view
-                        .entries
-                        .push(Self::make_entry("skill", text.to_string()));
-                }
-                r.engine = session.clone();
-                if let Some(entry) = r.view.entries.iter_mut().find(|entry| entry.id == input.id) {
-                    entry.input_batch = Some(session.next_input_batch());
-                }
-            }
-            r.view.pending.retain(|p| p != &input.id);
-            Ok((!cancelled).then_some(continue_work))
-        })?;
-            drop(data);
-            Ok(event)
-        })
-    }
     async fn worker(
         &self,
         id: String,
@@ -2998,12 +2868,7 @@ impl Hub {
                             let data = self.0.data.lock().unwrap();
                             let record = &data.sessions[&id].record;
                             record.inputs.front().is_some_and(|input| {
-                                input.order > record.stop_through
-                                    && !input.compact
-                                    && !input.clear
-                                    && !(input.images.is_empty()
-                                        && (Session::is_auto_compaction_command(&input.text)
-                                            || input.text.trim() == "/reload"))
+                                input.order > record.stop_through && input.refreshes_skills()
                             })
                         });
                         if needs_refresh {

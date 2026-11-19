@@ -9,6 +9,8 @@ improve with experience and make effective use of agents working together.
 on harness overhead.
 [Context blocks](docs/context-blocks.md) separate stable guidance, current peer
 status, and each agent's editable working note.
+[Context and agent state](docs/context-and-agent-state.md) explains where to add
+memory and identity edits without changing execution ownership.
 
 [Usage diagnostics](docs/diagnostics.md) are sunset and hidden. Their accounting
 is not currently reliable; the existing components remain for a later revisit,
