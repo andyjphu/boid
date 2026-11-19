@@ -356,6 +356,10 @@ a { color: #b4c8dc; text-underline-offset: 3px; }
 #screens a:hover, #screens button:hover, #screens a.drop-target { color: #fff; background: #373737; }
 #screens a.drop-target { color: #101820; background: #8bafd0; box-shadow: inset 0 0 0 2px #d8eaff; }
 #screens a:focus-visible { outline: 1px solid #777; outline-offset: -2px; }
+#screens a { display: block; align-content: center; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#screens a.editing { padding: 0 3px; }
+#screens .screen-name-input { display: block; min-width: 0; max-width: 100%; height: 22px; padding: 0 2px 2px;
+  border: 0; border-radius: 0; outline: 1px solid #777; outline-offset: -1px; background: #181818; color: #ddd; font: inherit; }
 body.disconnected #screens { opacity: .45; }
 
 /* A pane owns an ordered tab strip; each tab keeps its session DOM and connection. */

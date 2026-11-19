@@ -2,6 +2,39 @@
 use super::*;
 
 impl Hub {
+    pub fn rename_screen(&self, screen: u32, name: &str) -> Result<Value> {
+        let name = name.trim();
+        if name.chars().count() > 80 || name.chars().any(char::is_control) {
+            bail!("Window names must be at most 80 characters on one line.");
+        }
+        crate::blocking::run(|| {
+            let mut data = self.0.data.lock().unwrap();
+            data.screens.validate(screen)?;
+            if data
+                .screens
+                .names
+                .get(&screen)
+                .map(String::as_str)
+                .unwrap_or("")
+                == name
+            {
+                return Ok(json!(data.screens));
+            }
+            let mut next = data.screens.clone();
+            if name.is_empty() {
+                next.names.remove(&screen);
+            } else {
+                next.names.insert(screen, name.to_owned());
+            }
+            next.revision += 1;
+            self.0.store.save_screens(&next)?;
+            data.screens = next;
+            let result = json!(data.screens);
+            self.emit(&mut data, json!({"type":"screens","screens":result}));
+            Ok(result)
+        })
+    }
+
     pub fn remove_empty_screen(&self, screen: u32) -> Result<Value> {
         crate::blocking::run(|| {
             let mut data = self.0.data.lock().unwrap();
@@ -35,6 +68,7 @@ impl Hub {
             }
             let mut next = data.screens.clone();
             next.removed.insert(screen);
+            next.names.remove(&screen);
             next.panes.retain(|_, assigned| *assigned != screen);
             let groups_before = next.groups.len();
             next.groups.retain(|_, group| group.screen != screen);

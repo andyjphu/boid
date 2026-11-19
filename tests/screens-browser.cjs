@@ -42,6 +42,13 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
         const { pane, screen } = route.request().postDataJSON(); screens.panes[pane] = screen; screens.revision++;
         await emit({ type: 'screens', screens: {...screens,moved_pane:pane} }); return route.fulfill({ json: {...screens,moved_pane:pane} });
       }
+      if (/^\/api\/screens\/\d+$/.test(url.pathname) && method === 'PATCH') {
+        const id = url.pathname.split('/').at(-1), { name } = route.request().postDataJSON();
+        screens.names ||= {};
+        if (name) screens.names[id] = name; else delete screens.names[id];
+        screens.revision++; await emit({ type: 'screens', screens });
+        return route.fulfill({ json: screens });
+      }
       if (url.pathname.endsWith('/messages') && method === 'POST') {
         await new Promise(resolve => { releaseMessage = resolve; });
         return route.fulfill({ json: { status: 'queued' } });
@@ -114,6 +121,26 @@ const view = id => ({ id, name: id, cwd: '/tmp', status: 'idle', pending: [], en
     await other.goto('http://boid.test/?screen=1'); await ready(other, 1);
     assert.deepEqual(await keys(other), ['agent:a', 'agent:b', 'terminal:t']);
     assert.deepEqual(await keys(page), ['agent:second', 'terminal:second-terminal']);
+    const label = page.locator('#screens [data-screen="2"]');
+    await label.dblclick();
+    const nameInput = page.getByRole('textbox', { name: 'Window name', exact: true });
+    await nameInput.fill('stuff stuff');
+    // An unrelated catalog update must not erase an in-progress edit.
+    await emit({ type: 'screens', screens });
+    assert.equal(await nameInput.inputValue(), 'stuff stuff');
+    await nameInput.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#screens [data-screen="2"]').textContent === 'stuff stuff');
+    assert.equal(await other.locator('#screens [data-screen="2"]').innerText(), 'stuff stuff');
+    await page.reload(); await ready(page, 2);
+    assert.equal(await label.innerText(), 'stuff stuff');
+    await label.dblclick(); await nameInput.fill('cancel this'); await nameInput.press('Escape');
+    assert.equal(await label.innerText(), 'stuff stuff');
+    await label.dblclick(); await nameInput.fill('<b>plain text</b>');
+    await page.locator('#workspace').click({ position: { x: 2, y: 2 } });
+    await page.waitForFunction(() => document.querySelector('#screens [data-screen="2"]').textContent === '<b>plain text</b>');
+    assert.equal(await label.locator('b').count(), 0);
+    await label.dblclick(); await nameInput.fill(''); await nameInput.press('Enter');
+    await page.waitForFunction(() => document.querySelector('#screens [data-screen="2"]').textContent === '2');
     // The selected screen is not shared across windows, but membership is.
     await other.locator('#add-screen').click(); await ready(other, 3);
     await page.waitForFunction(() => screenCatalog.count === 3);

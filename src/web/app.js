@@ -838,6 +838,48 @@ async function pruneEmptyScreen(number) {
   catch (error) { showError(workspaceError, error); }
   finally { screenRemovals.delete(number); }
 }
+function screenLabel(number) {
+  return screenCatalog.names?.[number] || String(screenNumbers().indexOf(number) + 1);
+}
+function editScreenName(link, number) {
+  if (link.querySelector('input') || !screenExists(number)) return;
+  const original = screenLabel(number);
+  const href = link.getAttribute('href');
+  const input = element('input', 'screen-name-input');
+  input.type = 'text'; input.value = original; input.maxLength = 80;
+  input.setAttribute('aria-label', 'Window name');
+  input.autocomplete = 'off'; input.spellcheck = false;
+  const size = () => { input.size = Math.max(6, Math.min(24, input.value.length + 1)); };
+  size(); input.addEventListener('input', size);
+  let finished = false;
+  async function finish(save, focus = false) {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    input.disabled = true;
+    try {
+      if (save && name !== original && screenExists(number)) {
+        receiveScreens(await request(`/api/screens/${number}`, 'PATCH', { name }));
+      }
+    } catch (error) { showError(workspaceError, error); }
+    finally {
+      link.classList.remove('editing');
+      link.setAttribute('href', href);
+      link.textContent = screenLabel(number);
+      if (focus && link.isConnected && (document.activeElement === document.body || document.activeElement === input)) link.focus({ preventScroll: true });
+    }
+  }
+  input.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.isComposing) return;
+    if (event.key === 'Enter' || event.key === 'Escape') {
+      event.preventDefault(); finish(event.key === 'Enter', true);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+  link.removeAttribute('href'); link.classList.add('editing'); link.replaceChildren(input);
+  input.focus({ preventScroll: true }); input.select();
+}
 function renderScreens() {
   const wanted = new Set();
   for (const [index, number] of screenNumbers().entries()) {
@@ -850,8 +892,13 @@ function renderScreens() {
       const url = new URL(location.href); url.searchParams.set("screen", id); url.hash = "";
       link.href = url.pathname + url.search;
       link.addEventListener("click", event => {
+        if (event.target.closest('input')) return;
         if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault(); switchScreen(number);
+      });
+      link.addEventListener('dblclick', event => {
+        if (event.target.closest('input')) return;
+        event.preventDefault(); editScreenName(link, number);
       });
       link.addEventListener("dragover", event => {
         if (!event.dataTransfer.types.includes("application/x-boid-pane") || paneDrag?.screen === number) return;
@@ -871,8 +918,8 @@ function renderScreens() {
       });
       screensNav.insertBefore(link, addScreenButton);
     }
-    link.textContent = String(index + 1);
-    link.setAttribute("aria-label", `Screen ${index + 1}`);
+    if (!link.querySelector('input')) link.textContent = screenLabel(number);
+    link.setAttribute("aria-label", screenCatalog.names?.[number] || `Screen ${index + 1}`);
     if (number === activeScreen) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
