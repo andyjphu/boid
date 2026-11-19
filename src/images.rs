@@ -217,6 +217,55 @@ impl ImageStore {
             })
             .collect()
     }
+    // Transfer only referenced blobs and rewrite their owner. Text and opaque
+    // provider items remain shared. Called outside the session-state mutex.
+    pub fn copy_references(
+        &self,
+        source: &str,
+        target: &str,
+        input: &[Arc<Value>],
+    ) -> Result<Vec<Arc<Value>>> {
+        let mut copied = BTreeMap::new();
+        input
+            .iter()
+            .map(|item| {
+                if !has_refs(item) {
+                    return Ok(item.clone());
+                }
+                let mut item = (**item).clone();
+                for part in item
+                    .get_mut("content")
+                    .and_then(Value::as_array_mut)
+                    .into_iter()
+                    .flatten()
+                {
+                    if part["type"] != "input_image" {
+                        continue;
+                    }
+                    let Some(reference) = part["image_url"]
+                        .as_str()
+                        .and_then(|url| url.strip_prefix(REFERENCE))
+                    else {
+                        continue;
+                    };
+                    let (owner, id) = reference
+                        .split_once('/')
+                        .context("Invalid saved image reference.")?;
+                    ensure!(
+                        owner == source,
+                        "Image reference belongs to another session."
+                    );
+                    if !copied.contains_key(id) {
+                        let (metadata, bytes) = self.read(source, id)?;
+                        let image = self.put(target, &metadata.mime_type, bytes.as_slice())?;
+                        copied.insert(id.to_owned(), Self::reference(target, &image));
+                    }
+                    part["image_url"] = json!(copied[id]);
+                }
+                Ok(Arc::new(item))
+            })
+            .collect()
+    }
     // Replace only the transport encoding in the provider's canonical window.
     pub fn retain_compaction_images(&self, session: &str, output: &mut [Value]) -> Result<()> {
         for item in output {

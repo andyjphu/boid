@@ -156,6 +156,7 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         )
         .route("/api/sessions/{id}/history", get(history))
         .route("/api/sessions/{id}/skills", get(skill_catalog))
+        .route("/api/sessions/{id}/context-peers", get(context_peers))
         .route("/api/sessions/{id}/models", get(session_models))
         .route("/api/sessions/{id}/model", post(session_model))
         .route("/api/sessions/{id}/fast", post(session_fast))
@@ -357,6 +358,9 @@ async fn sessions(State(app): State<App>, Query(query): Query<EventsQuery>) -> J
     } else {
         json!(app.hub.views())
     })
+}
+async fn context_peers(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    app.hub.context_peers(&id).map(Json).map_err(invalid)
 }
 async fn archived_sessions(
     State(app): State<App>,

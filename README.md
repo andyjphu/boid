@@ -107,6 +107,22 @@ using the same operation as the `oai_compact` tool. Both wait for the current
 response and tool batch. Clearing makes no model request; queued messages then
 use the fresh context. Previous context is saved privately in `sessions/clears/`.
 
+`/take-context` opens a peer picker. Selecting a peer replaces this agent's
+conversation context with a copy of the peer's committed context when the
+command is applied, after this agent's current response and tools finish.
+The source keeps working unchanged. Both transcripts remain intact, and the
+recipient's prior context is saved in `sessions/clears/`. Identity, role,
+credentials, model, and settings remain the recipient's own. The copy does not
+start inference or replay peer tools. Source calls without a result at capture
+are explicitly marked unavailable; in-flight partial output and queued messages
+are excluded. Referenced images are copied too. Scripts can submit
+`/take-context AGENT_ID` or an unambiguous one-word name as an ordinary message.
+
+`/reload` refreshes this agent's saved base instructions from the running Boid
+version. Conversation, role, model, credentials, and the current skill catalog
+stay intact. It waits for the current response/tool batch and does not start a
+model request. It does not rebuild Boid or refresh plugins/MCP connections.
+
 `/auto-oai-compact` toggles automatic OpenAI compaction for this agent; add `on`
 or `off` to set it explicitly. It defaults off and survives clears and restarts.
 On the API-key route, it compacts after the last reported input plus output usage

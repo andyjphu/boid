@@ -1966,6 +1966,7 @@ async function openSkillPicker(ui) {
   ui.composer.hidden = true;
   ui.modelPicker.hidden = true;
   ui.skillPicker.hidden = false;
+  ui.skillPicker.setAttribute("aria-label", "Select skill");
   clearPromptSpaceWhenHidden(ui);
   updateActivity(ui);
   ui.skillPicker.replaceChildren(element("div", "model-hint", "Loading skills…"));
@@ -2005,6 +2006,46 @@ async function openSkillPicker(ui) {
     ui.skillPicker.append(element("div", "model-hint", "Enter select · Esc back"));
     render();
     filter.focus({ preventScroll: true });
+  } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
+}
+
+async function openContextPicker(ui) {
+  const generation = ui.skillRequest = (ui.skillRequest || 0) + 1;
+  const current = () => sessions.get(ui.id) === ui && ui.skillRequest === generation && !ui.skillPicker.hidden;
+  ui.slashSuggestion.hidden = true;
+  ui.composer.hidden = true;
+  ui.modelPicker.hidden = true;
+  ui.skillPicker.hidden = false;
+  ui.skillPicker.setAttribute("aria-label", "Take context");
+  clearPromptSpaceWhenHidden(ui); updateActivity(ui);
+  ui.skillPicker.replaceChildren(element("div", "model-hint", "Loading…"));
+  ui.skillPicker.focus({ preventScroll: true });
+  try {
+    const { peers } = await request(`/api/sessions/${encodeURIComponent(ui.id)}/context-peers`);
+    if (!current()) return;
+    const filter = element("input", "skill-filter");
+    filter.placeholder = "Find an agent…";
+    filter.setAttribute("aria-label", "Find an agent");
+    const choices = element("div", "skill-options");
+    const render = () => {
+      choices.replaceChildren();
+      for (const peer of peers.filter(peer => peer.name.toLowerCase().includes(filter.value.toLowerCase()))) {
+        const duplicate = peers.some(other => other.id !== peer.id && other.name === peer.name);
+        const option = element("button", "skill-option", peer.name + (duplicate ? ` (${peer.id.slice(0, 6)})` : ""));
+        option.type = "button";
+        option.addEventListener("click", () => {
+          ui.input.value = `/take-context ${peer.id}`;
+          ui.input.dispatchEvent(new Event("input", { bubbles: true }));
+          closeSkillPicker(ui);
+          ui.composer.requestSubmit();
+        });
+        choices.append(option);
+      }
+      if (!choices.children.length) choices.append(element("div", "model-hint", "No peers."));
+    };
+    filter.addEventListener("input", render);
+    ui.skillPicker.replaceChildren(element("div", "model-heading", "Take context"), filter, choices);
+    render(); filter.focus({ preventScroll: true });
   } catch (error) { if (current()) { closeSkillPicker(ui); showError(ui.error, error); } }
 }
 
@@ -2369,6 +2410,8 @@ function addSession(view) {
       "/skills": "/skills  Select a skill",
       "/oai-compact": "/oai-compact  Compact OpenAI context",
       "/auto-oai-compact": "/auto-oai-compact  Toggle compaction above 900K",
+      "/take-context": "/take-context  Copy a peer's context",
+      "/reload": "/reload  Refresh system prompt",
       "/clear": "/clear  Start fresh model context",
       "/clear-first-half": "/clear-first-half  Remove older half of context",
       "/eject-context": "/eject-context  Export context to a file",
@@ -2478,6 +2521,13 @@ function addSession(view) {
       historyIndex = null;
       resizeInput();
       await openSkillPicker(ui);
+      return;
+    }
+    if (!ui.messageState.images.length && (text.trim() === "/take-context" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/take-context"))) {
+      ui.input.value = "";
+      historyIndex = null;
+      resizeInput();
+      await openContextPicker(ui);
       return;
     }
     if (!ui.messageState.images.length && (text.trim() === "/model" || (!ui.slashSuggestion.hidden && ui.slashCommand === "/model"))) {
