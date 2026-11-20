@@ -874,7 +874,12 @@ async fn take_context_waits_for_recipient_tools_preserves_archive_and_survives_r
             .contains(&format!("xenops ({})", target.id))
     );
     assert!(!copied["history"].to_string().contains("Old recipient task"));
-    assert_eq!(engine(&hub, &source.id), original_source);
+    // Skill snapshot publication can finish independently after an agent becomes idle.
+    let mut source_after = engine(&hub, &source.id);
+    let mut source_before = original_source.clone();
+    source_after.as_object_mut().unwrap().remove("skill_snapshot");
+    source_before.as_object_mut().unwrap().remove("skill_snapshot");
+    assert_eq!(source_after, source_before);
     assert_eq!(hub.profile(&target.id).unwrap(), profile);
     assert!(mock.requests.try_recv().is_err());
     flush_recording(&hub, &target.id).unwrap();
