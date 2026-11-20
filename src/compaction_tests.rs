@@ -906,7 +906,11 @@ async fn take_context_waits_for_recipient_tools_preserves_archive_and_survives_r
             .iter()
             .any(|e| e.text.as_str() == "Old recipient task")
     );
+    let checkpoint = flush_recording(&hub, &target.id).unwrap().unwrap();
+    assert_eq!(checkpoint.version, 11);
     hub.shutdown().await;
+    // Reopen an actual v11 checkpoint, not only a v10 file plus journal events.
+    hub.0.store.save(&target.id, &checkpoint).unwrap();
     drop(hub);
     let hub = Hub::open(
         Client::test_client_at(mock.endpoint.clone()),
