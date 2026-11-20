@@ -8,11 +8,13 @@ mod runtime;
 mod server;
 mod session;
 mod session_store;
+mod site_config;
 mod skills;
 mod startup;
 mod terminal;
 mod tool_calls;
 mod usage;
+mod wiki;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -29,6 +31,8 @@ boid \"task\" starts or connects to the shared server and returns a new session 
 The server owns execution; closing a submitting command or browser leaves it running.
 
 Server: use /login in the web composer to choose API or subscription access.
+DEFAULT_SYSTEM_PROMPT_ADDR and KB_ADDR are required (environment or ~/.config/boid/config.ini).
+The authenticated knowledge-base viewer is served at /wiki/.
 OPENAI_API_KEY is optional; BOID_AUTH_ROUTE initializes the saved default.
 BOID_MODEL defaults to gpt-6-sol with medium reasoning on the API-key route.
 BOID_CYBER_ACCESS_PROGRAM defaults to daybreak_blue.

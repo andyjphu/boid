@@ -13,7 +13,7 @@ impl Session {
         )
     }
 
-    pub(crate) fn reload_system_prompt(&mut self) {
+    pub(crate) fn reload_system_prompt(&mut self, base: &str) {
         // Refresh the deployed base while retaining the current skill catalog.
         let catalog = self
             .skill_base
@@ -26,7 +26,6 @@ impl Session {
                     skills::catalog::prompt(&self.skills, 8000, &self.skill_warnings)
                 )
             });
-        let base = include_str!("../PRINCIPLES.md");
         self.instructions = format!("{base}{catalog}");
         self.skill_base = Some(base.into());
     }

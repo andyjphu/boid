@@ -168,6 +168,8 @@ mod tests {
         let hub = Hub::new(client).unwrap();
         let token = "fixture-browser-token-not-a-provider-key".to_owned();
         let app = App {
+            wiki_root: None,
+            wiki_source: None,
             hub: hub.clone(),
             auth: Some(auth),
             token: Arc::new(token.clone()),

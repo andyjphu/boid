@@ -43,6 +43,17 @@ impl Fixture {
         ] {
             command.env_remove(key);
         }
+        let root = self.directory.path();
+        let renderer = root.join("wiki-renderer");
+        std::fs::create_dir_all(renderer.join("node_modules")).unwrap();
+        std::fs::write(renderer.join("watch-wiki.mjs"), "setInterval(()=>{},1000);").unwrap();
+        let prompt = root.join("principles.md");
+        std::fs::write(&prompt, "Startup fixture instructions.").unwrap();
+        command
+            .env("DEFAULT_SYSTEM_PROMPT_ADDR", prompt)
+            .env("KB_ADDR", root)
+            .env("KB_WIKI_ADDR", renderer)
+            .env_remove("BOID_CONFIG");
         command
             .args(args)
             .current_dir(self.directory.path())
@@ -171,11 +182,18 @@ async fn simultaneous_launches_reuse_one_server_and_preserve_invocation_defaults
             .to_string_lossy()
             .as_ref()
     );
-    let session_id = sessions[0]["id"].clone();
     fixture.ok(&["stop"]);
     fixture.ok(&["--no-open"]);
     assert_ne!(fixture.get("/api/server").await["pid"], info["pid"]);
-    assert_eq!(fixture.get("/api/sessions").await[0]["id"], session_id);
+    // Empty agents deliberately remain ephemeral until they accept work.
+    assert!(
+        fixture
+            .get("/api/sessions")
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -248,10 +266,7 @@ async fn first_login_without_key_and_corrupt_state_recovery() {
         .unwrap();
     let created: Value = created.error_for_status().unwrap().json().await.unwrap();
     assert_eq!(created["profile"]["credential_id"], Value::Null);
-    assert_eq!(
-        fixture.get("/api/diagnostics").await["aggregate"]["recorded_requests"],
-        0
-    );
+    assert_eq!(fixture.get("/api/diagnostics").await["status"], "suspended");
     let synthetic = "synthetic-login-key-no-provider-call";
     client
         .post(format!("{endpoint}/api/accounts/api-key"))

@@ -321,6 +321,8 @@ struct Delta {
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
 struct Inner {
+    prompt_path: Option<PathBuf>,
+    default_prompt: String,
     data: Mutex<Data>,
     // Cancellation must not queue behind a session save holding `data`.
     interrupts: Mutex<BTreeMap<String, watch::Sender<()>>>,
@@ -510,7 +512,23 @@ impl Hub {
     pub fn open(client: Client, state_dir: PathBuf) -> Result<Self> {
         Self::with_store(client, SessionStore::open(state_dir)?)
     }
+    pub fn open_with_prompt(
+        client: Client,
+        state_dir: PathBuf,
+        path: PathBuf,
+        text: String,
+    ) -> Result<Self> {
+        Self::with_store_prompt(client, SessionStore::open(state_dir)?, Some(path), text)
+    }
     fn with_store(client: Client, store: SessionStore) -> Result<Self> {
+        Self::with_store_prompt(client, store, None, include_str!("PRINCIPLES.md").into())
+    }
+    fn with_store_prompt(
+        client: Client,
+        store: SessionStore,
+        prompt_path: Option<PathBuf>,
+        default_prompt: String,
+    ) -> Result<Self> {
         crate::blocking::run(|| {
             let agent_names: Vec<String> = serde_json::from_str(include_str!("agent-names.json"))
                 .context("Cannot read bundled agent names.")?;
@@ -540,6 +558,8 @@ impl Hub {
                 store.state_directory().map(|root| root.join("skills")),
             );
             let hub = Self(Arc::new(Inner {
+                prompt_path,
+                default_prompt,
                 agent_names,
                 interrupts: Mutex::new(BTreeMap::new()),
                 data: Mutex::new(Data {
@@ -1770,7 +1790,7 @@ impl Hub {
                 identity.clone(),
             );
             engine.skills = skills;
-            engine.skill_base = Some(include_str!("PRINCIPLES.md").into());
+            engine.skill_base = Some(self.0.default_prompt.clone());
             engine.instructions = format!(
                 "{}\n{}",
                 engine.skill_base.as_ref().unwrap(),

@@ -205,3 +205,5 @@ agent's composer, left to right and then down the rows, wrapping at the end.
 **Shift+Tab** moves backward. Drafts stay in their original panes. Terminal
 panes and inactive tabs are skipped; dialogs and other form fields keep their
 normal keyboard behavior. Tab takes precedence over slash-command completion.
+
+Knowledge-base viewer setup: [docs/wiki.md](docs/wiki.md).
