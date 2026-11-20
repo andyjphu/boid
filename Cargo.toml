@@ -1,6 +1,6 @@
 [package]
 name = "boid"
-version = "1.1.58"
+version = "1.1.59"
 edition = "2024"
 rust-version = "1.89"
 publish = false
@@ -23,7 +23,7 @@ sha2 = "0.10"
 serde_yaml = "0.9"
 thiserror = "2"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25.1"
 uuid = { version = "1", features = ["v4"] }

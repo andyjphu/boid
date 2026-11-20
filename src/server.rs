@@ -38,6 +38,8 @@ mod image_routes;
 #[derive(Clone)]
 struct App {
     hub: Hub,
+    wiki_root: Option<Arc<PathBuf>>,
+    wiki_source: Option<Arc<PathBuf>>,
     token: Arc<String>,
     shutdown: Arc<Notify>,
     auth: Option<Arc<crate::chatgpt::Auth>>,
@@ -97,9 +99,17 @@ fn ensure_token() -> Result<String> {
     Ok(token)
 }
 pub async fn serve() -> Result<()> {
-    serve_client(Client::new()?).await
+    let site = crate::site_config::SiteConfig::load()?;
+    serve_configured(Client::new()?, Some(site)).await
 }
+#[cfg(test)]
 pub(crate) async fn serve_client(client: Client) -> Result<()> {
+    serve_configured(client, None).await
+}
+async fn serve_configured(
+    client: Client,
+    site: Option<crate::site_config::SiteConfig>,
+) -> Result<()> {
     let address = std::env::var("BOID_LISTEN").unwrap_or_else(|_| "127.0.0.1:7734".into());
     let listener = tokio::net::TcpListener::bind(&address).await.context("Cannot bind Boid server. The default port permits one server; connect to the running server instead of starting another.")?;
     let token = ensure_token()?;
@@ -109,11 +119,28 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         .to_path_buf();
     let auth = client.auth.clone();
     let api_key_available = client.key_available();
-    let hub = Hub::open(client, state_dir.clone())?;
+    let hub = match &site {
+        Some(config) => Hub::open_with_prompt(
+            client,
+            state_dir.clone(),
+            config.prompt_path.clone(),
+            config.prompt.clone(),
+        )?,
+        None => Hub::open(client, state_dir.clone())?,
+    };
+    let (mut wiki_builder, wiki_root) = match &site {
+        Some(config) => {
+            let (builder, root) = crate::wiki::Builder::start(config, &state_dir)?;
+            (Some(builder), Some(Arc::new(root)))
+        }
+        None => (None, None),
+    };
     let browser_auth = crate::browser_auth::BrowserAuth::open(state_dir.clone(), token.clone())?;
     let terminals = TerminalHub::open(std::env::current_dir()?, state_dir, hub.clone())?;
     let shutdown = Arc::new(Notify::new());
     let app = App {
+        wiki_root,
+        wiki_source: site.as_ref().map(|s| Arc::new(s.kb.clone())),
         hub: hub.clone(),
         token: Arc::new(token.clone()),
         shutdown: shutdown.clone(),
@@ -122,6 +149,13 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         browser_auth: browser_auth.clone(),
     };
     let protected = Router::new()
+        .route("/wiki", get(|| async { Redirect::temporary("/wiki/") }))
+        .route("/wiki/", get(wiki_index))
+        .route(
+            "/wiki/api/document",
+            get(wiki_document).put(wiki_save_document),
+        )
+        .route("/wiki/{*path}", get(wiki_file))
         .merge(credential_routes::routes())
         .merge(image_routes::routes())
         .route("/api/login", post(login))
@@ -196,11 +230,50 @@ pub(crate) async fn serve_client(client: Client) -> Result<()> {
         _ = terminate() => Ok(()),
         _ = shutdown.notified() => Ok(()),
     };
+    if let Some(builder) = &mut wiki_builder {
+        builder.stop().await;
+    }
     hub.shutdown().await;
     let terminal_result = terminals.shutdown().await;
     result?;
     terminal_result?;
     Ok(())
+}
+async fn wiki_index(State(app): State<App>) -> Response {
+    match &app.wiki_root {
+        Some(root) => crate::wiki::serve(root, "").await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+async fn wiki_file(State(app): State<App>, Path(path): Path<String>) -> Response {
+    match &app.wiki_root {
+        Some(root) => crate::wiki::serve(root, &path).await,
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+#[derive(Deserialize)]
+struct WikiQuery {
+    slug: String,
+}
+async fn wiki_document(State(app): State<App>, Query(query): Query<WikiQuery>) -> Response {
+    match (&app.wiki_root, &app.wiki_source) {
+        (Some(root), Some(source)) => {
+            crate::wiki::document(root.clone(), source.clone(), query.slug, None).await
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+async fn wiki_save_document(
+    State(app): State<App>,
+    Query(query): Query<WikiQuery>,
+    Json(edit): Json<crate::wiki::Edit>,
+) -> Response {
+    match (&app.wiki_root, &app.wiki_source) {
+        (Some(root), Some(source)) => {
+            crate::wiki::document(root.clone(), source.clone(), query.slug, Some(edit)).await
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 async fn server_info() -> Json<Value> {
     Json(json!({"application":"boid", "protocol":1,

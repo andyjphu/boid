@@ -1,0 +1,4 @@
+[submodule "kb-wiki"]
+	path = kb-wiki
+	url = https://github.com/andyjphu/kb-wiki.git
+	branch = boid-wiki

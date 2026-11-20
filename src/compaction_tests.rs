@@ -1062,7 +1062,7 @@ async fn reload_refreshes_base_without_clearing_history_or_starting_inference() 
     session.skill_base = Some("old base".into());
     session.user("Retain this conversation".into());
     let before = serde_json::to_value(&session).unwrap();
-    session.reload_system_prompt();
+    session.reload_system_prompt(include_str!("PRINCIPLES.md"));
     let after = serde_json::to_value(&session).unwrap();
     assert_eq!(after["history"], before["history"]);
     assert_eq!(after["skill_base"], include_str!("PRINCIPLES.md"));

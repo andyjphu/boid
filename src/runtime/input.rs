@@ -96,6 +96,22 @@ impl Hub {
         crate::blocking::run(|| {
             let mut permit = self.reserve_persistence(id, 2)?;
             let mut data = self.0.data.lock().unwrap();
+            let reload = if data
+                .sessions
+                .get(id)
+                .and_then(|h| h.record.inputs.front())
+                .is_some_and(|i| i.kind() == InputKind::Reload)
+            {
+                drop(data);
+                let prompt = match &self.0.prompt_path {
+                    Some(path) => crate::site_config::read_prompt(path),
+                    None => Ok(self.0.default_prompt.clone()),
+                };
+                data = self.0.data.lock().unwrap();
+                Some(prompt)
+            } else {
+                None
+            };
             let mut copied = if data
                 .sessions
                 .get(id)
@@ -147,9 +163,12 @@ impl Hub {
             if !cancelled {
                 let selected = match input.kind() {
                     InputKind::Reload => {
-                        session.reload_system_prompt();
+                        match reload.as_ref() {
+                            Some(Ok(base)) => {session.reload_system_prompt(base); r.view.entries.push(Self::make_entry("notice", "System prompt reloaded.".into()));},
+                            Some(Err(error)) => r.view.entries.push(Self::make_entry("notice", format!("System prompt was not changed: {error:#}"))),
+                            None => r.view.entries.push(Self::make_entry("notice", "System prompt was not changed; retry /reload.".into())),
+                        }
                         continue_work = active;
-                        r.view.entries.push(Self::make_entry("notice", "System prompt reloaded.".into()));
                         vec![]
                     }
                     InputKind::TakeContext => {
